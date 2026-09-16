@@ -276,6 +276,12 @@ class FakeLark:
     def history_for(self, code: str):
         return history_for(self.records, code)
 
+    def read_history(self, code: str):
+        """Read record history through the real client so the audit sees it."""
+
+        self.client.list_records("app-token", "tbl-runs")
+        return history_for(self.records, code)
+
     # The worker only needs this create-only surface, so the double speaks it.
     def create_execution(self, fields: dict[str, Any]) -> str:
         return self._gateway.create_execution(fields)
