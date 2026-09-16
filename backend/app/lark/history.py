@@ -200,10 +200,9 @@ def _snapshot_attachments(snapshot: Any) -> list[dict[str, Any]]:
     return [item for item in attachments if isinstance(item, dict)]
 
 
-@router.get("/lark/check")
-def lark_check(
-    client: Annotated[LarkClient, Depends(get_lark_client)],
-) -> dict[str, Any]:
+def read_lark_state(client: LarkClient) -> dict[str, Any]:
+    """Read the real Lark names and field types, never secrets."""
+
     read_errors: list[str] = []
     for name, value in (
         ("LARK_APP_ID", settings.lark_app_id),
@@ -225,6 +224,7 @@ def lark_check(
         "required_bug_fields": sorted(REQUIRED_BUG_FIELD_TYPES),
         "schema_errors": [],
         "schema_fingerprint": None,
+        "target_fingerprint": None,
         "read_errors": read_errors,
     }
     if read_errors:
@@ -246,22 +246,52 @@ def lark_check(
 
     schema_errors = missing_required_fields(run_fields, REQUIRED_RUN_FIELD_TYPES)
     schema_errors += missing_required_fields(bug_fields, REQUIRED_BUG_FIELD_TYPES)
+    schema_fingerprint_value = (
+        None
+        if schema_errors
+        else f"{schema_fingerprint(run_fields)}||{schema_fingerprint(bug_fields)}"
+    )
+    base_name = (base.get("app") or {}).get("name")
+    execution_table_name = (run_table.get("table") or {}).get("name")
+    bug_table_name = (bug_table.get("table") or {}).get("name")
     payload.update(
         {
-            "base_name": (base.get("app") or {}).get("name"),
-            "execution_table_name": (run_table.get("table") or {}).get("name"),
-            "bug_table_name": (bug_table.get("table") or {}).get("name"),
+            "base_name": base_name,
+            "execution_table_name": execution_table_name,
+            "bug_table_name": bug_table_name,
             "execution_fields": describe_fields(run_fields),
             "bug_fields": describe_fields(bug_fields),
             "schema_errors": schema_errors,
-            "schema_fingerprint": (
+            "schema_fingerprint": schema_fingerprint_value,
+            # Identity is part of the approval: renaming or re-pointing a table
+            # must invalidate consent even when the field layout is unchanged.
+            "target_fingerprint": (
                 None
-                if schema_errors
-                else f"{schema_fingerprint(run_fields)}||{schema_fingerprint(bug_fields)}"
+                if schema_fingerprint_value is None
+                else "|".join(
+                    str(part)
+                    for part in (
+                        settings.lark_app_token,
+                        settings.lark_table_runs,
+                        base_name,
+                        execution_table_name,
+                        settings.lark_bug_app_token,
+                        settings.lark_table_defects,
+                        bug_table_name,
+                        schema_fingerprint_value,
+                    )
+                )
             ),
         }
     )
     return payload
+
+
+@router.get("/lark/check")
+def lark_check(
+    client: Annotated[LarkClient, Depends(get_lark_client)],
+) -> dict[str, Any]:
+    return read_lark_state(client)
 
 
 @router.get("/lark/history/{history_ref_id}/attachments/{index}")

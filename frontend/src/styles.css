@@ -76,6 +76,13 @@ table { width: 100%; border-collapse: collapse; font-size: .8rem; } th { color: 
 .progress-pips { display: inline-flex; gap: 4px; }.progress-pips .pip { min-width: 22px; padding: 2px 6px; border-radius: 4px; font-size: .7rem; font-weight: 800; text-align: center; }.progress-pips .passed { color: #1c6b45; background: #e2f2e9; }.progress-pips .failed { color: #a23b36; background: #fbe7e5; }.progress-pips .skipped { color: #7a6320; background: #fdf1d5; }
 .reports-layout { max-width: 820px; }.report-panel { padding: 22px; background: #fff; border: 1px solid #dfe3e5; border-radius: 8px; }.report-summary { color: #5b6469; font-size: .84rem; line-height: 1.6; }
 .report-actions { display: flex; flex-wrap: wrap; gap: 10px; }.report-actions a { text-decoration: none; }
+.lark-check-layout { max-width: 900px; }.lark-panel { margin-bottom: 16px; padding: 18px 20px; background: #fff; border: 1px solid #dfe3e5; border-radius: 8px; }
+.lark-healthy { color: #a23b36; }.inline-status.saved { color: #1c6b45; }
+.lark-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); gap: 6px 18px; margin: 12px 0; padding: 0; }
+.lark-facts dt { color: #7c858a; font-size: .7rem; font-weight: 800; }.lark-facts dd { margin: 4px 0 0; font-weight: 700; }
+.lark-fields { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; color: #5b6469; font-size: .78rem; }.lark-field { padding: 2px 8px; background: #f3f5f5; border-radius: 999px; font-size: .72rem; }
+.lark-consent { display: flex; align-items: center; gap: 9px; margin: 14px 0 12px; font-weight: 700; }.lark-consent input { width: auto; min-height: auto; }
+.sync-badge { padding: 3px 9px; border-radius: 999px; font-size: .72rem; font-weight: 700; }.sync-badge.confirmed { color: #1c6b45; background: #e2f2e9; }.sync-badge.unconfirmed { color: #8a6206; background: #fdf1d5; }
 .spin { animation: spin .9s linear infinite; } @keyframes spin { to { transform: rotate(360deg); } }
 @media (max-width: 720px) {
   .topbar { height: auto; grid-template-columns: 1fr auto; padding: 12px 14px 0; }.topbar nav { grid-row: 2; grid-column: 1 / -1; height: 46px; }.account span { display: none; }.main-content { padding: 18px 12px; }.workspace-section { min-height: calc(100vh - 130px); }.groups-layout { grid-template-columns: 1fr; }.group-index, .case-index { min-height: auto; }.case-index { min-height: 360px; }.mapping-grid { grid-template-columns: 1fr; }.upload-list { grid-template-columns: 1fr; }.section-heading { align-items: flex-end; }.case-table-wrap { max-height: 55vh; }.preview-table-wrap table { min-width: 420px; }

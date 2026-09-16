@@ -72,6 +72,67 @@ export type Screenshot = {
   created_at: string;
 };
 
+export type LarkCheck = {
+  base_name: string | null;
+  execution_table_name: string | null;
+  bug_table_name: string | null;
+  execution_fields: Record<string, string>;
+  bug_fields: Record<string, string>;
+  required_execution_fields: string[];
+  required_bug_fields: string[];
+  schema_errors: string[];
+  read_errors: string[];
+  schema_fingerprint: string | null;
+  target_fingerprint: string | null;
+};
+
+export type LarkConfirmation = {
+  group_id: string;
+  base_token: string;
+  execution_table_id: string;
+  bug_table_id: string;
+  base_name: string;
+  execution_table_name: string;
+  bug_table_name: string;
+  schema_fingerprint: string;
+  target_fingerprint: string;
+  confirmed_at: string;
+  valid: boolean;
+};
+
+export type LarkConfirmationState = {
+  confirmed: boolean;
+  confirmation: LarkConfirmation | null;
+  current: {
+    base_token: string | null;
+    execution_table_id: string | null;
+    bug_table_id: string | null;
+    base_name: string | null;
+    execution_table_name: string | null;
+    bug_table_name: string | null;
+    schema_fingerprint: string | null;
+    target_fingerprint: string | null;
+    schema_errors: string[];
+    read_errors: string[];
+  };
+};
+
+export type SyncStatus = {
+  confirmed: boolean;
+  queued: number;
+  pending_attempts: number;
+  detail: string;
+};
+
+export type LarkConfirmPayload = {
+  base_token: string;
+  execution_table_id: string;
+  bug_table_id: string;
+  schema_fingerprint: string;
+  target_fingerprint: string;
+  allow_writes: boolean;
+};
+
 export class ApiError extends Error {
   constructor(public status: number, message: string) {
     super(message);
@@ -168,5 +229,15 @@ export const api = {
   },
   screenshotUrl: (screenshotId: string) => `/api/screenshots/${screenshotId}`,
   reportUrl: (groupId: string, format: "csv" | "xlsx") =>
-    `/api/groups/${groupId}/reports.${format}`
+    `/api/groups/${groupId}/reports.${format}`,
+  larkCheck: () => request<LarkCheck>("/api/lark/check"),
+  larkConfirmation: (groupId: string) =>
+    request<LarkConfirmationState>(`/api/groups/${groupId}/lark/confirmation`),
+  confirmLark: (groupId: string, payload: LarkConfirmPayload) =>
+    mutation<LarkConfirmation>(`/api/groups/${groupId}/lark/confirm`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    }),
+  syncStatus: (groupId: string) => request<SyncStatus>(`/api/groups/${groupId}/sync`)
 };

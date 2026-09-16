@@ -302,9 +302,11 @@ def lark_fake(monkeypatch) -> FakeLark:
         lark_table_defects="tbl-defects",
     )
     monkeypatch.setattr(lark_client_module, "global_settings", configured)
+    import app.lark.confirmation as lark_confirmation
     import app.lark.history as lark_history
 
     monkeypatch.setattr(lark_history, "settings", configured)
+    monkeypatch.setattr(lark_confirmation, "settings", configured)
     previous = app.dependency_overrides.get(get_lark_client)
     app.dependency_overrides[get_lark_client] = lambda: fake.client
     try:
@@ -337,6 +339,18 @@ def history_ref(db_session, imported_group) -> LarkHistoryRef:
     db_session.add(reference)
     db_session.commit()
     return reference
+
+
+@pytest.fixture
+def known_table_names() -> dict[str, str]:
+    return {
+        "base_name": "旧版测试管理",
+        "execution_table_name": "执行记录",
+        "bug_table_name": "缺陷记录",
+        "base_token": "app-token",
+        "execution_table_id": "tbl-runs",
+        "bug_table_id": "tbl-defects",
+    }
 
 
 @pytest.fixture

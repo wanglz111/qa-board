@@ -8,7 +8,8 @@ import type {
   GroupCase,
   GroupProgress,
   Screenshot,
-  SubmitPayload
+  SubmitPayload,
+  SyncStatus
 } from "../api";
 import { CaseDetail } from "../components/CaseDetail";
 import { GroupSelector } from "../components/GroupSelector";
@@ -31,6 +32,7 @@ type Props = {
   reserveRetest?: (groupId: string, code: string) => Promise<Attempt>;
   commitReserved?: (attemptId: string, payload: SubmitPayload) => Promise<Attempt>;
   uploadScreenshot?: (attemptId: string, file: File) => Promise<Screenshot>;
+  loadSync?: (groupId: string) => Promise<SyncStatus>;
   initialGroupId?: string;
 };
 
@@ -59,6 +61,7 @@ export function ExecutionView({
   reserveRetest,
   commitReserved,
   uploadScreenshot,
+  loadSync,
   initialGroupId
 }: Props) {
   const [groups, setGroups] = useState<Group[]>([]);
@@ -75,6 +78,7 @@ export function ExecutionView({
   const [reserved, setReserved] = useState<Attempt | null>(null);
   const [failure, setFailure] = useState("");
   const [lastAttemptId, setLastAttemptId] = useState<string | null>(null);
+  const [sync, setSync] = useState<SyncStatus | null>(null);
   const caseRequest = useRef(0);
   const deskRef = useRef<HTMLDivElement>(null);
   const formRef = useRef<OutcomeFormHandle>(null);
@@ -108,10 +112,12 @@ export function ExecutionView({
     setImages([]);
     setStatus(null);
     setFailure("");
+    setSync(null);
     setLoadingCase(true);
     void loadProgress(groupId)
       .then((stats) => setProgress((current) => ({ ...current, [groupId]: stats })))
       .catch(() => undefined);
+    void loadSync?.(groupId).then(setSync).catch(() => undefined);
     try {
       const result = await loadCases(groupId);
       if (requestId !== caseRequest.current) return;
@@ -187,6 +193,7 @@ export function ExecutionView({
       setReserved(null);
       setAttempts(await loadAttempts(selectedGroupId, current.code));
       await refreshProgress(selectedGroupId);
+      void loadSync?.(selectedGroupId).then(setSync).catch(() => undefined);
       const uploaded = await uploadAll(saved.id, images);
       setStatus(
         uploaded
@@ -326,6 +333,13 @@ export function ExecutionView({
             <div className="outcome-panel">
               <div className="outcome-heading">
                 <h3>录入结果</h3>
+                {sync ? (
+                  <span className={`sync-badge ${sync.confirmed ? "confirmed" : "unconfirmed"}`}>
+                    {sync.confirmed
+                      ? `Lark 目标已确认 · 待同步 ${sync.pending_attempts} 条`
+                      : "Lark 未确认：结果仅保存在本地"}
+                  </span>
+                ) : null}
                 {reserveRetest ? (
                   <button
                     type="button"

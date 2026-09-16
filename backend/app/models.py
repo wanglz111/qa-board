@@ -199,3 +199,29 @@ class LarkHistoryRef(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
     snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+
+
+class GroupLarkConfirmation(Base):
+    """An explicit administrator approval of the real Lark write targets.
+
+    A confirmation pins the exact base, tables and schema fingerprint that the
+    administrator saw, so a changed target can never inherit earlier consent.
+    """
+
+    __tablename__ = "group_lark_confirmations"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    group_id: Mapped[UUID] = mapped_column(
+        ForeignKey("groups.id", ondelete="CASCADE"), nullable=False, unique=True
+    )
+    base_token: Mapped[str] = mapped_column(String, nullable=False)
+    execution_table_id: Mapped[str] = mapped_column(String, nullable=False)
+    bug_table_id: Mapped[str] = mapped_column(String, nullable=False)
+    base_name: Mapped[str] = mapped_column(String, nullable=False)
+    execution_table_name: Mapped[str] = mapped_column(String, nullable=False)
+    bug_table_name: Mapped[str] = mapped_column(String, nullable=False)
+    schema_fingerprint: Mapped[str] = mapped_column(String, nullable=False)
+    target_fingerprint: Mapped[str] = mapped_column(String, nullable=False)
+    confirmed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
