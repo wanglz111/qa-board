@@ -9,6 +9,9 @@ from urllib.parse import parse_qs, urlparse
 # request against an attacker-chosen host.
 ALLOWED_SUFFIXES = ("larksuite.com", "feishu.cn")
 CONTENT_KINDS = ("wiki", "base")
+# 文档 id 会拼进带 Bearer token 的请求路径，所以只能接受 token 字符，
+# 否则 `..`、`%2e` 或空白之类的输入能改写请求落到哪个 endpoint。
+SOURCE_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 TABLE_ID = re.compile(r"^tbl[A-Za-z0-9]+$")
 VIEW_ID = re.compile(r"^vew[A-Za-z0-9]+$")
 
@@ -34,6 +37,7 @@ def _host_is_allowed(host: str) -> bool:
 
 def parse_lark_link(url: str) -> LarkLink:
     parsed = urlparse((url or "").strip())
+    # scheme 只用于校验粘贴的内容像链接；真正发请求的 host 来自 LARK_BASE_URL。
     if parsed.scheme not in ("http", "https") or not parsed.hostname:
         raise LarkLinkError("请粘贴 Lark 文档链接")
     host = parsed.hostname.lower()
@@ -43,6 +47,8 @@ def parse_lark_link(url: str) -> LarkLink:
     segments = [part for part in parsed.path.split("/") if part]
     if len(segments) != 2 or segments[0] not in CONTENT_KINDS:
         raise LarkLinkError("链接不是多维表格（wiki 或 base），无法读取表头")
+    if not SOURCE_ID.match(segments[1]):
+        raise LarkLinkError("链接里的文档 id 无法使用")
 
     query = parse_qs(parsed.query)
     table_id = (query.get("table") or [None])[0]
