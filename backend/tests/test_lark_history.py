@@ -1,10 +1,7 @@
-from dataclasses import replace
 from uuid import UUID
 
 import pytest
 
-import app.lark.history as lark_history
-from app.config import settings
 from app.lark.history import match_bugs, parse_case_reference
 
 
@@ -135,63 +132,6 @@ def test_old_bug_is_matched_read_only(lark_fake):
     )
 
 
-def test_check_returns_real_names_and_missing_columns(lark_fake, authenticated_client):
-    lark_fake.fields = [
-        field for field in lark_fake.fields if field["field_name"] != "控制台"
-    ]
-
-    response = authenticated_client.get("/api/lark/check")
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["base_name"] == "旧版测试管理"
-    assert body["execution_table_name"] == "执行记录"
-    assert body["bug_table_name"] == "缺陷记录"
-    assert body["execution_fields"]["用例"] == "text"
-    assert body["schema_fingerprint"] is None
-    assert "控制台" in " ".join(body["schema_errors"])
-    assert "test-app-secret" not in response.text
-    assert "fake-token" not in response.text
-
-
-def test_check_requires_real_table_configuration(lark_fake, authenticated_client, monkeypatch):
-    unconfigured = replace(
-        settings,
-        lark_app_id="test-app-id",
-        lark_app_secret="test-app-secret",
-        lark_app_token="app-token",
-        lark_table_runs="",
-        lark_table_defects="",
-    )
-    monkeypatch.setattr(lark_history, "settings", unconfigured)
-
-    body = authenticated_client.get("/api/lark/check").json()
-
-    errors = " ".join(body["read_errors"])
-    assert "LARK_TABLE_RUNS" in errors
-    assert "LARK_TABLE_DEFECTS" in errors
-    assert body["execution_table_name"] is None
-    assert not [request for request in lark_fake.requests if "/records" in request["path"]]
-
-
-def test_check_reports_a_table_id_that_the_base_does_not_list(
-    lark_fake, authenticated_client, monkeypatch
-):
-    """A stale table id has to be visible instead of silently confirming a target."""
-
-    # Base the stale config on the fixture's working config so only the table
-    # id under test is wrong.
-    stale = replace(lark_history.settings, lark_table_runs="tbl-missing")
-    monkeypatch.setattr(lark_history, "settings", stale)
-
-    body = authenticated_client.get("/api/lark/check").json()
-
-    assert body["execution_table_name"] is None
-    assert body["target_fingerprint"] is None
-    assert "tbl-missing" in " ".join(body["read_errors"])
-    assert not [request for request in lark_fake.requests if "/records" in request["path"]]
-
-
 def test_read_audit_is_get_only(lark_fake):
     lark_fake.records = [{"record_id": "old1", "fields": {"用例": "B-001"}}]
     lark_fake.media["secret-file-token"] = (b"png-bytes", "image/png")
@@ -265,7 +205,7 @@ def test_attachment_proxy_sets_nosniff_and_a_safe_content_type(
 
 
 def test_case_history_endpoint_lists_legacy_records_for_one_case(
-    authenticated_client, lark_fake, imported_group, db_session
+    authenticated_client, lark_fake, confirmed_group, db_session
 ):
     from app.models import LarkHistoryRef
 
@@ -302,7 +242,7 @@ def test_case_history_endpoint_lists_legacy_records_for_one_case(
     ]
 
     body = authenticated_client.get(
-        f"/api/groups/{imported_group.id}/cases/B-001/lark-history"
+        f"/api/groups/{confirmed_group.id}/cases/B-001/lark-history"
     ).json()
 
     assert body["available"] is True
@@ -320,21 +260,32 @@ def test_case_history_endpoint_lists_legacy_records_for_one_case(
     assert lark_fake.client.record_methods == ["GET", "GET"]
 
 
-def test_case_history_endpoint_reports_unavailable_lark(
-    authenticated_client, lark_fake, imported_group, monkeypatch
+def test_case_history_endpoint_reports_a_target_that_cannot_be_read(
+    authenticated_client, lark_fake, confirmed_group
 ):
-    from dataclasses import replace
+    """An unreadable stored target is reported instead of raising."""
 
-    from app.config import settings
+    lark_fake.fields_error = True
 
-    monkeypatch.setattr(
-        lark_history, "settings", replace(settings, lark_app_token="", lark_table_runs="")
-    )
+    body = authenticated_client.get(
+        f"/api/groups/{confirmed_group.id}/cases/B-001/lark-history"
+    ).json()
+
+    assert body["available"] is False
+    assert body["original"] == []
+    assert body["read_errors"]
+    assert not [request for request in lark_fake.requests if "/records" in request["path"]]
+
+
+def test_case_history_endpoint_says_when_no_target_is_chosen(
+    authenticated_client, imported_group
+):
+    """Without a stored row there is no table to read, and no Lark call is made."""
 
     body = authenticated_client.get(
         f"/api/groups/{imported_group.id}/cases/B-001/lark-history"
     ).json()
 
     assert body["available"] is False
+    assert body["read_errors"] == ["该组尚未选择 Lark 表"]
     assert body["original"] == []
-    assert any("LARK_APP_TOKEN" in item for item in body["read_errors"])

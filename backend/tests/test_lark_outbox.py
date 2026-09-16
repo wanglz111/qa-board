@@ -348,9 +348,56 @@ def test_stale_confirmation_halts_outbound_writes(
     assert [request["method"] for request in lark_fake.requests] == []
 
     job = _job(db_session, failed_attempt)
-    assert job.error_kind == "confirmation_stale"
+    assert job.error_kind == "target_changed"
     assert job.retry_count == 0
     assert job.next_retry_at is not None
+
+
+def test_queued_jobs_stop_when_the_group_switches_tables(
+    fake_lark, confirmed_group, failed_attempt, db_session
+):
+    from app.lark.target import target_for
+
+    # The job has to exist before the switch: this is the queued work the
+    # administrator already accepted under the old target.
+    db_session.add(SyncJob(attempt_id=failed_attempt.id, state="pending"))
+    db_session.commit()
+
+    target = target_for(db_session, confirmed_group.id)
+    _job(db_session, failed_attempt).target_fingerprint = target.target_fingerprint
+    db_session.commit()
+
+    target.execution_table_id = "tbl-bugs"
+    target.target_fingerprint = "app-exec|tbl-bugs|app-bug|tbl-defects"
+    target.confirmed_at = None
+    db_session.commit()
+
+    assert process_one_job(fake_lark, failed_attempt) == "pending"
+    assert _job(db_session, failed_attempt).error_kind == "target_changed"
+    assert fake_lark.created_execution == 0
+
+
+def test_repointing_parked_jobs_is_an_explicit_administrator_action(
+    fake_lark, authenticated_client, confirmed_group, failed_attempt, db_session
+):
+    from app.lark.target import target_for
+
+    db_session.add(SyncJob(attempt_id=failed_attempt.id, state="pending"))
+    db_session.commit()
+
+    _job(db_session, failed_attempt).target_fingerprint = "stale"
+    db_session.commit()
+    assert process_one_job(fake_lark, failed_attempt) == "pending"
+
+    body = authenticated_client.post(
+        f"/api/groups/{confirmed_group.id}/sync/retry"
+    ).json()
+    assert body["repointed"] == 1
+    assert (
+        _job(db_session, failed_attempt).target_fingerprint
+        == target_for(db_session, confirmed_group.id).target_fingerprint
+    )
+    assert process_one_job(fake_lark, failed_attempt) == "synced"
 
 
 def _state(db_session, attempt) -> str:
@@ -369,7 +416,7 @@ def test_failed_jobs_wait_for_an_operator_then_resume(
 
     retried = authenticated_client.post(f"/api/groups/{confirmed_group.id}/sync/retry")
     assert retried.status_code == 200
-    assert retried.json() == {"requeued": 1, "released": 0}
+    assert retried.json() == {"requeued": 1, "released": 0, "repointed": 0}
     assert _state(db_session, failed_attempt) == "pending"
 
     fake_lark.fail_bug_create = False
@@ -390,14 +437,14 @@ def test_uncertain_jobs_leave_only_after_explicit_acknowledgement(
     assert process_one_job(fake_lark, failed_attempt) == "uncertain"
 
     plain = authenticated_client.post(f"/api/groups/{confirmed_group.id}/sync/retry")
-    assert plain.json() == {"requeued": 0, "released": 0}
+    assert plain.json() == {"requeued": 0, "released": 0, "repointed": 0}
     assert _state(db_session, failed_attempt) == "uncertain"
 
     acknowledged = authenticated_client.post(
         f"/api/groups/{confirmed_group.id}/sync/retry",
         json={"release_uncertain": True},
     )
-    assert acknowledged.json() == {"requeued": 0, "released": 1}
+    assert acknowledged.json() == {"requeued": 0, "released": 1, "repointed": 0}
     assert _state(db_session, failed_attempt) == "pending"
 
 

@@ -32,14 +32,10 @@ DOMAIN=testdeck.example.com
 LARK_BASE_URL=https://open.larksuite.com
 LARK_APP_ID=<Lark 应用 ID>
 LARK_APP_SECRET=<Lark 应用密钥>
-LARK_APP_TOKEN=<旧执行记录所在多维表格 token>
-LARK_BUG_APP_TOKEN=<旧缺陷所在多维表格 token>
-LARK_TABLE_RUNS=<旧执行记录表 id>
-LARK_TABLE_DEFECTS=<旧缺陷表 id>
 ```
 
-`LARK_TABLE_RUNS`/`LARK_TABLE_DEFECTS` 必须指向**旧表**；旧的变量名
-`LARK_TABLE_RECORDS`/`LARK_TABLE_BUGS` 仍可识别，但会被 `/api/lark/check` 标为需要修正的配置。
+环境变量只提供 Lark 应用凭证；执行表与缺陷表由管理员**按测试组**在页面上选择并确认，
+不再由 `.env` 指定。请把该应用加为这些多维表格的协作者。
 
 ## 3. 启动
 
@@ -56,8 +52,9 @@ bootstrap 是幂等的：重启不会覆盖已存在的管理员密码或测试�
 ## 4. 首次登录后的检查
 
 1. 用 `ADMIN_EMAIL` / `ADMIN_PASSWORD` 登录，确认没有注册入口。
-2. 打开 **Lark 检查** 页：确认显示的多维表格名、执行表名、缺陷表名与字段类型和旧表一致。
-3. 勾选“允许向上述旧表新增本组记录”并确认；确认前执行结果只保存在本地。
+2. 打开 **Lark 检查** 页：为每个测试组粘贴它的 Lark 多维表格链接，读取后选择执行表与缺陷表
+   （可以为两者分别选择链接），确认显示的表名与字段类型正确。
+3. 勾选“允许向该表新增本组记录”并确认；确认前执行结果只保存在本地。
 4. 执行一条用例，确认“已保存到本地”与“Lark 同步”状态分别显示。
 5. 备份演练（见下）后才算部署完成。
 

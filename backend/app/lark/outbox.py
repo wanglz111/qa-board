@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from app.auth import require_admin
 from app.db import get_db
 from app.lark.client import LarkError, LarkTimeout
+from app.lark.target import target_for
 from app.lark.write import (
     LarkWriteGateway,
     bug_fields,
@@ -22,7 +23,6 @@ from app.models import (
     Attempt,
     Group,
     GroupCase,
-    LarkTarget,
     SyncJob,
 )
 
@@ -35,8 +35,9 @@ LEASE_SECONDS = 120
 MAX_RETRIES = 5
 BACKOFF_BASE_SECONDS = 30
 BACKOFF_CAP_SECONDS = 900
-# A job whose group lost its approval waits for the administrator instead of
-# spending retries; it wakes up on its own once the approval is restored.
+# A job whose group lost its approval, or whose stored target moved to another
+# table, waits for the administrator instead of spending retries. A restored
+# approval wakes it up on its own; a moved target waits for an explicit re-point.
 STALE_CONFIRMATION_SECONDS = 60
 
 ACTIVE_STATES = ("pending", "running")
@@ -47,7 +48,7 @@ def _now() -> datetime:
 
 
 def group_is_confirmed(db: Session, group_id: UUID) -> bool:
-    target = db.scalar(select(LarkTarget).where(LarkTarget.group_id == group_id))
+    target = target_for(db, group_id)
     return target is not None and target.confirmed_at is not None
 
 
@@ -55,9 +56,17 @@ def enqueue_attempt_job(db: Session, attempt: Attempt) -> SyncJob | None:
     """Queue one new attempt, but only inside a confirmed group."""
 
     group_id = attempt.group_case.group_id
-    if attempt.state != "committed" or not group_is_confirmed(db, group_id):
+    target = target_for(db, group_id)
+    if attempt.state != "committed" or target is None or target.confirmed_at is None:
         return None
-    job = SyncJob(attempt_id=attempt.id, state="pending", next_retry_at=_now())
+    job = SyncJob(
+        attempt_id=attempt.id,
+        state="pending",
+        next_retry_at=_now(),
+        # The job is pinned to the destination that was approved when it was
+        # queued; anything else parks it until an administrator re-points it.
+        target_fingerprint=target.target_fingerprint,
+    )
     db.add(job)
     return job
 
@@ -65,7 +74,8 @@ def enqueue_attempt_job(db: Session, attempt: Attempt) -> SyncJob | None:
 def enqueue_group_attempts(db: Session, group_id: UUID) -> int:
     """Explicitly queue every previously saved local attempt of a group."""
 
-    if not group_is_confirmed(db, group_id):
+    target = target_for(db, group_id)
+    if target is None or target.confirmed_at is None:
         raise HTTPException(
             status_code=409, detail="Group Lark targets are not confirmed yet"
         )
@@ -80,7 +90,12 @@ def enqueue_group_attempts(db: Session, group_id: UUID) -> int:
         insert(SyncJob)
         .values(
             [
-                {"attempt_id": attempt_id, "state": "pending", "next_retry_at": _now()}
+                {
+                    "attempt_id": attempt_id,
+                    "state": "pending",
+                    "next_retry_at": _now(),
+                    "target_fingerprint": target.target_fingerprint,
+                }
                 for attempt_id in attempt_ids
             ]
         )
@@ -160,12 +175,16 @@ def run_job(
     job.lease_until = moment + timedelta(seconds=LEASE_SECONDS)
     db.flush()
 
-    if not group_is_confirmed(db, case.group_id):
+    target = target_for(db, case.group_id)
+    if (
+        target is None
+        or target.confirmed_at is None
+        or job.target_fingerprint != target.target_fingerprint
+    ):
         # Never post into a destination the administrator has not approved for
-        # this group; the job waits here until an administrator restores the
-        # approval.
+        # this group; a swapped table parks the job until a human re-points it.
         job.state = "pending"
-        job.error_kind = "confirmation_stale"
+        job.error_kind = "target_changed"
         job.lease_until = None
         job.next_retry_at = moment + timedelta(seconds=STALE_CONFIRMATION_SECONDS)
         db.commit()
@@ -325,6 +344,38 @@ def release_uncertain_jobs(db: Session, group_id: UUID) -> int:
     return int(result.rowcount or 0)
 
 
+def repoint_parked_jobs(db: Session, group_id: UUID) -> int:
+    """Re-aim jobs parked by a table switch at the current target.
+
+    Only an administrator who decided that this group's local results belong in
+    the new table may run this; nothing re-points itself.
+    """
+
+    target = target_for(db, group_id)
+    if target is None:
+        return 0
+    result = db.execute(
+        update(SyncJob)
+        .where(
+            SyncJob.error_kind == "target_changed",
+            SyncJob.attempt_id.in_(
+                select(Attempt.id)
+                .join(GroupCase, Attempt.group_case_id == GroupCase.id)
+                .where(GroupCase.group_id == group_id)
+            ),
+        )
+        .values(
+            state="pending",
+            error_kind=None,
+            retry_count=0,
+            next_retry_at=_now(),
+            target_fingerprint=target.target_fingerprint,
+        )
+    )
+    db.commit()
+    return int(result.rowcount or 0)
+
+
 class SyncRetryRequest(BaseModel):
     # Releasing an uncertain job can duplicate a remote record; the flag makes
     # the administrator state that they checked the table first.
@@ -340,9 +391,10 @@ def retry_sync(
     if db.get(Group, group_id) is None:
         raise HTTPException(status_code=404, detail="Group not found")
     requeued = retry_failed_jobs(db, group_id)
+    repointed = repoint_parked_jobs(db, group_id)
     released = (
         release_uncertain_jobs(db, group_id)
         if payload is not None and payload.release_uncertain
         else 0
     )
-    return {"requeued": requeued, "released": released}
+    return {"requeued": requeued, "released": released, "repointed": repointed}

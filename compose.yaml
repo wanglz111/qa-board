@@ -6,10 +6,6 @@ x-lark-environment: &lark-environment
   LARK_BASE_URL: ${LARK_BASE_URL:-https://open.larksuite.com}
   LARK_APP_ID: ${LARK_APP_ID:-}
   LARK_APP_SECRET: ${LARK_APP_SECRET:-}
-  LARK_APP_TOKEN: ${LARK_APP_TOKEN:-}
-  LARK_BUG_APP_TOKEN: ${LARK_BUG_APP_TOKEN:-}
-  LARK_TABLE_RUNS: ${LARK_TABLE_RUNS:-}
-  LARK_TABLE_DEFECTS: ${LARK_TABLE_DEFECTS:-}
 
 x-api-environment: &api-environment
   # The password stays out of the URL, so any generated password works.

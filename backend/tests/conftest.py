@@ -466,16 +466,10 @@ def lark_fake(monkeypatch) -> FakeLark:
         lark_base_url="https://open.feishu.test",
         lark_app_id="test-app-id",
         lark_app_secret="test-app-secret",
-        lark_app_token="app-token",
-        lark_bug_app_token="app-token",
-        lark_table_runs="tbl-runs",
-        lark_table_defects="tbl-defects",
     )
     monkeypatch.setattr(lark_client_module, "global_settings", configured)
-    import app.lark.history as lark_history
     import app.lark.target as lark_target
 
-    monkeypatch.setattr(lark_history, "settings", configured)
     monkeypatch.setattr(lark_target, "settings", configured)
     previous = app.dependency_overrides.get(get_lark_client)
     app.dependency_overrides[get_lark_client] = lambda: fake.client

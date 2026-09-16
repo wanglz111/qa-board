@@ -11,20 +11,15 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.auth import require_admin
-from app.config import settings
 from app.db import get_db
 from app.lark.client import LarkClient, LarkError, get_lark_client
 from app.lark.fields import (
     DATE_FIELD_CANDIDATES,
     DESCRIPTION_FIELDS,
     LINK_FIELDS,
-    REQUIRED_BUG_FIELD_TYPES,
-    REQUIRED_RUN_FIELD_TYPES,
-    describe_fields,
-    missing_required_fields,
-    schema_fingerprint,
 )
-from app.models import GroupCase, LarkHistoryRef
+from app.lark.target import TargetDraft, read_draft_state, target_for
+from app.models import GroupCase, LarkHistoryRef, LarkTarget
 
 
 router = APIRouter(prefix="/api", dependencies=[Depends(require_admin)])
@@ -312,24 +307,17 @@ def case_lark_history(
     if group_case is None:
         raise HTTPException(status_code=404, detail="Group case not found")
 
-    state = read_lark_state(client)
-    if state["read_errors"]:
-        return {
-            "available": False,
-            "code": code,
-            "read_errors": state["read_errors"],
-            "source_table_name": None,
-            "read_at": datetime.now(timezone.utc).isoformat(),
-            "certainty": "uncertain",
-            "uncertainty": "Lark 旧表不可读",
-            "original": [],
-            "retests": [],
-            "bugs": [],
-            "unknown_count": 0,
-            "ambiguous": False,
-        }
+    # History comes from the group's own stored target: there is no
+    # environment-configured table any more.
+    target = target_for(db, group_id)
+    if target is None:
+        return _unavailable_history(code, ["该组尚未选择 Lark 表"], "该组尚未选择 Lark 表")
 
-    records = client.list_records(settings.lark_app_token, settings.lark_table_runs)
+    state = read_target_state(client, target)
+    if state["read_errors"]:
+        return _unavailable_history(code, state["read_errors"], "Lark 目标表不可读")
+
+    records = client.list_records(target.execution_base_token, target.execution_table_id)
     history = history_for(records, code)
     case_history = history.original + history.retests
     references = {
@@ -337,13 +325,13 @@ def case_lark_history(
             db,
             group_case,
             record,
-            table_id=settings.lark_table_runs,
+            table_id=target.execution_table_id,
             certainty=history.certainty,
         )
         for record in case_history
     }
     bugs = match_bugs(
-        client.list_records(settings.lark_bug_app_token, settings.lark_table_defects),
+        client.list_records(target.bug_base_token, target.bug_table_id),
         code,
     )
     db.commit()
@@ -365,7 +353,7 @@ def case_lark_history(
         "code": code,
         "read_errors": [],
         "source_table_name": state["execution_table_name"],
-        "base_name": state["base_name"],
+        "base_name": state["execution_base_name"],
         "bug_table_name": state["bug_table_name"],
         "read_at": datetime.now(timezone.utc).isoformat(),
         "certainty": history.certainty,
@@ -378,128 +366,53 @@ def case_lark_history(
     }
 
 
-def _table_name(tables: list[dict[str, Any]], table_id: str) -> str | None:
-    """Resolve a table name from the base listing, never from a guess."""
-
-    for table in tables:
-        if str(table.get("table_id")) == table_id:
-            name = table.get("name")
-            return str(name) if name else None
-    return None
-
-
-def read_lark_state(client: LarkClient) -> dict[str, Any]:
-    """Read the real Lark names and field types, never secrets."""
-
-    read_errors: list[str] = []
-    for name, value in (
-        ("LARK_APP_ID", settings.lark_app_id),
-        ("LARK_APP_SECRET", settings.lark_app_secret),
-        ("LARK_APP_TOKEN", settings.lark_app_token),
-        ("LARK_BUG_APP_TOKEN", settings.lark_bug_app_token),
-        ("LARK_TABLE_RUNS", settings.lark_table_runs),
-        ("LARK_TABLE_DEFECTS", settings.lark_table_defects),
-    ):
-        if not value:
-            read_errors.append(f"缺少配置 {name}")
-    if settings.lark_legacy_alias_used:
-        read_errors.append(
-            "检测到旧变量名 LARK_TABLE_RECORDS/LARK_TABLE_BUGS；"
-            "请改用 LARK_TABLE_RUNS/LARK_TABLE_DEFECTS 并确认它们指向旧表"
-        )
-
-    payload: dict[str, Any] = {
-        "base_name": None,
-        "execution_table_name": None,
-        "bug_table_name": None,
-        "execution_fields": {},
-        "bug_fields": {},
-        "required_execution_fields": sorted(REQUIRED_RUN_FIELD_TYPES),
-        "required_bug_fields": sorted(REQUIRED_BUG_FIELD_TYPES),
-        "schema_errors": [],
-        "schema_fingerprint": None,
-        "target_fingerprint": None,
-        "read_errors": read_errors,
-    }
-    if read_errors:
-        return payload
-
-    try:
-        base = client.app_metadata(settings.lark_app_token)
-        run_tables = client.list_tables(settings.lark_app_token)
-        bug_tables = client.list_tables(settings.lark_bug_app_token)
-    except LarkError as error:
-        payload["read_errors"].append(str(error))
-        return payload
-
-    execution_table_name = _table_name(run_tables, settings.lark_table_runs)
-    bug_table_name = _table_name(bug_tables, settings.lark_table_defects)
-    if execution_table_name is None:
-        payload["read_errors"].append(
-            f"Lark 中找不到执行记录表 {settings.lark_table_runs}"
-        )
-    if bug_table_name is None:
-        payload["read_errors"].append(f"Lark 中找不到缺陷表 {settings.lark_table_defects}")
-    if payload["read_errors"]:
-        return payload
-
-    # Only ask for fields once both table ids are known to exist in their base:
-    # a stale id has to be named above instead of surfacing as a bare read error.
-    try:
-        run_fields = client.list_fields(settings.lark_app_token, settings.lark_table_runs)
-        bug_fields = client.list_fields(
-            settings.lark_bug_app_token, settings.lark_table_defects
-        )
-    except LarkError as error:
-        payload["read_errors"].append(str(error))
-        return payload
-
-    schema_errors = missing_required_fields(run_fields, REQUIRED_RUN_FIELD_TYPES)
-    schema_errors += missing_required_fields(bug_fields, REQUIRED_BUG_FIELD_TYPES)
-    schema_fingerprint_value = (
-        None
-        if schema_errors
-        else f"{schema_fingerprint(run_fields)}||{schema_fingerprint(bug_fields)}"
-    )
-    base_name = (base.get("app") or {}).get("name")
-    payload.update(
-        {
-            "base_name": base_name,
-            "execution_table_name": execution_table_name,
-            "bug_table_name": bug_table_name,
-            "execution_fields": describe_fields(run_fields),
-            "bug_fields": describe_fields(bug_fields),
-            "schema_errors": schema_errors,
-            "schema_fingerprint": schema_fingerprint_value,
-            # Identity is part of the approval: renaming or re-pointing a table
-            # must invalidate consent even when the field layout is unchanged.
-            "target_fingerprint": (
-                None
-                if schema_fingerprint_value is None
-                else "|".join(
-                    str(part)
-                    for part in (
-                        settings.lark_app_token,
-                        settings.lark_table_runs,
-                        base_name,
-                        execution_table_name,
-                        settings.lark_bug_app_token,
-                        settings.lark_table_defects,
-                        bug_table_name,
-                        schema_fingerprint_value,
-                    )
-                )
-            ),
-        }
-    )
-    return payload
-
-
-@router.get("/lark/check")
-def lark_check(
-    client: Annotated[LarkClient, Depends(get_lark_client)],
+def _unavailable_history(
+    code: str, read_errors: list[str], uncertainty: str
 ) -> dict[str, Any]:
-    return read_lark_state(client)
+    """The shape the page renders when this group has nothing readable yet."""
+
+    return {
+        "available": False,
+        "code": code,
+        "read_errors": read_errors,
+        "source_table_name": None,
+        "read_at": datetime.now(timezone.utc).isoformat(),
+        "certainty": "uncertain",
+        "uncertainty": uncertainty,
+        "original": [],
+        "retests": [],
+        "bugs": [],
+        "unknown_count": 0,
+        "ambiguous": False,
+    }
+
+
+def read_target_state(client: LarkClient, target: LarkTarget) -> dict[str, Any]:
+    """Read the stored target's live names and field types, never secrets."""
+
+    draft = TargetDraft(
+        execution_base_token=target.execution_base_token,
+        execution_table_id=target.execution_table_id,
+        execution_view_id=target.execution_view_id,
+        bug_base_token=target.bug_base_token,
+        bug_table_id=target.bug_table_id,
+    )
+    try:
+        return read_draft_state(client, draft)
+    except LarkError as error:
+        # A target the app can no longer read stays a read error on the page
+        # instead of an exception the administrator cannot act on.
+        return {
+            "execution_base_name": None,
+            "execution_table_name": None,
+            "bug_base_name": None,
+            "bug_table_name": None,
+            "execution_fields": {},
+            "bug_fields": {},
+            "schema_errors": [],
+            "schema_fingerprint": None,
+            "read_errors": [str(error)],
+        }
 
 
 @router.get("/lark/history/{history_ref_id}/attachments/{index}")

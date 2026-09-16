@@ -63,3 +63,28 @@ def test_passing_retest_never_closes_the_old_bug(
     assert not any(request["method"] in LEGACY_MUTATION_METHODS for request in fake_lark.requests)
     assert db_session.scalar(select(Attempt).where(Attempt.id == failed_attempt.id)) is not None
     assert failed_attempt.result == "不通过"
+
+
+def test_worker_writes_only_into_the_groups_stored_target(
+    fake_lark, confirmed_group, failed_attempt, db_session
+):
+    """The audited write path is the group's own target, and it stays create-only."""
+
+    from app.lark.target import target_for
+    from app.worker import build_gateway
+
+    target = target_for(db_session, confirmed_group.id)
+
+    state = process_one_job(build_gateway(target, fake_lark.client), failed_attempt)
+
+    assert state == "synced"
+    assert not any(
+        request["method"] in LEGACY_MUTATION_METHODS for request in fake_lark.requests
+    )
+    assert [
+        request["path"] for request in fake_lark.requests if "/records" in request["path"]
+    ] == [
+        "/open-apis/bitable/v1/apps/app-exec/tables/tbl-runs/records",
+        "/open-apis/bitable/v1/apps/app-bug/tables/tbl-defects/records",
+    ]
+    assert fake_lark.record_methods == ["POST", "POST"]
