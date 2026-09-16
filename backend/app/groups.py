@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 from pathlib import Path
 from typing import Annotated, Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from pydantic import BaseModel, Field, StringConstraints
@@ -97,7 +97,10 @@ def confirm_import(
 
     source_name = str(ticket.parsed["source_name"])
     cases = _parse_or_422(source_name, ticket.original_file, payload.mapping or None)
+    group_id = uuid4()
     group = Group(
+        id=group_id,
+        short_code=_group_short_code(payload.name, group_id),
         name=payload.name,
         source_name=source_name,
         source_sha256=ticket.file_sha256,
@@ -180,3 +183,9 @@ def _case_payload(case: ParsedCase) -> dict[str, Any]:
 
 def _group_case(case: ParsedCase) -> GroupCase:
     return GroupCase(**asdict(case))
+
+
+def _group_short_code(name: str, group_id: UUID) -> str:
+    digits = "".join(character for character in name if character.isdigit())[:4]
+    prefix = digits or "group"
+    return f"{prefix}-{group_id.hex[:6]}"

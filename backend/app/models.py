@@ -61,6 +61,7 @@ class Group(Base):
     __tablename__ = "groups"
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    short_code: Mapped[str] = mapped_column(String, unique=True, nullable=False)
     name: Mapped[str] = mapped_column(String, nullable=False)
     source_name: Mapped[str] = mapped_column(String, nullable=False)
     source_sha256: Mapped[str] = mapped_column(String, nullable=False)

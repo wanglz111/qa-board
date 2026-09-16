@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Callable, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.auth import require_admin
@@ -15,12 +16,23 @@ from app.models import Attempt, Group, GroupCase
 
 router = APIRouter(prefix="/api", dependencies=[Depends(require_admin)])
 
+# The group-case row lock serialises ordinary callers; the retry covers the
+# residual race where two transactions still pick the same sequence or label,
+# so a losing request retries instead of surfacing a 500.
+MAX_ALLOCATION_ATTEMPTS = 5
+
 
 class AttemptCreate(BaseModel):
     result: Literal["通过", "不通过", "未执行"]
     note: str | None = None
     console_text: str | None = None
     idempotency_key: str
+
+    @model_validator(mode="after")
+    def require_failure_note(self) -> AttemptCreate:
+        if self.result == "不通过" and not (self.note and self.note.strip()):
+            raise ValueError("note is required for a failed result")
+        return self
 
 
 def _case_or_404(db: Session, group_id: UUID, code: str) -> GroupCase:
@@ -48,6 +60,87 @@ def _attempt_payload(attempt: Attempt) -> dict[str, Any]:
     }
 
 
+def _matching_attempt(
+    db: Session,
+    group_case: GroupCase,
+    payload: AttemptCreate,
+) -> Attempt | None:
+    existing = db.scalar(
+        select(Attempt).where(Attempt.idempotency_key == payload.idempotency_key)
+    )
+    if existing is None:
+        return None
+    if (
+        existing.group_case_id != group_case.id
+        or existing.state != "committed"
+        or existing.result != payload.result
+        or existing.note != payload.note
+        or existing.console_text != payload.console_text
+    ):
+        raise HTTPException(status_code=409, detail="Idempotency key conflict")
+    return existing
+
+
+def _locked_case_or_404(db: Session, group_id: UUID, code: str) -> GroupCase:
+    group_case = db.scalar(
+        select(GroupCase)
+        .where(GroupCase.group_id == group_id, GroupCase.code == code)
+        .with_for_update()
+    )
+    if group_case is None:
+        raise HTTPException(status_code=404, detail="Group case not found")
+    return group_case
+
+
+def _reserve_attempt(db: Session, group_case: GroupCase) -> Attempt:
+    last_sequence = db.scalar(
+        select(func.max(Attempt.sequence)).where(
+            Attempt.group_case_id == group_case.id
+        )
+    )
+    sequence = (last_sequence or 0) + 1
+    label = (
+        group_case.code
+        if sequence == 1
+        else f"{group_case.code}-R{group_case.group.short_code}-{sequence - 1:02}"
+    )
+    attempt = Attempt(
+        group_case=group_case,
+        label=label,
+        sequence=sequence,
+        state="started",
+    )
+    db.add(attempt)
+    db.flush()
+    return attempt
+
+
+def _commit_attempt(attempt: Attempt, payload: AttemptCreate) -> None:
+    attempt.state = "committed"
+    attempt.result = payload.result
+    attempt.note = payload.note
+    attempt.console_text = payload.console_text
+    attempt.idempotency_key = payload.idempotency_key
+
+
+def _with_conflict_retry(
+    db: Session, operation: Callable[[], dict[str, Any]]
+) -> dict[str, Any]:
+    for remaining in range(MAX_ALLOCATION_ATTEMPTS, 0, -1):
+        try:
+            return operation()
+        except IntegrityError as error:
+            db.rollback()
+            if getattr(error.orig, "sqlstate", None) != "23505":
+                raise
+            if remaining == 1:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Could not allocate a unique attempt label",
+                ) from None
+    raise AssertionError("unreachable")
+
+
 @router.post(
     "/groups/{group_id}/cases/{code}/attempts",
     status_code=status.HTTP_201_CREATED,
@@ -58,24 +151,58 @@ def create_attempt(
     payload: AttemptCreate,
     db: Annotated[Session, Depends(get_db)],
 ) -> dict[str, Any]:
-    group_case = _case_or_404(db, group_id, code)
-    last_sequence = db.scalar(
-        select(func.max(Attempt.sequence)).where(
-            Attempt.group_case_id == group_case.id
-        )
+    def operation() -> dict[str, Any]:
+        group_case = _locked_case_or_404(db, group_id, code)
+        existing = _matching_attempt(db, group_case, payload)
+        if existing is not None:
+            return _attempt_payload(existing)
+        attempt = _reserve_attempt(db, group_case)
+        _commit_attempt(attempt, payload)
+        db.commit()
+        db.refresh(attempt)
+        return _attempt_payload(attempt)
+
+    return _with_conflict_retry(db, operation)
+
+
+@router.post(
+    "/groups/{group_id}/cases/{code}/retest",
+    status_code=status.HTTP_201_CREATED,
+)
+def reserve_retest(
+    group_id: UUID,
+    code: str,
+    db: Annotated[Session, Depends(get_db)],
+) -> dict[str, Any]:
+    def operation() -> dict[str, Any]:
+        group_case = _locked_case_or_404(db, group_id, code)
+        attempt = _reserve_attempt(db, group_case)
+        db.commit()
+        db.refresh(attempt)
+        return _attempt_payload(attempt)
+
+    return _with_conflict_retry(db, operation)
+
+
+@router.post("/attempts/{attempt_id}/submit")
+def submit_attempt(
+    attempt_id: UUID,
+    payload: AttemptCreate,
+    db: Annotated[Session, Depends(get_db)],
+) -> dict[str, Any]:
+    attempt = db.scalar(
+        select(Attempt).where(Attempt.id == attempt_id).with_for_update()
     )
-    sequence = (last_sequence or 0) + 1
-    attempt = Attempt(
-        group_case=group_case,
-        label=code if sequence == 1 else f"{code}-{sequence}",
-        sequence=sequence,
-        state="committed",
-        result=payload.result,
-        note=payload.note,
-        console_text=payload.console_text,
-        idempotency_key=payload.idempotency_key,
-    )
-    db.add(attempt)
+    if attempt is None:
+        raise HTTPException(status_code=404, detail="Attempt not found")
+    existing = _matching_attempt(db, attempt.group_case, payload)
+    if existing is not None:
+        if existing.id != attempt.id:
+            raise HTTPException(status_code=409, detail="Idempotency key conflict")
+        return _attempt_payload(existing)
+    if attempt.state != "started":
+        raise HTTPException(status_code=409, detail="Attempt is already committed")
+    _commit_attempt(attempt, payload)
     db.commit()
     db.refresh(attempt)
     return _attempt_payload(attempt)

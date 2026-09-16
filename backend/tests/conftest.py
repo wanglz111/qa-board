@@ -129,7 +129,10 @@ def csv_book():
 @pytest.fixture
 def make_group_case():
     def factory(session: Session, *, group_name: str, code: str) -> GroupCase:
+        group_id = uuid4()
         group = Group(
+            id=group_id,
+            short_code=f"{group_name}-{group_id.hex[:6]}",
             name=group_name,
             source_name=f"{group_name}.test",
             source_sha256="0" * 64,
