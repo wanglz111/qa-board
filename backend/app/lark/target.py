@@ -11,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.auth import require_admin
+from app.config import settings
 from app.db import get_db
 from app.lark.client import LarkClient, LarkError, get_lark_client
 from app.lark.fields import (
@@ -27,6 +28,17 @@ from app.models import Group, LarkTarget, LarkTargetRevision
 router = APIRouter(prefix="/api", dependencies=[Depends(require_admin)])
 
 
+# The four parts of a target's identity, in the order they appear in the stored
+# fingerprint. Both the fingerprint and the diff derive from this one tuple, so
+# adding a fifth identity component cannot drift the two apart.
+IDENTITY_KEYS: tuple[str, ...] = (
+    "execution_base_token",
+    "execution_table_id",
+    "bug_base_token",
+    "bug_table_id",
+)
+
+
 @dataclass(frozen=True)
 class TargetDraft:
     execution_base_token: str
@@ -37,14 +49,7 @@ class TargetDraft:
 
     @property
     def fingerprint(self) -> str:
-        return "|".join(
-            [
-                self.execution_base_token,
-                self.execution_table_id,
-                self.bug_base_token,
-                self.bug_table_id,
-            ]
-        )
+        return "|".join(getattr(self, key) for key in IDENTITY_KEYS)
 
 
 def _table_name(tables: list[dict[str, Any]], table_id: str) -> str | None:
@@ -55,12 +60,33 @@ def _table_name(tables: list[dict[str, Any]], table_id: str) -> str | None:
     return None
 
 
+def _missing_credential() -> str | None:
+    """Name the first unset app credential, worded like the read-state pre-check.
+
+    The client raises the same way whether the credentials are unset or the app
+    is not a collaborator, so without this an administrator whose app is simply
+    unconfigured is sent to change document permissions.
+    """
+
+    for name, value in (
+        ("LARK_APP_ID", settings.lark_app_id),
+        ("LARK_APP_SECRET", settings.lark_app_secret),
+    ):
+        if not value:
+            return f"缺少配置 {name}"
+    return None
+
+
 def resolve_link(client: LarkClient, url: str) -> dict[str, Any]:
     """Turn a pasted link into one base plus its selectable tables.
 
     Read-only: a wiki node lookup, the base metadata and the table/field
     listings are the only requests.
     """
+
+    missing = _missing_credential()
+    if missing:
+        raise PermissionError(missing)
 
     try:
         link = parse_lark_link(url)
@@ -87,9 +113,18 @@ def resolve_link(client: LarkClient, url: str) -> dict[str, Any]:
     except LarkError as error:
         raise PermissionError(f"无法读取多维表格：{error}") from None
 
+    read_errors: list[str] = []
+    if not tables:
+        read_errors.append("该多维表格中没有数据表，请先在 Lark 中新建数据表")
+
     selected = link.table_id if _table_name(tables, link.table_id or "") else None
     selected = selected or (str(tables[0].get("table_id")) if tables else None)
-    fields = client.list_fields(base_token, selected) if selected else []
+    try:
+        fields = client.list_fields(base_token, selected) if selected else []
+    except LarkError as error:
+        raise PermissionError(
+            f"无法读取数据表字段，请确认应用仍是协作者：{error}"
+        ) from None
 
     return {
         "source_url": url,
@@ -112,7 +147,7 @@ def resolve_link(client: LarkClient, url: str) -> dict[str, Any]:
         "execution_fields": describe_fields(fields),
         "required_execution_fields": sorted(REQUIRED_RUN_FIELD_TYPES),
         "schema_errors": missing_required_fields(fields, REQUIRED_RUN_FIELD_TYPES),
-        "read_errors": [],
+        "read_errors": read_errors,
     }
 
 
@@ -158,12 +193,7 @@ def read_draft_state(client: LarkClient, draft: TargetDraft) -> dict[str, Any]:
 def target_diff(previous: LarkTarget | None, draft: TargetDraft) -> dict[str, Any]:
     """Which identity parts differ from the stored target."""
 
-    next_identity = {
-        "execution_base_token": draft.execution_base_token,
-        "execution_table_id": draft.execution_table_id,
-        "bug_base_token": draft.bug_base_token,
-        "bug_table_id": draft.bug_table_id,
-    }
+    next_identity = {key: getattr(draft, key) for key in IDENTITY_KEYS}
     if previous is None:
         return {
             "changed": False,
@@ -171,7 +201,7 @@ def target_diff(previous: LarkTarget | None, draft: TargetDraft) -> dict[str, An
             "previous": None,
             "next": next_identity,
         }
-    previous_identity = {key: getattr(previous, key) for key in next_identity}
+    previous_identity = {key: getattr(previous, key) for key in IDENTITY_KEYS}
     changed_keys = sorted(
         key for key, value in next_identity.items() if previous_identity[key] != value
     )
@@ -334,7 +364,12 @@ def save_target(
                 status_code=409, detail={"reason": "target_changed", "diff": diff}
             )
         # A fingerprint the page did not read from the stored target is stale:
-        # another tab moved this group after the page was loaded.
+        # another tab moved this group after the page was loaded. Only a
+        # *supplied* mismatch is refused — the plan's literal condition
+        # (expected_previous_fingerprint != previous.target_fingerprint) also
+        # rejected a client that never held a fingerprint, which makes the
+        # plan's own acknowledged-change tests unreachable. Do not "fix" this
+        # back into requiring a fingerprint the page may legitimately not have.
         if (
             payload.expected_previous_fingerprint is not None
             and payload.expected_previous_fingerprint != previous.target_fingerprint

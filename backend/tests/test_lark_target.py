@@ -1,5 +1,9 @@
+from dataclasses import replace
+
 from sqlalchemy import select
 
+import app.lark.target as lark_target
+from app.config import settings
 from app.models import LarkTargetRevision
 
 
@@ -7,9 +11,11 @@ def test_resolve_returns_base_tables_and_the_linked_table(
     lark_fake, authenticated_client
 ):
     lark_fake.wiki_nodes["node-1"] = {"obj_type": "bitable", "obj_token": "app-exec"}
-    body = authenticated_client.post(
+    response = authenticated_client.post(
         "/api/lark/resolve", json={"url": lark_fake.wiki_url}
-    ).json()
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
     assert body["base_token"] == "app-exec"
     assert body["base_name"] == "执行库"
     assert {table["table_id"] for table in body["tables"]} == {"tbl-runs", "tbl-bugs"}
@@ -17,6 +23,15 @@ def test_resolve_returns_base_tables_and_the_linked_table(
     assert body["selected"]["view_id"] == "vew-main"
     assert "用例" in body["execution_fields"]
     assert body["read_errors"] == []
+    # Resolving is read-only: the token exchange is the only non-GET request and
+    # no record path is touched at all.
+    assert lark_fake.client.record_methods == []
+    assert [
+        request
+        for request in lark_fake.requests
+        if request["method"] != "GET"
+        and not request["path"].endswith("/tenant_access_token/internal")
+    ] == []
 
 
 def test_resolve_rejects_a_wiki_node_that_is_not_a_bitable(
@@ -38,6 +53,57 @@ def test_resolve_reports_a_link_the_app_cannot_read(lark_fake, authenticated_cli
     )
     assert response.status_code == 409
     assert "协作者" in response.json()["detail"]
+
+
+def test_resolve_reports_a_field_listing_the_app_cannot_read(
+    lark_fake, authenticated_client
+):
+    lark_fake.wiki_nodes["node-1"] = {"obj_type": "bitable", "obj_token": "app-exec"}
+    lark_fake.fields_error = True
+    response = authenticated_client.post(
+        "/api/lark/resolve", json={"url": lark_fake.wiki_url}
+    )
+    assert response.status_code == 409, response.text
+    assert "字段" in response.json()["detail"]
+    assert "协作者" in response.json()["detail"]
+
+
+def test_resolve_names_the_missing_credential_instead_of_a_permission_fix(
+    lark_fake, authenticated_client, monkeypatch
+):
+    monkeypatch.setattr(
+        lark_target,
+        "settings",
+        replace(settings, lark_app_id="", lark_app_secret=""),
+    )
+    response = authenticated_client.post(
+        "/api/lark/resolve", json={"url": lark_fake.wiki_url}
+    )
+    assert response.status_code == 409, response.text
+    assert "LARK_APP_ID" in response.json()["detail"]
+    assert "协作者" not in response.json()["detail"]
+    assert lark_fake.requests == []
+
+
+def test_resolve_reports_a_base_that_has_no_tables(lark_fake, authenticated_client):
+    lark_fake.bases["app-empty"] = ("空库", [])
+    response = authenticated_client.post(
+        "/api/lark/resolve",
+        json={"url": "https://tenant.larksuite.com/base/app-empty"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["tables"] == []
+    assert body["selected"]["table_id"] is None
+    assert "数据表" in " ".join(body["read_errors"])
+
+
+def test_resolve_requires_an_admin_session(lark_fake, anonymous_client):
+    response = anonymous_client.post(
+        "/api/lark/resolve", json={"url": lark_fake.wiki_url}
+    )
+    assert response.status_code == 401
+    assert lark_fake.requests == []
 
 
 def _payload(table_id: str, *, expected_previous_fingerprint=None, acknowledge=False):
@@ -153,3 +219,25 @@ def test_revisions_keep_the_previous_table_readable(
         )
     ).all()
     assert len(fingerprints) == 2
+
+
+def test_a_table_must_exist_in_the_base_the_payload_names(
+    lark_fake, authenticated_client, imported_group, db_session
+):
+    """A table id from another base would make the stored fingerprint a lie."""
+
+    response = authenticated_client.put(
+        f"/api/groups/{imported_group.id}/lark/target",
+        json={
+            **_payload("tbl-runs"),
+            # The defect table lives in app-bug, not in the execution base.
+            "bug_base_token": "app-exec",
+            "bug_table_id": "tbl-defects",
+        },
+    )
+    assert response.status_code == 409, response.text
+    assert db_session.scalar(
+        select(LarkTargetRevision).where(
+            LarkTargetRevision.group_id == imported_group.id
+        )
+    ) is None

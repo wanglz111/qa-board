@@ -247,6 +247,15 @@ class FakeLark:
             "app-bug": ("缺陷库", [("tbl-defects", "缺陷记录")]),
             "app-token": ("旧版测试管理", [("tbl-runs", "执行记录"), ("tbl-defects", "缺陷记录")]),
         }
+        # Which schema each (base, table) pair answers with, so a two-base
+        # implementation that reads the wrong base's table cannot pass.
+        self.field_roles = {
+            ("app-exec", "tbl-runs"): "run",
+            ("app-token", "tbl-runs"): "run",
+            ("app-exec", "tbl-bugs"): "bug",
+            ("app-bug", "tbl-defects"): "bug",
+            ("app-token", "tbl-defects"): "bug",
+        }
         self.media: dict[str, tuple[bytes, str]] = {}
         self.requests: list[dict[str, str]] = []
         self.created_records: list[dict[str, Any]] = []
@@ -260,6 +269,7 @@ class FakeLark:
         self.fail_bug_create = False
         self.hide_created_records = False
         self.media_unauthorized = False
+        self.fields_error = False
         self.client = LarkClient(
             base_url="https://open.feishu.test",
             app_id="test-app-id",
@@ -297,6 +307,18 @@ class FakeLark:
         token = path.split("/apps/", 1)[1].split("/", 1)[0]
         return self.bases.get(token)
 
+    def _base_token_and_table(self, path: str) -> tuple[str, str] | None:
+        """The (base, table) pair a table-scoped path names, if both exist."""
+
+        if "/apps/" not in path or "/tables/" not in path:
+            return None
+        base_token = path.split("/apps/", 1)[1].split("/", 1)[0]
+        table_id = path.split("/tables/", 1)[1].split("/", 1)[0]
+        base = self.bases.get(base_token)
+        if base is None or table_id not in {listed for listed, _ in base[1]}:
+            return None
+        return base_token, table_id
+
     # The worker only needs this create-only surface, so the double speaks it.
     def create_execution(self, fields: dict[str, Any]) -> str:
         return self._gateway.create_execution(fields)
@@ -322,6 +344,8 @@ class FakeLark:
             if self.wiki_error:
                 return httpx.Response(200, json={"code": 1770003, "msg": "no permission"})
             node = self.wiki_nodes.get(request.url.params["token"])
+            if node is None:
+                return httpx.Response(200, json={"code": 1770002, "msg": "node not found"})
             return httpx.Response(200, json={"code": 0, "data": {"node": node}})
         if "/medias/" in path and path.endswith("/download"):
             token = path.split("/medias/", 1)[1].removesuffix("/download")
@@ -356,7 +380,12 @@ class FakeLark:
                 raise httpx.ReadTimeout("create timed out")
             return httpx.Response(200, json={"code": 0, "data": {"record": record}})
         if path.endswith("/fields"):
-            fields = self.bug_fields if "tbl-defects" in path else self.fields
+            if self.fields_error:
+                return httpx.Response(500, json={"code": 1, "msg": "fields unavailable"})
+            role = self.field_roles.get(self._base_token_and_table(path))
+            if role is None:
+                return httpx.Response(404, json={"code": 1, "msg": "unsupported table"})
+            fields = self.bug_fields if role == "bug" else self.fields
             return httpx.Response(200, json={"code": 0, "data": {"items": fields, "has_more": False}})
         if path.endswith("/records"):
             records = self.bug_records if "tbl-defects" in path else self.records
@@ -378,15 +407,15 @@ class FakeLark:
             # The real tenant answers a bare 404 for the single-table metadata
             # route, so names are resolved from this listing instead.
             base = self._base(path)
+            if base is None:
+                return httpx.Response(404, json={"code": 1, "msg": "unsupported base"})
             return httpx.Response(
                 200,
                 json={
                     "code": 0,
                     "data": {
                         "items": (
-                            []
-                            if base is None
-                            else [
+                            [
                                 {"table_id": table_id, "name": name}
                                 for table_id, name in base[1]
                             ]
@@ -397,6 +426,8 @@ class FakeLark:
             )
         if path.endswith("/views"):
             base = self._base(path)
+            if base is None:
+                return httpx.Response(404, json={"code": 1, "msg": "unsupported base"})
             return httpx.Response(
                 200,
                 json={
@@ -404,7 +435,7 @@ class FakeLark:
                     "data": {
                         "items": (
                             []
-                            if base is None
+                            if not base[1]
                             else [
                                 {
                                     "view_id": "vew-main",
@@ -442,8 +473,10 @@ def lark_fake(monkeypatch) -> FakeLark:
     )
     monkeypatch.setattr(lark_client_module, "global_settings", configured)
     import app.lark.history as lark_history
+    import app.lark.target as lark_target
 
     monkeypatch.setattr(lark_history, "settings", configured)
+    monkeypatch.setattr(lark_target, "settings", configured)
     previous = app.dependency_overrides.get(get_lark_client)
     app.dependency_overrides[get_lark_client] = lambda: fake.client
     try:

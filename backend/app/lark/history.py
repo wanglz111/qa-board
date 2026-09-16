@@ -428,10 +428,6 @@ def read_lark_state(client: LarkClient) -> dict[str, Any]:
         base = client.app_metadata(settings.lark_app_token)
         run_tables = client.list_tables(settings.lark_app_token)
         bug_tables = client.list_tables(settings.lark_bug_app_token)
-        run_fields = client.list_fields(settings.lark_app_token, settings.lark_table_runs)
-        bug_fields = client.list_fields(
-            settings.lark_bug_app_token, settings.lark_table_defects
-        )
     except LarkError as error:
         payload["read_errors"].append(str(error))
         return payload
@@ -445,6 +441,17 @@ def read_lark_state(client: LarkClient) -> dict[str, Any]:
     if bug_table_name is None:
         payload["read_errors"].append(f"Lark 中找不到缺陷表 {settings.lark_table_defects}")
     if payload["read_errors"]:
+        return payload
+
+    # Only ask for fields once both table ids are known to exist in their base:
+    # a stale id has to be named above instead of surfacing as a bare read error.
+    try:
+        run_fields = client.list_fields(settings.lark_app_token, settings.lark_table_runs)
+        bug_fields = client.list_fields(
+            settings.lark_bug_app_token, settings.lark_table_defects
+        )
+    except LarkError as error:
+        payload["read_errors"].append(str(error))
         return payload
 
     schema_errors = missing_required_fields(run_fields, REQUIRED_RUN_FIELD_TYPES)
