@@ -44,10 +44,7 @@ def _validate_login_origin(request: Request) -> None:
         raise HTTPException(status_code=403, detail="Invalid request origin")
 
 
-def current_session(
-    db: Annotated[Session, Depends(get_db)],
-    token: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None,
-) -> AdminSession:
+def _session_for_token(db: Session, token: str | None) -> AdminSession:
     if token is None:
         raise HTTPException(status_code=401, detail="Not authenticated")
 
@@ -63,6 +60,32 @@ def current_session(
         db.commit()
         raise HTTPException(status_code=401, detail="Session expired")
     return admin_session
+
+
+def current_session(
+    db: Annotated[Session, Depends(get_db)],
+    token: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None,
+) -> AdminSession:
+    return _session_for_token(db, token)
+
+
+def require_csrf_for_mutation(
+    request: Request,
+    db: Annotated[Session, Depends(get_db)],
+    token: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None,
+    csrf_token: Annotated[str | None, Header(alias="X-CSRF-Token")] = None,
+) -> None:
+    if request.method not in {"POST", "PUT", "DELETE", "PATCH"}:
+        return
+    if request.url.path == "/api/auth/login" or token is None:
+        return
+
+    admin_session = _session_for_token(db, token)
+    if csrf_token is None or not hmac.compare_digest(
+        admin_session.csrf_token_hash,
+        _digest(csrf_token, settings.csrf_secret),
+    ):
+        raise HTTPException(status_code=403, detail="Invalid CSRF token")
 
 
 def require_admin(

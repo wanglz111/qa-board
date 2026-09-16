@@ -48,6 +48,14 @@ def test_protected_access_requires_a_session(client):
     assert response.status_code == 401
 
 
+def test_mutation_with_unknown_session_returns_unauthorized(client):
+    client.cookies.set("testdeck_session", "unknown-session")
+
+    response = client.post("/api/auth/logout")
+
+    assert response.status_code == 401
+
+
 def test_login_rejects_wrong_password_without_creating_session(
     client, seeded_admin, db_session
 ):
