@@ -74,9 +74,9 @@ git merge --ff-only feature/cloud-testdeck
 # 2) 和 CI 一致的验证（后端需要一个本地 PostgreSQL 测试库）
 cd backend
 TEST_DATABASE_URL=postgresql+psycopg://testdeck:testdeck@127.0.0.1:5433/testdeck_test \
-  .venv/bin/python -m pytest -q          # 期望 248 passed
+  .venv/bin/python -m pytest -q          # 期望 310 passed
 cd ../frontend
-npx vitest run                            # 期望 101 passed
+npx vitest run                            # 期望 112 passed
 npm run build
 cd ..
 
@@ -160,7 +160,7 @@ sudo docker run --rm -v testdeck_screenshots:/data -v /home/ubuntu/testdeck:/bac
 server {
     listen 80;
     server_name testdeck.gleaftex.com;
-    client_max_body_size 30m;          # 截图最大 20MB + multipart 开销
+    client_max_body_size 110m;         # 截图 20MB / 用例包 ZIP 100MB + multipart 开销
     location / {
         resolver 127.0.0.11 valid=10s ipv6=off;
         set $testdeck_upstream http://testdeck-web:8080;
@@ -189,8 +189,9 @@ sudo docker exec nginx-proxy nginx -s reload
 - `nginx-proxy` 和 `testdeck-web` 必须共用 `monitor_net`，否则 nginx 解析不到 `testdeck-web`。
 - `X-Forwarded-Proto: https` + 应用里的 `FORWARDED_ALLOW_IPS=*` 是登录不被当成跨站请求的前提。
 - 再加域名就照抄一个 server 块，并把新容器加入 `monitor_net`；改之前先 `cp nginx.conf nginx.conf.bak-$(date +%F)`。
+- 上传限制必须 ≥ 应用上限：文本用例 10 MB、截图 20 MB、带图用例包 ZIP 100 MB（均为 MiB）。`client_max_body_size` 要覆盖整个 multipart 请求，当前取 110m 留出边界余量；旧部署若仍是 30m，30–100 MB 的合法用例包会在到达 API 前被 413 拒绝。
 
-Cloudflare 侧只需 `testdeck.gleaftex.com` 的 A 记录指向 `43.167.241.33`，橙云开启；源站只有 80 端口，SSL 模式用 **Flexible**，或改成 Full 并在源站上证书。
+Cloudflare 侧只需 `testdeck.gleaftex.com` 的 A 记录指向 `43.167.241.33`，橙云开启；源站只有 80 端口，SSL 模式用 **Flexible**，或改成 Full 并在源站上证书。免费版 Cloudflare 的单请求体上限是 100 MB，因此接近上限的用例包可能被边缘拒绝，需要按实际使用调整计划或把包拆小。
 
 ## 8. 常见故障
 
@@ -198,7 +199,7 @@ Cloudflare 侧只需 `testdeck.gleaftex.com` 的 A 记录指向 `43.167.241.33`�
 | --- | --- |
 | 502 / 504 | `sudo docker logs --tail=50 nginx-proxy`；`sudo docker compose --env-file .env -f docker-compose.yml ps` 看 `testdeck-web` 是否在跑、是否在 `monitor_net` 上 |
 | 登录 403 cross-site | 检查 nginx 是否发了 `X-Forwarded-Proto https`、compose 里 `FORWARDED_ALLOW_IPS` 是否为 `*` |
-| 上传大截图失败 | nginx 的 `client_max_body_size`（当前 30m）与 Cloudflare 的 100MB 上限 |
+| 上传大文件失败（413） | 先确认 nginx 的 `client_max_body_size` 已调到 110m 并 reload；再确认包/截图本身未超过应用上限（ZIP 100 MB、截图 20 MB），以及 Cloudflare 免费版 100 MB 的请求体上限 |
 | 容器起不来 | `sudo docker compose --env-file .env -f docker-compose.yml logs --tail=100 migrate api worker`；常见原因是 `.env` 少了必填变量 |
 | 拉镜像 401/403 | GHCR 包被改成了 private，需要 `docker login ghcr.io` 或把包改回 public |
 | SSH 突然 `Connection closed by ... port 22` | 短时间并发连接过多触发的限流，等几分钟再连；脚本里请用单条长连接而不是并发 ssh |

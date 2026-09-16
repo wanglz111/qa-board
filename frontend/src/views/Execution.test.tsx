@@ -2,7 +2,14 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { vi } from "vitest";
 
-import type { Attempt, Group, GroupCase, GroupProgress, SubmitPayload } from "../api";
+import type {
+  Attempt,
+  Group,
+  GroupCase,
+  GroupProgress,
+  ReferenceAsset,
+  SubmitPayload
+} from "../api";
 import { ExecutionView } from "./Execution";
 
 const ZERO_PROGRESS: GroupProgress = { passed: 0, failed: 0, skipped: 0, untested: 1 };
@@ -49,6 +56,25 @@ function committed(id: string, label: string, result: Attempt["result"], note: s
     console_text: null,
     source: "execution",
     created_at: "2026-09-16T09:00:00Z"
+  };
+}
+
+function referenceAsset(id: string): ReferenceAsset {
+  return {
+    id,
+    link_id: `${id}-link`,
+    asset_key: id,
+    name: "节点发售",
+    mime: "image/png",
+    width: 340,
+    height: 1658,
+    asset_type: "page",
+    screen: "节点发售",
+    state: "发售中",
+    prototype_version: "v2.0",
+    role: "expected",
+    caption: null,
+    focus: []
   };
 }
 
@@ -201,4 +227,26 @@ it("marks a history row adopted from the table as table-sourced", async () => {
   expect(badge).toBeVisible();
   expect(badge.closest("li")).toHaveTextContent("B-001-R0918-01");
   expect(screen.getAllByText("来自表内对账")).toHaveLength(1);
+});
+
+it("does not submit or switch cases while a prototype image is zoomed", async () => {
+  const loadCases = vi.fn(async () => [
+    { ...testCase("case-0918", "管理员登录"), reference_assets: [referenceAsset("a1")] },
+    testCase("case-0922", "钱包绑定")
+  ]);
+  const { submit } = renderExecution({ initialGroupId: "0918-id", loadCases });
+
+  await userEvent.click(
+    await screen.findByRole("button", { name: "放大查看 节点发售" })
+  );
+  expect(screen.getByRole("dialog", { name: "节点发售" })).toBeVisible();
+
+  await userEvent.keyboard("{Enter}");
+  await userEvent.keyboard("{ArrowDown}");
+  await userEvent.keyboard("{Backspace}");
+  await userEvent.keyboard("{Control>}b{/Control}");
+
+  expect(submit).not.toHaveBeenCalled();
+  expect(screen.getByRole("dialog", { name: "节点发售" })).toBeVisible();
+  expect(screen.getByText("管理员登录")).toBeVisible();
 });

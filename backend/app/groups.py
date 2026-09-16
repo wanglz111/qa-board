@@ -353,8 +353,10 @@ def _casebook_group_cases(
             storage_key = new_storage_key(asset.suffix)
             target = reference_path(storage_key)
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(asset.content)
+            # Register before writing: a partial write (e.g. ENOSPC) leaves a
+            # file on disk that must still be cleaned up by the except block.
             written.append(target)
+            target.write_bytes(asset.content)
             assets[key] = CaseReferenceAsset(
                 group_id=group_id,
                 asset_key=key,

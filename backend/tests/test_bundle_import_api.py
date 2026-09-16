@@ -1,7 +1,9 @@
 import json
 from io import BytesIO
+from pathlib import Path
 import zipfile
 
+import pytest
 from sqlalchemy import select
 
 from app.models import CaseReferenceAsset, CaseReferenceLink
@@ -157,3 +159,33 @@ def test_text_import_path_is_unchanged(authenticated_client, csv_book):
     assert body["detected_format"] == "csv"
     assert "reference_asset_count" not in body
     assert "reference_assets" not in json.dumps(body)
+
+
+def test_confirm_cleans_up_a_partially_written_image(
+    authenticated_client, upload_dir, monkeypatch
+):
+    # A disk error midway through write_bytes() leaves a partial file behind.
+    # That file was not in the cleanup list, so it survived the failed import.
+    original = Path.write_bytes
+    calls = {"count": 0}
+
+    def flaky_write(self: Path, data: bytes) -> int:
+        calls["count"] += 1
+        if calls["count"] == 1:
+            self.parent.mkdir(parents=True, exist_ok=True)
+            with self.open("wb") as handle:
+                handle.write(b"partial")
+            raise OSError(28, "No space left on device")
+        return original(self, data)
+
+    monkeypatch.setattr(Path, "write_bytes", flaky_write)
+
+    ticket = preview(authenticated_client, casebook_zip()).json()["ticket_id"]
+    failed = authenticated_client.post(
+        "/api/import/confirm", json={"ticket_id": ticket, "name": "Odyssey"}
+    )
+    assert failed.status_code == 500
+
+    reference_dir = upload_dir / "reference"
+    leftovers = list(reference_dir.iterdir()) if reference_dir.exists() else []
+    assert leftovers == []

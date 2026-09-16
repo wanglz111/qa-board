@@ -10,6 +10,23 @@ from app.importers.schema import ImportErrorDetail
 from tests.casebook_fixture import casebook, casebook_zip, png_bytes, valid_case
 
 
+UNSET = object()
+
+
+def visual_case(*, position=UNSET, **reference_overrides):
+    """One case with a single reference and a localised asset registry."""
+
+    reference = {"asset": "sale-stage-selling", "role": "expected"}
+    reference.update(reference_overrides)
+    case = valid_case(visual={"check": "visual_only", "references": [reference]})
+    if position is not UNSET:
+        case["position"] = position
+    return case
+
+
+ONLY_ASSET = {"sale-stage-selling": {"name": "节点发售", "type": "page"}}
+
+
 def test_casebook_loads_cases_assets_and_visual_checks():
     document = parse_casebook(casebook_zip())
 
@@ -248,3 +265,189 @@ def test_damaged_member_bytes_are_reported_not_raised():
 
     with pytest.raises(ImportErrorDetail, match="damaged, truncated or encrypted"):
         parse_casebook(bytes(damaged))
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"position": None}, r"cases\[0\]\.position: must be an integer"),
+        ({"focus": None}, r"references\[0\]\.focus: must be an array"),
+        (
+            {"focus": [{"label": "确认按钮", "box": None}]},
+            r"focus\[0\]\.box: must be \[x, y, w, h\]",
+        ),
+    ],
+)
+def test_explicit_null_is_rejected_not_treated_as_missing(overrides, message):
+    # An omitted optional field falls back to its default; an explicit null is a
+    # type error and must not silently become "no position / no focus / no box".
+    broken = casebook(cases=[visual_case(**overrides)], assets=ONLY_ASSET)
+
+    with pytest.raises(ImportErrorDetail, match=message):
+        parse_casebook(
+            casebook_zip(
+                book=broken, images={"sale-stage-selling.png": png_bytes()}
+            )
+        )
+
+
+def test_missing_optional_fields_still_fall_back_to_defaults():
+    # The counterpart of the null test: absence keeps the documented behaviour.
+    document = parse_casebook(
+        casebook_zip(
+            book=casebook(cases=[visual_case()], assets=ONLY_ASSET),
+            images={"sale-stage-selling.png": png_bytes()},
+        )
+    )
+
+    assert document.cases[0].position == 1
+    assert document.cases[0].references[0].focus == ()
+
+
+def raw_casebook_zip(casebook_json: str) -> bytes:
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("casebook.json", casebook_json)
+        archive.writestr("assets/sale-stage-selling.png", png_bytes())
+    return buffer.getvalue()
+
+
+def casebook_with_box(box_json: str) -> bytes:
+    book = casebook(
+        cases=[visual_case(focus=[{"label": "确认按钮", "box": [0, 0, 1, 1]}])],
+        assets=ONLY_ASSET,
+    )
+    payload = json.dumps(book, ensure_ascii=False).replace("[0, 0, 1, 1]", box_json)
+    return raw_casebook_zip(payload)
+
+
+@pytest.mark.parametrize(
+    ("box_json", "message"),
+    [
+        ("[NaN, 0, 1, 1]", r"box\[0\]: must be normalised between 0 and 1"),
+        ("[Infinity, 0, 1, 1]", r"box\[0\]: must be normalised between 0 and 1"),
+        ("[-Infinity, 0, 1, 1]", r"box\[0\]: must be normalised between 0 and 1"),
+        (
+            "[" + "9" * 400 + ", 0, 1, 1]",
+            r"box\[0\]: must be normalised between 0 and 1",
+        ),
+        ("[-1, 0, 1, 1]", r"box\[0\]: must be normalised between 0 and 1"),
+    ],
+)
+def test_non_finite_and_oversized_box_values_are_rejected(box_json, message):
+    # NaN slips past <0/>1 comparisons and a huge JSON integer overflows
+    # float(); both used to escape as an unhandled 500 instead of a 422.
+    with pytest.raises(ImportErrorDetail, match=message):
+        parse_casebook(casebook_with_box(box_json))
+
+
+@pytest.mark.parametrize("position", [0, -1])
+def test_position_below_one_is_rejected(position):
+    broken = casebook(cases=[visual_case(position=position)], assets=ONLY_ASSET)
+    with pytest.raises(
+        ImportErrorDetail, match=r"cases\[0\]\.position: must be an integer >= 1"
+    ):
+        parse_casebook(
+            casebook_zip(
+                book=broken, images={"sale-stage-selling.png": png_bytes()}
+            )
+        )
+
+
+@pytest.mark.parametrize("position", [2**31, 2**63])
+def test_position_outside_the_storage_range_is_rejected(position):
+    # GroupCase.position is a PostgreSQL int4, so anything above 2**31 - 1 would
+    # pass preview and then fail at confirm time with a 500.
+    broken = casebook(cases=[visual_case(position=position)], assets=ONLY_ASSET)
+    with pytest.raises(
+        ImportErrorDetail,
+        match=r"cases\[0\]\.position: must be an integer between 1 and 2147483647",
+    ):
+        parse_casebook(
+            casebook_zip(
+                book=broken, images={"sale-stage-selling.png": png_bytes()}
+            )
+        )
+
+
+def test_corrupt_image_payload_is_rejected():
+    # Image.verify() only checks the container; a PNG whose IDAT stream is
+    # broken still passed and later failed to render for the tester.
+    buffer = BytesIO()
+    Image.new("RGB", (8, 8), (1, 2, 3)).save(buffer, format="PNG")
+    data = buffer.getvalue()
+    marker = data.index(b"IDAT")
+    length = int.from_bytes(data[marker - 4 : marker], "big")
+    payload = b"\x00\x00\x00\x00"
+    import zlib
+
+    crc = zlib.crc32(b"IDAT" + payload) & 0xFFFFFFFF
+    broken = (
+        data[: marker - 4]
+        + len(payload).to_bytes(4, "big")
+        + b"IDAT"
+        + payload
+        + crc.to_bytes(4, "big")
+        + data[marker + 4 + length + 4 :]
+    )
+
+    with pytest.raises(ImportErrorDetail, match=r"not a readable image"):
+        parse_casebook(
+            casebook_zip(
+                book=casebook(cases=[visual_case()], assets=ONLY_ASSET),
+                images={"sale-stage-selling.png": broken},
+            )
+        )
+
+
+def test_oversized_pixel_image_is_reported_not_raised():
+    # A tiny file can declare a huge canvas; Pillow raises DecompressionBombError
+    # which is not an OSError subclass and used to escape as a 500.
+    buffer = BytesIO()
+    Image.new("RGB", (4, 6), (1, 2, 3)).save(buffer, format="PNG")
+    data = bytearray(buffer.getvalue())
+    data[16:20] = (20000).to_bytes(4, "big")
+    data[20:24] = (20000).to_bytes(4, "big")
+    import zlib
+
+    crc = zlib.crc32(bytes(data[12:29])) & 0xFFFFFFFF
+    data[29:33] = crc.to_bytes(4, "big")
+
+    with pytest.raises(ImportErrorDetail, match=r"megapixel limit"):
+        parse_casebook(
+            casebook_zip(
+                book=casebook(cases=[visual_case()], assets=ONLY_ASSET),
+                images={"sale-stage-selling.png": bytes(data)},
+            )
+        )
+
+
+@pytest.mark.parametrize("member", [".", "\\"])
+def test_empty_and_dot_zip_member_names_are_rejected(member):
+    # PurePosixPath('.').parts is empty, so the old code raised IndexError
+    # instead of a readable import error.
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("casebook.json", json.dumps(casebook(), ensure_ascii=False))
+        archive.writestr("assets/sale-stage-selling.png", png_bytes())
+        archive.writestr("assets/sale-confirm-modal.png", png_bytes())
+        archive.writestr(member, b"x")
+
+    with pytest.raises(ImportErrorDetail, match="not a safe path"):
+        parse_casebook(buffer.getvalue())
+
+
+@pytest.mark.parametrize("member", ["./", "/", "assets/./", "assets//"])
+def test_directory_like_zip_entries_are_ignored(member):
+    # Directory entries are skipped before path validation; they must not crash
+    # the import even though they carry no asset bytes.
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("casebook.json", json.dumps(casebook(), ensure_ascii=False))
+        archive.writestr("assets/sale-stage-selling.png", png_bytes())
+        archive.writestr("assets/sale-confirm-modal.png", png_bytes())
+        archive.writestr(member, b"x")
+
+    document = parse_casebook(buffer.getvalue())
+
+    assert len(document.cases) == 2

@@ -197,6 +197,7 @@ table { width: 100%; border-collapse: collapse; font-size: .8rem; } th { color: 
 .reference-gallery-locators li { display: grid; gap: 4px; justify-items: center; min-width: 72px; color: #687178; font-size: .68rem; text-align: center; }
 .reference-gallery-caption { color: #8a9297; font-style: normal; }
 .reference-gallery-locators img { display: block; width: 64px; height: 64px; object-fit: cover; border: 1px solid #e9eced; border-radius: 5px; }
+.reference-gallery-locators .reference-gallery-focus { width: 100%; min-width: 160px; margin-top: 2px; text-align: left; }
 .reference-gallery-dialog { position: fixed; inset: 0; z-index: 40; display: flex; flex-direction: column; gap: 12px; padding: 16px; background: rgba(20, 25, 30, .9); outline: none; }
 .reference-gallery-dialog-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: #fff; font-size: .84rem; }
 .reference-gallery-dialog img { flex: 1; min-height: 0; width: 100%; object-fit: contain; }

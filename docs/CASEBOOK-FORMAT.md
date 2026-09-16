@@ -89,7 +89,7 @@ odyssey-casebook.zip
             "pattern": "^[A-Za-z][A-Za-z0-9]*-[0-9]+(-[A-Za-z0-9]+)*$"
           },
           "title": { "type": "string", "minLength": 1, "maxLength": 120 },
-          "position": { "type": "integer", "minimum": 1 },
+          "position": { "type": "integer", "minimum": 1, "maximum": 2147483647 },
           "module": { "type": "string", "minLength": 1 },
           "layer": { "enum": ["Smoke", "Core", "Regression"] },
           "priority": { "enum": ["P0", "P1", "P2"] },
@@ -268,11 +268,12 @@ odyssey-casebook.zip
 任一不满足 → 422 作废，`detail` 给出 JSON 路径（如 `cases[3].visual.references[0].role`）或文件名：
 
 - 每个对象 `additionalProperties: false`：出现 schema 之外的字段（`slices`、`manifest`、拼错的 `refferences`）直接拒绝。
-- 不做类型转换：`steps`/`expected` 必须是字符串数组，写成字符串失败；`position` 必须是整数；`box` 必须是 4 个 0–1 数字。
+- 不做类型转换：`steps`/`expected` 必须是字符串数组，写成字符串失败；`position` 必须是 1–2147483647 的整数；`box` 必须是 4 个 0–1 的有限数字（`NaN`/`Infinity` 拒绝）。
+- 可选字段只能整个省略，不能显式写 `null`：`position`、`focus`、`box` 等出现即按类型校验。
 - 枚举精确匹配（大小写不宽容）：`role`、`type`、`check`、`priority`、`layer`。
 - 三处集合必须完全一致：`assets/` 下的文件名（去扩展名）、`assets` 对象的 key、被 `references[].asset` 引用到的 key。多一张没被引用、少一张被引用、引用不存在的 key，全部拒绝。
 - 用例 `code` 必须匹配 `<字母/数字>-<数字>` 且包内唯一；给了 `position` 就必须包内唯一；用例数 1–5000。
-- ZIP 内 `casebook.json` 恰好一份；图片只允许 PNG / JPEG / WebP；ZIP ≤ 100 MB，解压后 ≤ 250 MB，单张图 ≤ 20 MB。
+- ZIP 内 `casebook.json` 恰好一份；图片只允许 PNG / JPEG / WebP 且必须能完整解码；ZIP ≤ 100 MB，解压后 ≤ 250 MB，单张图 ≤ 20 MB、≤ 5000 万像素。
 
 ## 6. 为什么这样定
 

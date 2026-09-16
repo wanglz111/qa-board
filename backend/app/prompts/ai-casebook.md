@@ -93,7 +93,7 @@
             "pattern": "^[A-Za-z][A-Za-z0-9]*-[0-9]+(-[A-Za-z0-9]+)*$"
           },
           "title": { "type": "string", "minLength": 1, "maxLength": 120 },
-          "position": { "type": "integer", "minimum": 1 },
+          "position": { "type": "integer", "minimum": 1, "maximum": 2147483647 },
           "module": { "type": "string", "minLength": 1 },
           "layer": { "enum": ["Smoke", "Core", "Regression"] },
           "priority": { "enum": ["P0", "P1", "P2"] },
@@ -215,8 +215,8 @@
 
 - 包结构只有一个 JSON 加一棵图片树：`casebook.json` + `assets/<key>.<png|jpg|jpeg|webp>`；**文件名就是 key**。
 - 图片按组去重：同一张图被多条用例引用时只存一份，用例侧保留 role / caption / focus。
-- ZIP ≤ 100 MB，解压后 ≤ 250 MB，单张图 ≤ 20 MB，用例 1–5000 条。
-- 校验是严格模式：字段、类型、枚举、三处集合任一不符都会 422 作废。
+- ZIP ≤ 100 MB，解压后 ≤ 250 MB，单张图 ≤ 20 MB 且 ≤ 5000 万像素，用例 1–5000 条。
+- 校验是严格模式：字段、类型、枚举、三处集合任一不符都会 422 作废；可选字段只能省略，不能写 `null`。
 - 图片由人从设计稿导出，AI 只写 JSON。
 
 ## 第三部分：常见错误写法

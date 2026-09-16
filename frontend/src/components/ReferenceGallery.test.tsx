@@ -61,6 +61,28 @@ it("keeps locators out of the stepper and shows focus notes", () => {
   expect(screen.getByText("个人中心入口")).toBeVisible();
 });
 
+it("shows the focus notes of locator images", () => {
+  const locatorFocus: ReferenceFocus = {
+    label: "入口位置",
+    note: "右上角头像菜单",
+    box: [0.7, 0.05, 0.2, 0.1]
+  };
+  render(
+    <ReferenceGallery
+      assets={[
+        asset({ id: "a1", name: "节点发售" }),
+        asset({ id: "a3", name: "个人中心入口", role: "locator", focus: [locatorFocus] })
+      ]}
+      assetUrl={url}
+    />
+  );
+
+  expect(screen.getByText("定位辅助图")).toBeVisible();
+  expect(screen.getByText("入口位置")).toBeVisible();
+  expect(screen.getByText("右上角头像菜单")).toBeVisible();
+  expect(screen.getByText("70% / 5% / 20% / 10%")).toBeVisible();
+});
+
 it("switches images with the stepper without leaving the expected group", async () => {
   render(
     <ReferenceGallery

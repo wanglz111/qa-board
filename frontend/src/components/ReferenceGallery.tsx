@@ -1,12 +1,31 @@
 import { useEffect, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight, X } from "lucide-react";
 
-import type { ReferenceAsset } from "../api";
+import type { ReferenceAsset, ReferenceFocus } from "../api";
 
 type Props = {
   assets: ReferenceAsset[];
   assetUrl: (assetId: string) => string;
 };
+
+function FocusList({ focus }: { focus: ReferenceFocus[] }) {
+  if (focus.length === 0) return null;
+  return (
+    <ul className="reference-gallery-focus">
+      {focus.map((item) => (
+        <li key={item.label}>
+          <strong>{item.label}</strong>
+          {item.note ? <span>{item.note}</span> : null}
+          {item.box ? (
+            <span className="reference-gallery-box">
+              {item.box.map((value) => `${Math.round(value * 100)}%`).join(" / ")}
+            </span>
+          ) : null}
+        </li>
+      ))}
+    </ul>
+  );
+}
 
 export function ReferenceGallery({ assets, assetUrl }: Props) {
   const expected = assets.filter((asset) => asset.role === "expected");
@@ -55,21 +74,7 @@ export function ReferenceGallery({ assets, assetUrl }: Props) {
         <span>{current.caption ?? current.name}</span>
         {current.prototype_version ? <em>原型 {current.prototype_version}</em> : null}
       </p>
-      {current.focus.length > 0 ? (
-        <ul className="reference-gallery-focus">
-          {current.focus.map((item) => (
-            <li key={item.label}>
-              <strong>{item.label}</strong>
-              {item.note ? <span>{item.note}</span> : null}
-              {item.box ? (
-                <span className="reference-gallery-box">
-                  {item.box.map((value) => `${Math.round(value * 100)}%`).join(" / ")}
-                </span>
-              ) : null}
-            </li>
-          ))}
-        </ul>
-      ) : null}
+      <FocusList focus={current.focus} />
       {primary.length > 1 ? (
         <div className="reference-gallery-stepper">
           <button
@@ -103,6 +108,7 @@ export function ReferenceGallery({ assets, assetUrl }: Props) {
                 {asset.caption && asset.caption !== asset.name ? (
                   <em className="reference-gallery-caption">{asset.caption}</em>
                 ) : null}
+                <FocusList focus={asset.focus} />
               </li>
             ))}
           </ul>

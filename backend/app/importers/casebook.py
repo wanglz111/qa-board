@@ -14,6 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from io import BytesIO
 import json
+import math
 from pathlib import PurePosixPath
 import re
 from typing import Any
@@ -28,6 +29,12 @@ CASEBOOK_VERSION = "1.0"
 MAX_BUNDLE_BYTES = 100 * 1024 * 1024
 MAX_UNCOMPRESSED_BYTES = 250 * 1024 * 1024
 MAX_ASSET_BYTES = 20 * 1024 * 1024
+# GroupCase.position is a PostgreSQL int4; values beyond it would pass preview
+# and then fail at confirm time.
+MAX_POSITION = 2_147_483_647
+# Well above any real prototype export (Odyssey's largest is a few megapixels)
+# but low enough to reject a decompression bomb with a readable 422.
+MAX_IMAGE_PIXELS = 50_000_000
 ASSET_KEY = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 CASE_CODE = re.compile(r"^[A-Za-z][A-Za-z0-9]*-[0-9]+(-[A-Za-z0-9]+)*$")
 ASSET_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp")
@@ -196,8 +203,8 @@ def parse_casebook(content: bytes) -> CasebookDocument:
 
         position = (
             index + 1
-            if entry.get("position") is None
-            else _integer(entry["position"], f"{path}.position")
+            if "position" not in entry
+            else _integer(entry["position"], f"{path}.position", maximum=MAX_POSITION)
         )
         if position in positions:
             raise ImportErrorDetail(f"{path}.position: duplicate position {position}")
@@ -323,17 +330,30 @@ def _string_list(value: Any, path: str, *, minimum: int = 0) -> list[str]:
     return [_text(item, f"{path}[{index}]") for index, item in enumerate(value)]
 
 
-def _integer(value: Any, path: str, *, minimum: int = 1) -> int:
+def _integer(
+    value: Any, path: str, *, minimum: int = 1, maximum: int | None = None
+) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
         raise ImportErrorDetail(f"{path}: must be an integer >= {minimum}")
+    if maximum is not None and value > maximum:
+        raise ImportErrorDetail(
+            f"{path}: must be an integer between {minimum} and {maximum}"
+        )
     return value
 
 
 def _number(value: Any, path: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ImportErrorDetail(f"{path}: must be a number")
-    number = float(value)
-    if number < 0 or number > 1:
+    try:
+        number = float(value)
+    except (OverflowError, ValueError):
+        # A JSON integer can exceed float's range and raise OverflowError.
+        raise ImportErrorDetail(
+            f"{path}: must be normalised between 0 and 1"
+        ) from None
+    # NaN slips past the comparisons below, so finiteness is checked explicitly.
+    if not math.isfinite(number) or number < 0 or number > 1:
         raise ImportErrorDetail(f"{path}: must be normalised between 0 and 1")
     return number
 
@@ -367,24 +387,26 @@ def _references(
                     if "caption" in entry
                     else None
                 ),
-                focus=_focus(entry.get("focus"), f"{item_path}.focus"),
+                focus=(
+                    _focus(entry["focus"], f"{item_path}.focus")
+                    if "focus" in entry
+                    else ()
+                ),
             )
         )
     return tuple(references)
 
 
 def _focus(value: Any, path: str) -> tuple[BundleFocus, ...]:
-    if value is None:
-        return ()
     if not isinstance(value, list):
         raise ImportErrorDetail(f"{path}: must be an array")
     result: list[BundleFocus] = []
     for index, raw in enumerate(value):
         item_path = f"{path}[{index}]"
         entry = _object(raw, item_path, "focus[]")
-        box_value = entry.get("box")
         box: tuple[float, float, float, float] | None = None
-        if box_value is not None:
+        if "box" in entry:
+            box_value = entry["box"]
             if not isinstance(box_value, list) or len(box_value) != 4:
                 raise ImportErrorDetail(f"{item_path}.box: must be [x, y, w, h]")
             box = (
@@ -439,7 +461,14 @@ def _read_entries(content: bytes) -> dict[str, bytes]:
 def _normalize(name: str) -> str:
     candidate = name.replace("\\", "/").lstrip("/")
     path = PurePosixPath(candidate)
-    if not candidate or path.is_absolute() or ".." in path.parts:
+    # ``.``, ``/`` and ``assets/./`` collapse to no path segments; accessing
+    # parts[0] below would otherwise raise an unhandled IndexError.
+    if (
+        not candidate
+        or not path.parts
+        or path.is_absolute()
+        or ".." in path.parts
+    ):
         raise ImportErrorDetail(f"The bundle entry {name!r} is not a safe path")
     if path.parts[0].endswith(":"):
         raise ImportErrorDetail(f"The bundle entry {name!r} is not a safe path")
@@ -517,8 +546,24 @@ def _load_asset(
         with Image.open(BytesIO(content)) as image:
             detected = image.format
             width, height = image.size
-            image.verify()
-    except (UnidentifiedImageError, OSError, ValueError):
+            if width * height > MAX_IMAGE_PIXELS:
+                raise ImportErrorDetail(
+                    f"Prototype image {source_path} exceeds the "
+                    f"{MAX_IMAGE_PIXELS // 1_000_000} megapixel limit"
+                )
+            # load() decodes the pixel stream, so a corrupt IDAT is caught here
+            # instead of by the tester's browser (verify() only reads headers).
+            image.load()
+    except ImportErrorDetail:
+        raise
+    except Image.DecompressionBombError:
+        # Pillow refuses oversized canvases at open() time; report the same
+        # limit we enforce ourselves so the tester gets one clear message.
+        raise ImportErrorDetail(
+            f"Prototype image {source_path} exceeds the "
+            f"{MAX_IMAGE_PIXELS // 1_000_000} megapixel limit"
+        ) from None
+    except (UnidentifiedImageError, OSError, ValueError, SyntaxError):
         raise ImportErrorDetail(
             f"Prototype image {source_path} is not a readable image"
         ) from None

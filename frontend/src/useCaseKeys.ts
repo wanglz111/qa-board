@@ -46,12 +46,24 @@ function isControlContext(event: KeyboardEvent): boolean {
   return typeof document !== "undefined" && isEnterOwnedByControl(document.activeElement);
 }
 
+// A zoomed prototype image is a modal overlay: while it owns the screen the
+// execution shortcuts (Enter/Backspace/arrows) must not fire behind it. The
+// query runs against the document the event came from so a dialog in the main
+// window does not silence the PiP window (or the other way round).
+export function hasOpenDialog(event: KeyboardEvent): boolean {
+  const target = event.target as Node | null;
+  const owner = target?.ownerDocument ?? event.view?.document;
+  const scope = owner ?? (typeof document === "undefined" ? null : document);
+  return scope?.querySelector('[role="dialog"][aria-modal="true"]') != null;
+}
+
 export function resolveCaseKey(
   event: KeyboardEvent,
   handlers: CaseKeyHandlers
 ): (() => void) | null {
   if (handlers.enabled === false) return null;
   if (event.defaultPrevented || event.altKey) return null;
+  if (hasOpenDialog(event)) return null;
   if (isTypingContext(event)) return null;
   if (event.key === "Enter" && isControlContext(event)) return null;
   const ctrl = event.ctrlKey || event.metaKey;
