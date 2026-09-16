@@ -236,9 +236,16 @@ class FakeLark:
             {"field_name": name, "type": types[0]}
             for name, types in REQUIRED_BUG_FIELD_TYPES.items()
         ]
-        self.base_name = "旧版测试管理"
-        self.runs_table_name = "执行记录"
-        self.defects_table_name = "缺陷记录"
+        self.wiki_nodes: dict[str, dict[str, Any]] = {}
+        self.wiki_error = False
+        self.wiki_url = "https://tenant.larksuite.com/wiki/node-1?table=tbl-runs&view=vew-main"
+        # Every base the double knows: name plus its (table_id, table_name) pairs.
+        # `app-token` is the legacy base the history and outbox suites read.
+        self.bases = {
+            "app-exec": ("执行库", [("tbl-runs", "执行记录"), ("tbl-bugs", "缺陷记录")]),
+            "app-bug": ("缺陷库", [("tbl-defects", "缺陷记录")]),
+            "app-token": ("旧版测试管理", [("tbl-runs", "执行记录"), ("tbl-defects", "缺陷记录")]),
+        }
         self.media: dict[str, tuple[bytes, str]] = {}
         self.requests: list[dict[str, str]] = []
         self.created_records: list[dict[str, Any]] = []
@@ -283,6 +290,12 @@ class FakeLark:
         self.client.list_records("app-token", "tbl-runs")
         return history_for(self.records, code)
 
+    def _base(self, path: str) -> tuple[str, list[tuple[str, str]]] | None:
+        if "/apps/" not in path:
+            return None
+        token = path.split("/apps/", 1)[1].split("/", 1)[0]
+        return self.bases.get(token)
+
     # The worker only needs this create-only surface, so the double speaks it.
     def create_execution(self, fields: dict[str, Any]) -> str:
         return self._gateway.create_execution(fields)
@@ -304,6 +317,11 @@ class FakeLark:
             return httpx.Response(405, json={"code": 1, "msg": "legacy rows are read-only"})
         if path == "/open-apis/auth/v3/tenant_access_token/internal":
             return httpx.Response(200, json={"code": 0, "data": {"tenant_access_token": "fake-token"}})
+        if path == "/open-apis/wiki/v2/spaces/get_node":
+            if self.wiki_error:
+                return httpx.Response(200, json={"code": 1770003, "msg": "no permission"})
+            node = self.wiki_nodes.get(request.url.params["token"])
+            return httpx.Response(200, json={"code": 0, "data": {"node": node}})
         if "/medias/" in path and path.endswith("/download"):
             token = path.split("/medias/", 1)[1].removesuffix("/download")
             if self.media_unauthorized:
@@ -358,15 +376,42 @@ class FakeLark:
         if path.endswith("/tables"):
             # The real tenant answers a bare 404 for the single-table metadata
             # route, so names are resolved from this listing instead.
+            base = self._base(path)
             return httpx.Response(
                 200,
                 json={
                     "code": 0,
                     "data": {
-                        "items": [
-                            {"table_id": "tbl-runs", "name": self.runs_table_name},
-                            {"table_id": "tbl-defects", "name": self.defects_table_name},
-                        ],
+                        "items": (
+                            []
+                            if base is None
+                            else [
+                                {"table_id": table_id, "name": name}
+                                for table_id, name in base[1]
+                            ]
+                        ),
+                        "has_more": False,
+                    },
+                },
+            )
+        if path.endswith("/views"):
+            base = self._base(path)
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {
+                        "items": (
+                            []
+                            if base is None
+                            else [
+                                {
+                                    "view_id": "vew-main",
+                                    "view_name": "主视图",
+                                    "view_type": "grid",
+                                }
+                            ]
+                        ),
                         "has_more": False,
                     },
                 },
@@ -374,7 +419,10 @@ class FakeLark:
         if "/tables/" in path:
             return httpx.Response(404, text="404 page not found")
         if "/apps/" in path:
-            return httpx.Response(200, json={"code": 0, "data": {"app": {"name": self.base_name}}})
+            base = self._base(path)
+            if base is None:
+                return httpx.Response(404, json={"code": 1, "msg": "unsupported base"})
+            return httpx.Response(200, json={"code": 0, "data": {"app": {"name": base[0]}}})
         return httpx.Response(404, json={"code": 1, "msg": "unsupported path"})
 
 

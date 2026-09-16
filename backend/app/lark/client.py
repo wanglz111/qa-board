@@ -133,6 +133,19 @@ class LarkClient:
     def app_metadata(self, app_token: str) -> dict[str, Any]:
         return self._send("GET", f"/open-apis/bitable/v1/apps/{app_token}")
 
+    def wiki_node(self, node_token: str) -> dict[str, Any]:
+        """Resolve one wiki node to the Bitable app token behind it."""
+
+        data = self._send(
+            "GET",
+            "/open-apis/wiki/v2/spaces/get_node",
+            params={"token": node_token, "obj_type": "wiki"},
+        )
+        node = data.get("node")
+        if not isinstance(node, dict):
+            raise LarkError("Lark 未返回 wiki 节点信息")
+        return node
+
     def list_tables(self, app_token: str) -> list[dict[str, Any]]:
         """List a base's tables.
 
