@@ -74,7 +74,7 @@ git merge --ff-only feature/cloud-testdeck
 # 2) 和 CI 一致的验证（后端需要一个本地 PostgreSQL 测试库）
 cd backend
 TEST_DATABASE_URL=postgresql+psycopg://testdeck:testdeck@127.0.0.1:5433/testdeck_test \
-  .venv/bin/python -m pytest -q          # 期望 245 passed
+  .venv/bin/python -m pytest -q          # 期望 248 passed
 cd ../frontend
 npx vitest run                            # 期望 101 passed
 npm run build
@@ -93,7 +93,7 @@ GIT_SSH_COMMAND="ssh -o ProxyCommand=none" git push origin main
 GIT_SSH_COMMAND="ssh -o ProxyCommand=none" git push origin v0.1.3
 ```
 
-远端现在是 `main` = `feature/cloud-testdeck` = `760d9af`，标签 `v0.1.2`。
+远端现在是 `main` = `1485e9c`，标签 `v0.1.3`。
 
 ### 4.2 GitHub Actions：镜像发布
 
@@ -232,3 +232,22 @@ Cloudflare 侧只需 `testdeck.gleaftex.com` 的 A 记录指向 `43.167.241.33`�
 | multipart 导入预览（2 条用例的 CSV + CSRF） | 200，正确解析 `B-001` / `B-002` |
 | 同一请求去掉 CSRF | 403 `Invalid CSRF token` |
 | `GET /` | 200，返回 SPA |
+
+## 11. 这次交付做了什么（v0.1.3）
+
+- 修掉「新建数据表」必然失败的问题：Lark 建表接口要求文本、附件字段的 `property` 为 `null`，而 v0.1.2 发的是 `{}`，`截图` 又是附件字段，Lark 因此回 `code 800074088 Attach field property should be null`。现在建表和建字段两条路径都发 `null`，日期字段保留 `date_formatter` / `auto_fill`。
+- 建表失败的报错不再只有 `Lark create failed: HTTPStatusError`：现在带上 HTTP 状态、Lark code 和 Lark 原文，确属权限问题时追加「在开放平台开通多维表格权限并发布，并把应用加为该表的可编辑协作者」的提示。
+- 本地验证：后端 `248 passed`，前端 `101 passed` + `npm run build` 通过。
+- GitHub Actions 运行 [#35103910826](https://github.com/wanglz111/qa-board/actions/runs/35103910826) 成功：`verify` 与两个 `publish` 都是 success，镜像 `v0.1.3` 与 `sha-1485e9c` 已推到 GHCR。
+- 服务器执行 `./deploy.sh v0.1.3`：`.env` 已自动备份，`migrate` 退出码 0（本次没有新迁移），api / worker / web 全部换成 `ghcr.io/wanglz111/qa-board-*:v0.1.3`。
+
+升级后的实测结果：
+
+| 检查 | 结果 |
+| --- | --- |
+| `docker compose ps` | api、worker、web 都是 `ghcr.io/wanglz111/qa-board-*:v0.1.3` |
+| `GET /health/ready` | 200 `{"ok":true}` |
+| 匿名 `GET /api/groups` | 401 |
+| 容器内 `table_fields("execution")` | `截图` 的 `property` 是 `None`，`日期` 是 `{"date_formatter": "yyyy/MM/dd", "auto_fill": false}` |
+
+回滚：`cd /home/ubuntu/testdeck && ./deploy.sh v0.1.2`。
