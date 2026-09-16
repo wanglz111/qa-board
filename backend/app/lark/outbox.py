@@ -162,7 +162,8 @@ def run_job(
 
     if not group_is_confirmed(db, case.group_id):
         # Never post into a destination the administrator has not approved for
-        # this group; hold the job until the approval matches again.
+        # this group; the job waits here until an administrator restores the
+        # approval.
         job.state = "pending"
         job.error_kind = "confirmation_stale"
         job.lease_until = None

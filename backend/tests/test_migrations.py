@@ -34,6 +34,9 @@ def test_empty_test_schema_upgrades_to_head_twice(migrated_database):
         assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
             "0009_lark_targets"
         )
+        assert "target_fingerprint" in {
+            column["name"] for column in inspect(connection).get_columns("sync_jobs")
+        }
 
 
 def test_alembic_revision_template_is_available():

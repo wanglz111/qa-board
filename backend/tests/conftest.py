@@ -437,18 +437,6 @@ def history_ref(db_session, imported_group) -> LarkHistoryRef:
 
 
 @pytest.fixture
-def known_table_names() -> dict[str, str]:
-    return {
-        "base_name": "旧版测试管理",
-        "execution_table_name": "执行记录",
-        "bug_table_name": "缺陷记录",
-        "base_token": "app-token",
-        "execution_table_id": "tbl-runs",
-        "bug_table_id": "tbl-defects",
-    }
-
-
-@pytest.fixture
 def confirmed_group(db_session, imported_group) -> Group:
     db_session.add(
         LarkTarget(

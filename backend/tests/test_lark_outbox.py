@@ -14,6 +14,14 @@ def _job(db_session, attempt) -> SyncJob:
     return db_session.scalar(select(SyncJob).where(SyncJob.attempt_id == attempt.id))
 
 
+def _withdraw_approval(db_session, group) -> None:
+    target = db_session.scalar(
+        select(LarkTarget).where(LarkTarget.group_id == group.id)
+    )
+    target.confirmed_at = None
+    db_session.commit()
+
+
 def test_old_records_and_bugs_are_never_updated(fake_lark, confirmed_group, failed_attempt):
     state = process_one_job(fake_lark, failed_attempt)
 
@@ -288,16 +296,12 @@ def test_sync_summary_reports_failed_and_uncertain_without_payloads(
     assert "new-1" not in str(body["last_error_kind"])
 
 
-def test_repointed_target_stops_counting_as_confirmed(
+def test_withdrawn_approval_stops_counting_as_confirmed(
     lark_fake, authenticated_client, confirmed_group, failed_attempt, db_session
 ):
-    """Approval covers the tables that were read; re-pointing retires it."""
+    """A withdrawn approval stops the group from counting as confirmed."""
 
-    target = db_session.scalar(
-        select(LarkTarget).where(LarkTarget.group_id == confirmed_group.id)
-    )
-    target.confirmed_at = None
-    db_session.commit()
+    _withdraw_approval(db_session, confirmed_group)
 
     summary = authenticated_client.get(
         f"/api/groups/{confirmed_group.id}/sync"
@@ -312,14 +316,10 @@ def test_repointed_target_stops_counting_as_confirmed(
     )
 
 
-def test_new_attempt_is_not_queued_once_the_target_moved(
+def test_new_attempt_is_not_queued_once_the_approval_is_withdrawn(
     lark_fake, authenticated_client, confirmed_group, db_session
 ):
-    target = db_session.scalar(
-        select(LarkTarget).where(LarkTarget.group_id == confirmed_group.id)
-    )
-    target.confirmed_at = None
-    db_session.commit()
+    _withdraw_approval(db_session, confirmed_group)
 
     created = authenticated_client.post(
         f"/api/groups/{confirmed_group.id}/cases/B-001/attempts",
@@ -338,11 +338,7 @@ def test_stale_confirmation_halts_outbound_writes(
 ):
     """A held job must not post into a destination nobody approved."""
 
-    target = db_session.scalar(
-        select(LarkTarget).where(LarkTarget.group_id == confirmed_group.id)
-    )
-    target.confirmed_at = None
-    db_session.commit()
+    _withdraw_approval(db_session, confirmed_group)
 
     state = process_one_job(lark_fake, failed_attempt)
 

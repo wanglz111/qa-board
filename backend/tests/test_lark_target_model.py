@@ -17,8 +17,19 @@ def _target(group_id, execution_table_id: str) -> LarkTarget:
         bug_base_name="缺陷库",
         bug_table_id="tbl-bugs",
         bug_table_name="缺陷记录",
-        target_fingerprint="app-exec|tbl-a|app-bug|tbl-bugs",
+        target_fingerprint=f"app-exec|{execution_table_id}|app-bug|tbl-bugs",
         schema_fingerprint=None,
+    )
+
+
+def _revision(group_id, fingerprint: str) -> LarkTargetRevision:
+    return LarkTargetRevision(
+        group_id=group_id,
+        execution_base_token="app-exec",
+        execution_table_id="tbl-runs",
+        bug_base_token="app-bug",
+        bug_table_id="tbl-defects",
+        target_fingerprint=fingerprint,
     )
 
 
@@ -33,19 +44,23 @@ def test_one_target_row_per_group(db_session, imported_group):
 
 def test_revisions_accumulate_per_group(db_session, imported_group):
     for fingerprint in ("f1", "f2"):
-        db_session.add(
-            LarkTargetRevision(
-                group_id=imported_group.id,
-                execution_base_token="app-exec",
-                execution_table_id="tbl-runs",
-                bug_base_token="app-bug",
-                bug_table_id="tbl-defects",
-                target_fingerprint=fingerprint,
-            )
-        )
+        db_session.add(_revision(imported_group.id, fingerprint))
     db_session.commit()
-    count = db_session.scalar(select(func.count()).select_from(LarkTargetRevision))
+    count = db_session.scalar(
+        select(func.count())
+        .select_from(LarkTargetRevision)
+        .where(LarkTargetRevision.group_id == imported_group.id)
+    )
     assert count == 2
+
+
+def test_one_revision_row_per_group_and_fingerprint(db_session, imported_group):
+    db_session.add(_revision(imported_group.id, "f1"))
+    db_session.commit()
+    db_session.add(_revision(imported_group.id, "f1"))
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+    db_session.rollback()
 
 
 def test_confirmation_starts_empty(db_session, imported_group):
