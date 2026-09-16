@@ -145,15 +145,26 @@ def provision_fields(
         client.list_fields(base_token, table_id), payload.role
     )}
     created: list[str] = []
-    for name in sorted(set(payload.field_names)):
-        field = planned.get(name)
-        if field is None:
-            # Already present or not part of this role's schema: never invent one.
-            continue
-        client.create_field(base_token, table_id, name, field["type"], field["properties"])
-        created.append(name)
+    try:
+        for name in sorted(set(payload.field_names)):
+            field = planned.get(name)
+            if field is None:
+                # Already present or not part of this role's schema: never invent one.
+                continue
+            client.create_field(
+                base_token, table_id, name, field["type"], field["properties"]
+            )
+            created.append(name)
+    except LarkError as error:
+        # Lark's own message is safe to show; the request body and the
+        # credentials never reach it. Refuse like the table creation does
+        # instead of letting the failure become a 500.
+        raise HTTPException(status_code=409, detail=f"创建表头失败：{error}") from None
     if payload.create_view:
-        client.create_view(base_token, table_id, "TestDeck")
+        try:
+            client.create_view(base_token, table_id, "TestDeck")
+        except LarkError as error:
+            raise HTTPException(status_code=409, detail=f"创建视图失败：{error}") from None
     try:
         state = read_draft_state(
             client,

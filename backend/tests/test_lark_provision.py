@@ -3,31 +3,27 @@ from datetime import datetime, timezone
 import pytest
 from sqlalchemy import select
 
+from app.lark.client import LarkError
 from app.lark.provision import PROVISION_FIELD_TYPES, provision_plan
-from app.models import LarkTarget
+from app.models import Group, LarkTarget
 
 
-@pytest.fixture(autouse=True)
-def provisionable_table(request):
-    """Point the fixture group at the standard two-base target.
+@pytest.fixture
+def provision_group(lark_fake, db_session, imported_group) -> Group:
+    """A group bound to the standard two-base target, poised for provisioning.
 
     ``imported_group`` deliberately has no stored ``LarkTarget`` (see
     ``test_lark_target.py::test_read_target_before_any_target_is_chosen``) and
     provisioning only ever happens inside a target the administrator chose. The
-    execution table then starts with a single header, which is the situation the
-    endpoint exists for. The plan builders above are pure functions, so only the
-    tests that drive the endpoints through ``lark_fake`` get either change.
+    execution table also starts with a single header, which is the situation the
+    endpoint exists for. It is a plain fixture rather than an autouse one so the
+    binding stays visible in every test that depends on it.
     """
 
-    if "lark_fake" not in request.fixturenames:
-        return
-    lark_fake = request.getfixturevalue("lark_fake")
-    db_session = request.getfixturevalue("db_session")
-    group = request.getfixturevalue("imported_group")
     lark_fake.fields = [{"field_name": "用例", "type": 1}]
     db_session.add(
         LarkTarget(
-            group_id=group.id,
+            group_id=imported_group.id,
             source_url="https://tenant.larksuite.com/wiki/node-1",
             execution_base_token="app-exec",
             execution_base_name="执行库",
@@ -43,6 +39,7 @@ def provisionable_table(request):
         )
     )
     db_session.commit()
+    return imported_group
 
 
 @pytest.fixture(autouse=True)
@@ -96,17 +93,17 @@ def test_plan_marks_date_and_attachment_types():
 
 
 def test_setting_headers_creates_only_the_approved_fields(
-    lark_fake, authenticated_client, imported_group
+    lark_fake, authenticated_client, provision_group
 ):
     lark_fake.fields = [{"field_name": "用例", "type": 1}]
     preview = authenticated_client.get(
-        f"/api/groups/{imported_group.id}/lark/provision"
+        f"/api/groups/{provision_group.id}/lark/provision"
     ).json()
     names = [field["name"] for field in preview["roles"]["execution"]]
     assert "用例" not in names
 
     body = authenticated_client.post(
-        f"/api/groups/{imported_group.id}/lark/provision/fields",
+        f"/api/groups/{provision_group.id}/lark/provision/fields",
         json={
             "role": "execution",
             "field_names": ["结果", "日期"],
@@ -120,10 +117,10 @@ def test_setting_headers_creates_only_the_approved_fields(
 
 
 def test_setting_headers_refuses_an_unapproved_request(
-    lark_fake, authenticated_client, imported_group
+    lark_fake, authenticated_client, provision_group
 ):
     response = authenticated_client.post(
-        f"/api/groups/{imported_group.id}/lark/provision/fields",
+        f"/api/groups/{provision_group.id}/lark/provision/fields",
         json={
             "role": "execution",
             "field_names": ["结果"],
@@ -135,7 +132,7 @@ def test_setting_headers_refuses_an_unapproved_request(
     assert not lark_fake.created_fields
 
 
-def test_setting_headers_is_idempotent(lark_fake, authenticated_client, imported_group):
+def test_setting_headers_is_idempotent(lark_fake, authenticated_client, provision_group):
     payload = {
         "role": "execution",
         "field_names": ["结果"],
@@ -143,19 +140,19 @@ def test_setting_headers_is_idempotent(lark_fake, authenticated_client, imported
         "acknowledge": True,
     }
     first = authenticated_client.post(
-        f"/api/groups/{imported_group.id}/lark/provision/fields", json=payload
+        f"/api/groups/{provision_group.id}/lark/provision/fields", json=payload
     ).json()
     second = authenticated_client.post(
-        f"/api/groups/{imported_group.id}/lark/provision/fields", json=payload
+        f"/api/groups/{provision_group.id}/lark/provision/fields", json=payload
     ).json()
     assert first["created_fields"] == ["结果"]
     assert second["created_fields"] == []
     assert len(lark_fake.created_fields) == 1
 
 
-def test_creating_a_table_returns_its_new_id(lark_fake, authenticated_client, imported_group):
+def test_creating_a_table_returns_its_new_id(lark_fake, authenticated_client, provision_group):
     body = authenticated_client.post(
-        f"/api/groups/{imported_group.id}/lark/provision/table",
+        f"/api/groups/{provision_group.id}/lark/provision/table",
         json={
             "role": "bug",
             "base_token": "app-bug",
@@ -169,10 +166,10 @@ def test_creating_a_table_returns_its_new_id(lark_fake, authenticated_client, im
 
 
 def test_setting_headers_creates_the_view_when_asked_to(
-    lark_fake, authenticated_client, imported_group
+    lark_fake, authenticated_client, provision_group
 ):
     body = authenticated_client.post(
-        f"/api/groups/{imported_group.id}/lark/provision/fields",
+        f"/api/groups/{provision_group.id}/lark/provision/fields",
         json={
             "role": "execution",
             "field_names": ["结果"],
@@ -186,12 +183,12 @@ def test_setting_headers_creates_the_view_when_asked_to(
 
 
 def test_setting_headers_never_invents_a_field(
-    lark_fake, authenticated_client, imported_group
+    lark_fake, authenticated_client, provision_group
 ):
     """Only a requested header of this role may be created, whatever is asked."""
 
     body = authenticated_client.post(
-        f"/api/groups/{imported_group.id}/lark/provision/fields",
+        f"/api/groups/{provision_group.id}/lark/provision/fields",
         json={
             "role": "execution",
             "field_names": ["结果", "问题描述", "自定义列"],
@@ -205,10 +202,10 @@ def test_setting_headers_never_invents_a_field(
 
 
 def test_setting_headers_clears_the_write_approval(
-    lark_fake, authenticated_client, imported_group, db_session
+    lark_fake, authenticated_client, provision_group, db_session
 ):
     body = authenticated_client.post(
-        f"/api/groups/{imported_group.id}/lark/provision/fields",
+        f"/api/groups/{provision_group.id}/lark/provision/fields",
         json={
             "role": "execution",
             "field_names": ["结果"],
@@ -218,17 +215,17 @@ def test_setting_headers_clears_the_write_approval(
     ).json()
 
     stored = db_session.scalar(
-        select(LarkTarget).where(LarkTarget.group_id == imported_group.id)
+        select(LarkTarget).where(LarkTarget.group_id == provision_group.id)
     )
     assert body["target"]["confirmed"] is False
     assert stored is not None and stored.confirmed_at is None
 
 
 def test_creating_a_table_requires_acknowledgement(
-    lark_fake, authenticated_client, imported_group
+    lark_fake, authenticated_client, provision_group
 ):
     response = authenticated_client.post(
-        f"/api/groups/{imported_group.id}/lark/provision/table",
+        f"/api/groups/{provision_group.id}/lark/provision/table",
         json={
             "role": "bug",
             "base_token": "app-bug",
@@ -239,3 +236,49 @@ def test_creating_a_table_requires_acknowledgement(
 
     assert response.status_code == 409
     assert not lark_fake.created_tables
+
+
+def test_setting_headers_reports_a_refused_create_as_a_conflict(
+    lark_fake, authenticated_client, provision_group
+):
+    """A refused header must reach the administrator, not become a 500."""
+
+    lark_fake.field_create_error = True
+    response = authenticated_client.post(
+        f"/api/groups/{provision_group.id}/lark/provision/fields",
+        json={
+            "role": "execution",
+            "field_names": ["结果"],
+            "create_view": False,
+            "acknowledge": True,
+        },
+    )
+
+    assert response.status_code == 409, response.text
+    detail = response.json()["detail"]
+    assert "创建表头失败" in detail
+    assert "no permission to create fields" in detail
+    assert "test-app-secret" not in detail
+    assert not lark_fake.created_fields
+
+
+def test_setting_headers_reports_a_refused_view_as_a_conflict(
+    lark_fake, authenticated_client, provision_group, monkeypatch
+):
+    def refuse(*args: object, **kwargs: object) -> dict[str, object]:
+        raise LarkError("Lark rejected the create (code 1254302): no permission to create views")
+
+    monkeypatch.setattr(lark_fake.client, "create_view", refuse)
+    response = authenticated_client.post(
+        f"/api/groups/{provision_group.id}/lark/provision/fields",
+        json={
+            "role": "execution",
+            "field_names": [],
+            "create_view": True,
+            "acknowledge": True,
+        },
+    )
+
+    assert response.status_code == 409, response.text
+    assert "创建视图失败" in response.json()["detail"]
+    assert not lark_fake.created_views
