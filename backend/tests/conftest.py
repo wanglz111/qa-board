@@ -262,6 +262,10 @@ class FakeLark:
         self.created_fields: list[dict[str, Any]] = []
         self.created_views: list[dict[str, Any]] = []
         self.created_tables: list[dict[str, Any]] = []
+        # Created views per (base, table), so a later listing of that table shows
+        # them exactly like the live API would.
+        self.views: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        self.main_view = {"view_id": "vew-main", "view_name": "主视图", "view_type": "grid"}
         self.created_execution = 0
         self.created_bug = 0
         self.put_calls: list[str] = []
@@ -389,11 +393,14 @@ class FakeLark:
                 return httpx.Response(
                     200, json={"code": 1254302, "msg": "no permission to create fields"}
                 )
-            role = self.field_roles.get(self._base_token_and_table(path))
+            pair = self._base_token_and_table(path)
+            role = self.field_roles.get(pair) if pair else None
             if role is None:
                 return httpx.Response(404, json={"code": 1, "msg": "unsupported table"})
             body = json.loads(request.content or b"{}")
-            self.created_fields.append(body)
+            self.created_fields.append(
+                {**body, "base_token": pair[0], "table_id": pair[1], "path": path}
+            )
             # The new header has to appear in the next read of this table, so it
             # joins the same schema store the /fields listing answers from.
             store = self.bug_fields if role == "bug" else self.fields
@@ -411,30 +418,28 @@ class FakeLark:
                 },
             )
         if request.method == "POST" and path.endswith("/views"):
-            if self._base_token_and_table(path) is None:
+            pair = self._base_token_and_table(path)
+            if pair is None:
                 return httpx.Response(404, json={"code": 1, "msg": "unsupported table"})
             body = json.loads(request.content or b"{}")
-            self.created_views.append(body)
-            return httpx.Response(
-                200,
-                json={
-                    "code": 0,
-                    "data": {
-                        "view": {
-                            "view_id": "vew-new",
-                            "view_name": body.get("view_name"),
-                            "view_type": body.get("view_type") or "grid",
-                        }
-                    },
-                },
+            self.created_views.append(
+                {**body, "base_token": pair[0], "table_id": pair[1], "path": path}
             )
+            view = {
+                "view_id": f"vew-created-{len(self.created_views)}",
+                "view_name": body.get("view_name"),
+                "view_type": body.get("view_type") or "grid",
+            }
+            self.views.setdefault(pair, [dict(self.main_view)]).append(view)
+            return httpx.Response(200, json={"code": 0, "data": {"view": view}})
         if request.method == "POST" and path.endswith("/tables"):
             base = self._base(path)
             if base is None:
                 return httpx.Response(404, json={"code": 1, "msg": "unsupported base"})
+            base_token = path.split("/apps/", 1)[1].split("/", 1)[0]
             body = json.loads(request.content or b"{}")
             table = body.get("table") or {}
-            self.created_tables.append(table)
+            self.created_tables.append({**table, "base_token": base_token, "path": path})
             # A created table really does show up in the base's listing afterwards.
             base[1].append(("tbl-new", str(table.get("name") or "")))
             return httpx.Response(
@@ -495,25 +500,15 @@ class FakeLark:
                 },
             )
         if path.endswith("/views"):
-            base = self._base(path)
-            if base is None:
-                return httpx.Response(404, json={"code": 1, "msg": "unsupported base"})
+            pair = self._base_token_and_table(path)
+            if pair is None:
+                return httpx.Response(404, json={"code": 1, "msg": "unsupported table"})
             return httpx.Response(
                 200,
                 json={
                     "code": 0,
                     "data": {
-                        "items": (
-                            []
-                            if not base[1]
-                            else [
-                                {
-                                    "view_id": "vew-main",
-                                    "view_name": "主视图",
-                                    "view_type": "grid",
-                                }
-                            ]
-                        ),
+                        "items": self.views.get(pair, [dict(self.main_view)]),
                         "has_more": False,
                     },
                 },

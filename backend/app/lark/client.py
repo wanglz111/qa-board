@@ -137,7 +137,8 @@ class LarkClient:
         method and path per request. A timeout is reported as ``LarkTimeout``
         because the write may have landed anyway, and a refusal carries Lark's
         own ``msg``: the request body (which can hold record values) and the
-        credentials never reach the message.
+        credentials never reach the message. A response that carries no ``data``
+        object is returned as-is, exactly like ``_send`` does.
         """
 
         headers = {"Authorization": f"Bearer {self._token_value()}"}
@@ -205,6 +206,9 @@ class LarkClient:
     def list_fields(self, app_token: str, table_id: str) -> list[dict[str, Any]]:
         return self._paginate(f"/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/fields")
 
+    def list_views(self, app_token: str, table_id: str) -> list[dict[str, Any]]:
+        return self._paginate(f"/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/views")
+
     def list_records(self, app_token: str, table_id: str) -> list[dict[str, Any]]:
         return self._paginate(f"/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records")
 
@@ -247,10 +251,14 @@ class LarkClient:
         )
 
     def create_view(self, app_token: str, table_id: str, name: str) -> dict[str, Any]:
-        return self._post_json(
+        data = self._post_json(
             f"/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/views",
             {"view_name": name, "view_type": "grid"},
         )
+        # Same tolerance as ``create_table``: the view may come back on its own or
+        # wrapped under ``view``, and either shape reports the new view's id.
+        view = data.get("view")
+        return view if isinstance(view, dict) else data
 
     def create_table(
         self, app_token: str, name: str, fields: list[dict[str, Any]]
