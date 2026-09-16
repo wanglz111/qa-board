@@ -5,6 +5,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Integer,
@@ -24,11 +25,12 @@ class Base(DeclarativeBase):
 
 class Admin(Base):
     __tablename__ = "admins"
+    __table_args__ = (CheckConstraint("singleton_key = 1", name="ck_admins_singleton_key"),)
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     email: Mapped[str] = mapped_column(String, unique=True, nullable=False)
     password_hash: Mapped[str] = mapped_column(String, nullable=False)
-    singleton_key: Mapped[int] = mapped_column(Integer, nullable=False, default=1, unique=True)
+    singleton_key: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1", default=1, unique=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

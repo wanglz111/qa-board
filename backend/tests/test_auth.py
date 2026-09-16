@@ -147,7 +147,7 @@ def test_protected_mutations_enforce_csrf_centrally(client, seeded_admin, method
         token = client.get('/api/auth/csrf').json()['csrf_token']
         assert client.request(method, '/test-mutation', headers={'X-CSRF-Token': token}).status_code == 200
     finally:
-        app.router.routes[:] = [r for r in app.router.routes if r.path != '/test-mutation']
+        app.router.routes[:] = [r for r in app.router.routes if getattr(r, 'path', None) != '/test-mutation']
 
 
 @pytest.mark.parametrize('ttl', ['0', '-1'])

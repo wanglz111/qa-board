@@ -100,7 +100,7 @@ def login(
         raise HTTPException(status_code=401, detail="Invalid credentials") from None
 
     token = secrets.token_urlsafe(32)
-    csrf_token = secrets.token_urlsafe(32)
+    csrf_token = _digest(token, settings.csrf_secret)
     db.add(
         AdminSession(
             admin=admin,
@@ -130,10 +130,14 @@ def me(admin: Annotated[Admin, Depends(require_admin)]) -> dict[str, str]:
 
 @router.get("/csrf")
 def csrf(
+    request: Request,
     admin_session: Annotated[AdminSession, Depends(current_session)],
     db: Annotated[Session, Depends(get_db)],
 ) -> dict[str, str]:
-    token = admin_session.token_hash
+    raw_cookie = request.cookies.get(SESSION_COOKIE)
+    if raw_cookie is None:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    token = _digest(raw_cookie, settings.csrf_secret)
     return {"csrf_token": token}
 
 
