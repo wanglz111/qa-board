@@ -49,6 +49,9 @@ services:
     restart: "no"
     command: ["sh", "-c", "alembic upgrade head && python -m app.bootstrap"]
     environment: *api-environment
+    # One-shot job: it is expected to exit, so a health state says nothing.
+    healthcheck:
+      disable: true
     depends_on:
       db:
         condition: service_healthy
@@ -70,6 +73,10 @@ services:
     restart: unless-stopped
     command: ["python", "-m", "app.worker"]
     environment: *api-environment
+    # The image healthcheck probes the API port and the worker serves no HTTP;
+    # a crashed worker is covered by the restart policy instead.
+    healthcheck:
+      disable: true
     depends_on:
       db:
         condition: service_healthy
