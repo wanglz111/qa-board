@@ -97,3 +97,30 @@ def test_export_requires_a_session_and_rejects_unknown_group(
     )
     missing = authenticated_client.get(f"/api/groups/{uuid4()}/reports.csv")
     assert missing.status_code == 404
+
+
+def test_export_defuses_formulas_hidden_behind_leading_whitespace(
+    authenticated_client, imported_group, add_case
+):
+    add_case(imported_group.id, code="X-001", title="\t=HYPERLINK(\"https://unsafe.test\")")
+    add_case(imported_group.id, code="X-002", title=" =1+1")
+    add_case(imported_group.id, code="X-003", title="\r\n-2+3")
+
+    csv_rows = _rows(authenticated_client.get(f"/api/groups/{imported_group.id}/reports.csv"))
+    assert [row["title"] for row in csv_rows] == [
+        "管理员登录",
+        "'\t=HYPERLINK(\"https://unsafe.test\")",
+        "' =1+1",
+        "'\r\n-2+3",
+    ]
+
+    workbook = load_workbook(
+        io.BytesIO(authenticated_client.get(f"/api/groups/{imported_group.id}/reports.xlsx").content)
+    )
+    sheet = workbook.active
+    headers = [cell.value for cell in sheet[1]]
+    titles = [
+        sheet.cell(row=index, column=headers.index("title") + 1).value for index in (3, 4, 5)
+    ]
+    # openpyxl normalises the CRLF pair to a single newline on write.
+    assert titles == ["'\t=HYPERLINK(\"https://unsafe.test\")", "' =1+1", "'\n-2+3"]

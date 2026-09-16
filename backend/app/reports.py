@@ -23,6 +23,9 @@ router = APIRouter(prefix="/api", dependencies=[Depends(require_admin)])
 # Spreadsheet consumers execute any cell that starts with these characters, so
 # exported text is defused with a leading apostrophe instead of being trusted.
 FORMULA_PREFIXES = ("=", "+", "-", "@")
+# A formula can hide behind leading whitespace or a control character, and some
+# consumers strip those before evaluating the cell.
+IGNORED_LEADING_CHARACTERS = " \t\r\n"
 CSV_MEDIA_TYPE = "text/csv; charset=utf-8"
 XLSX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 HEADERS = (
@@ -44,8 +47,10 @@ HEADERS = (
 
 
 def _safe(value: Any) -> Any:
-    if isinstance(value, str) and value.startswith(FORMULA_PREFIXES):
-        return f"'{value}"
+    if isinstance(value, str):
+        candidate = value.lstrip(IGNORED_LEADING_CHARACTERS)
+        if candidate.startswith(FORMULA_PREFIXES):
+            return f"'{value}"
     return value
 
 
