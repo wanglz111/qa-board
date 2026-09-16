@@ -1,0 +1,15 @@
+﻿用例编号,执行顺序,端,所属模块,用例标题,优先级,执行分层,前置条件,测试数据,执行步骤,预期结果
+B-001,1,Web,Account,Login,P0,Smoke,Registered user,Valid credentials,Open login page,Dashboard visible
+B-002,2,Web,Account,Logout,P1,Smoke,Logged in,,Click logout,Login page visible
+B-003,3,Web,Profile,View profile,P1,Core,Logged in,,Open profile,Profile visible
+B-004,4,Web,Profile,Edit profile,P1,Core,Logged in,New name,Save profile,Name updated
+B-005,5,Web,Search,Search,P0,Smoke,,,Enter query,Results visible
+B-006,6,Web,Search,Filter,P1,Core,,Category,Apply filter,Filtered results
+B-007,7,Web,Cart,Add item,P0,Smoke,,Product,Add to cart,Item in cart
+B-008,8,Web,Cart,Remove item,P1,Core,Item in cart,,Remove item,Cart empty
+B-009,9,Web,Checkout,Checkout,P0,Smoke,Item in cart,Address,Submit order,Order created
+B-010,10,Web,Orders,List orders,P1,Core,Logged in,,Open orders,Orders listed
+B-011,11,Web,Orders,Order detail,P1,Core,Existing order,,Open order,Details visible
+B-012,12,Web,Settings,Change locale,P2,Extended,Logged in,Chinese,Select locale,Locale changed
+B-013,13,Web,Security,Change password,P0,Core,Logged in,New password,Submit change,Password changed
+B-014,14,Web,Security,Reset password,P0,Smoke,Logged out,Email,Request reset,Reset sent

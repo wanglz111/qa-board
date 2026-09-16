@@ -22,7 +22,12 @@ def bootstrap(session: Session, config: Settings) -> Admin:
         session.commit()
     except IntegrityError:
         session.rollback()
-        return session.scalar(select(Admin).where(Admin.singleton_key == 1))
+        concurrent_admin = session.scalar(
+            select(Admin).where(Admin.singleton_key == 1)
+        )
+        if concurrent_admin is None:
+            raise
+        return concurrent_admin
     return admin
 
 

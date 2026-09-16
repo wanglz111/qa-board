@@ -1,5 +1,6 @@
 import os
 import subprocess
+from unittest.mock import MagicMock
 
 import pytest
 from argon2 import PasswordHasher
@@ -66,7 +67,20 @@ def test_bootstrap_module_uses_configured_database_and_exits_zero(migrated_datab
         assert connection.scalar(select(func.count()).select_from(Admin)) == 1
 
 def test_admin_has_singleton_constraint(db_session):
-    first = bootstrap(db_session, config())
+    bootstrap(db_session, config())
     db_session.add(Admin(email="other@example.test", password_hash="x"))
     with pytest.raises(IntegrityError):
         db_session.commit()
+
+
+def test_bootstrap_reraises_unrelated_integrity_error():
+    session = MagicMock()
+    session.scalar.return_value = None
+    original = IntegrityError("insert", {}, RuntimeError("unrelated constraint"))
+    session.commit.side_effect = original
+
+    with pytest.raises(IntegrityError) as raised:
+        bootstrap(session, config())
+
+    assert raised.value is original
+    session.rollback.assert_called_once_with()
