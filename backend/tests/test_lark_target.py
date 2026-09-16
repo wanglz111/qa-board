@@ -1,10 +1,12 @@
 from dataclasses import replace
 
-from sqlalchemy import select
+import pytest
+from sqlalchemy import select, text
 
 import app.lark.target as lark_target
 from app.config import settings
-from app.models import LarkTargetRevision
+from app.lark.fields import schema_fingerprint
+from app.models import LarkTarget, LarkTargetRevision
 
 
 def test_resolve_returns_base_tables_and_the_linked_table(
@@ -130,6 +132,68 @@ def _save(client, group_id, *, table_id: str, acknowledge: bool = False):
     return response.json()
 
 
+TARGET_PAYLOAD_KEYS = {
+    "group_id",
+    "source_url",
+    "execution_base_token",
+    "execution_base_name",
+    "execution_table_id",
+    "execution_table_name",
+    "execution_view_id",
+    "execution_view_name",
+    "bug_base_token",
+    "bug_base_name",
+    "bug_table_id",
+    "bug_table_name",
+    "schema_fingerprint",
+    "target_fingerprint",
+    "selected_at",
+    "confirmed_at",
+    "confirmed",
+}
+
+
+def _fresh_target(db_session, group_id) -> LarkTarget | None:
+    """The stored row as it is now, not as an earlier read cached it."""
+
+    db_session.expire_all()
+    return db_session.scalar(select(LarkTarget).where(LarkTarget.group_id == group_id))
+
+
+def _move_stored_target(db_session, group_id, *, table_id: str) -> None:
+    """Re-point the stored target behind an in-flight request's back.
+
+    Raw SQL, deliberately left uncommitted: an ORM update would synchronise the
+    loaded instance and a commit would expire it, either of which would hide the
+    stale attributes this stands in for a second tab's committed write.
+    """
+
+    fingerprint = lark_target.TargetDraft(
+        "app-exec", table_id, None, "app-bug", "tbl-defects"
+    ).fingerprint
+    db_session.execute(
+        text(
+            "UPDATE lark_targets SET execution_table_id = :table_id,"
+            " target_fingerprint = :fingerprint, confirmed_at = NULL"
+            " WHERE group_id = :group_id"
+        ),
+        {"table_id": table_id, "fingerprint": fingerprint, "group_id": group_id},
+    )
+
+
+def _move_target_during_the_live_read(monkeypatch, db_session, group_id, *, table_id):
+    """Make the next live read finish only after the target has moved."""
+
+    real_read = lark_target.read_draft_state
+
+    def read_then_move(client, draft):
+        state = real_read(client, draft)
+        _move_stored_target(db_session, group_id, table_id=table_id)
+        return state
+
+    monkeypatch.setattr(lark_target, "read_draft_state", read_then_move)
+
+
 def test_changing_a_table_needs_an_acknowledged_diff(
     lark_fake, authenticated_client, imported_group
 ):
@@ -213,12 +277,233 @@ def test_revisions_keep_the_previous_table_readable(
 ):
     _save(authenticated_client, imported_group.id, table_id="tbl-runs")
     _save(authenticated_client, imported_group.id, table_id="tbl-bugs", acknowledge=True)
-    fingerprints = db_session.scalars(
-        select(LarkTargetRevision.target_fingerprint).where(
-            LarkTargetRevision.group_id == imported_group.id
+    revisions = {
+        revision.target_fingerprint: (
+            revision.execution_base_token,
+            revision.execution_table_id,
+            revision.bug_base_token,
+            revision.bug_table_id,
         )
-    ).all()
-    assert len(fingerprints) == 2
+        for revision in db_session.scalars(
+            select(LarkTargetRevision).where(
+                LarkTargetRevision.group_id == imported_group.id
+            )
+        )
+    }
+    assert revisions == {
+        "app-exec|tbl-runs|app-bug|tbl-defects": (
+            "app-exec",
+            "tbl-runs",
+            "app-bug",
+            "tbl-defects",
+        ),
+        "app-exec|tbl-bugs|app-bug|tbl-defects": (
+            "app-exec",
+            "tbl-bugs",
+            "app-bug",
+            "tbl-defects",
+        ),
+    }
+
+
+def test_saving_the_same_table_twice_keeps_one_revision(
+    lark_fake, authenticated_client, imported_group, db_session
+):
+    _save(authenticated_client, imported_group.id, table_id="tbl-runs")
+    again = _save(authenticated_client, imported_group.id, table_id="tbl-runs")
+
+    assert again["diff"]["changed"] is False
+    assert again["confirmation_cleared"] is False
+    assert again["target"]["target_fingerprint"] == (
+        "app-exec|tbl-runs|app-bug|tbl-defects"
+    )
+    assert (
+        db_session.scalars(
+            select(LarkTargetRevision.target_fingerprint).where(
+                LarkTargetRevision.group_id == imported_group.id
+            )
+        ).all()
+        == ["app-exec|tbl-runs|app-bug|tbl-defects"]
+    )
+
+
+def test_changing_a_confirmed_table_clears_the_stored_approval(
+    lark_fake, authenticated_client, confirmed_group, db_session
+):
+    approved = _fresh_target(db_session, confirmed_group.id)
+    assert approved.confirmed_at is not None
+
+    response = authenticated_client.put(
+        f"/api/groups/{confirmed_group.id}/lark/target",
+        json=_payload(
+            "tbl-bugs",
+            expected_previous_fingerprint=approved.target_fingerprint,
+            acknowledge=True,
+        ),
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["confirmation_cleared"] is True
+    assert body["target"]["confirmed"] is False
+    stored = _fresh_target(db_session, confirmed_group.id)
+    assert stored.execution_table_id == "tbl-bugs"
+    assert stored.confirmed_at is None
+
+
+def test_confirming_a_saved_target_marks_it_approved(
+    lark_fake, authenticated_client, imported_group
+):
+    saved = _save(authenticated_client, imported_group.id, table_id="tbl-runs")
+    fingerprint = saved["target"]["target_fingerprint"]
+    # A header added after the save must show up in the approved schema.
+    lark_fake.fields = [*lark_fake.fields, {"field_name": "自定义列", "type": 1}]
+
+    response = authenticated_client.post(
+        f"/api/groups/{imported_group.id}/lark/target/confirm",
+        json={"allow_writes": True, "target_fingerprint": fingerprint},
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    # The frontend consumes the bare target, not a wrapper.
+    assert set(body) == TARGET_PAYLOAD_KEYS
+    assert body["confirmed"] is True
+    assert body["confirmed_at"] is not None
+    assert body["target_fingerprint"] == fingerprint
+    assert body["schema_fingerprint"] == (
+        f"{schema_fingerprint(lark_fake.fields)}"
+        f"||{schema_fingerprint(lark_fake.bug_fields)}"
+    )
+    assert body["schema_fingerprint"] != saved["target"]["schema_fingerprint"]
+
+
+def test_a_target_moved_during_the_live_read_cannot_be_approved(
+    lark_fake, authenticated_client, confirmed_group, db_session, monkeypatch
+):
+    approved = _fresh_target(db_session, confirmed_group.id)
+    _move_target_during_the_live_read(
+        monkeypatch, db_session, confirmed_group.id, table_id="tbl-bugs"
+    )
+
+    response = authenticated_client.post(
+        f"/api/groups/{confirmed_group.id}/lark/target/confirm",
+        json={"allow_writes": True, "target_fingerprint": approved.target_fingerprint},
+    )
+
+    assert response.status_code == 409, response.text
+    stored = _fresh_target(db_session, confirmed_group.id)
+    assert stored.execution_table_id == "tbl-bugs"
+    assert stored.confirmed_at is None
+
+
+@pytest.mark.parametrize("send_fingerprint", [False, True])
+def test_a_target_moved_during_the_live_read_is_refused(
+    lark_fake,
+    authenticated_client,
+    confirmed_group,
+    db_session,
+    monkeypatch,
+    send_fingerprint,
+):
+    approved = _fresh_target(db_session, confirmed_group.id)
+    _move_target_during_the_live_read(
+        monkeypatch, db_session, confirmed_group.id, table_id="tbl-cases"
+    )
+
+    response = authenticated_client.put(
+        f"/api/groups/{confirmed_group.id}/lark/target",
+        json=_payload(
+            "tbl-bugs",
+            expected_previous_fingerprint=(
+                approved.target_fingerprint if send_fingerprint else None
+            ),
+            acknowledge=True,
+        ),
+    )
+
+    assert response.status_code == 409, response.text
+    diff = response.json()["detail"]
+    assert diff["reason"] == ("stale_page" if send_fingerprint else "target_changed")
+    assert diff["diff"]["previous"]["execution_table_id"] == "tbl-cases"
+    assert diff["diff"]["next"]["execution_table_id"] == "tbl-bugs"
+    # The other tab's row survives untouched, still without an approval.
+    stored = _fresh_target(db_session, confirmed_group.id)
+    assert stored.execution_table_id == "tbl-cases"
+    assert stored.confirmed_at is None
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "label"),
+    [
+        (
+            "execution_base_token",
+            "../../../../wiki/v2/spaces/get_node",
+            "执行库 App Token",
+        ),
+        ("execution_table_id", "tbl-runs/../../records", "执行记录表 id"),
+        ("bug_base_token", "app-bug/../app-exec", "缺陷库 App Token"),
+        ("bug_table_id", "tbl-defects/../tbl-runs", "缺陷表 id"),
+        ("execution_view_id", "vew-main/../../tables", "视图 id"),
+    ],
+)
+def test_saving_refuses_ids_that_could_rewrite_the_request_path(
+    lark_fake, authenticated_client, imported_group, db_session, field, value, label
+):
+    response = authenticated_client.put(
+        f"/api/groups/{imported_group.id}/lark/target",
+        json={**_payload("tbl-runs"), field: value},
+    )
+
+    assert response.status_code == 422, response.text
+    assert label in response.json()["detail"]
+    assert lark_fake.requests == []
+    assert _fresh_target(db_session, imported_group.id) is None
+
+
+def test_read_target_before_any_target_is_chosen(
+    lark_fake, authenticated_client, imported_group
+):
+    response = authenticated_client.get(
+        f"/api/groups/{imported_group.id}/lark/target"
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"target": None, "live": None, "read_errors": []}
+
+
+def test_read_target_keeps_the_stored_row_when_the_live_read_fails(
+    lark_fake, authenticated_client, imported_group
+):
+    _save(authenticated_client, imported_group.id, table_id="tbl-runs")
+    del lark_fake.bases["app-bug"]
+
+    response = authenticated_client.get(
+        f"/api/groups/{imported_group.id}/lark/target"
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["target"]["execution_table_id"] == "tbl-runs"
+    assert body["live"] is None
+    assert body["read_errors"] and "Lark" in body["read_errors"][0]
+
+
+def test_read_target_returns_the_stored_target_and_its_live_state(
+    lark_fake, authenticated_client, imported_group
+):
+    saved = _save(authenticated_client, imported_group.id, table_id="tbl-runs")
+
+    body = authenticated_client.get(
+        f"/api/groups/{imported_group.id}/lark/target"
+    ).json()
+
+    assert body["target"]["target_fingerprint"] == saved["target"]["target_fingerprint"]
+    assert body["target"]["confirmed"] is False
+    assert body["read_errors"] == []
+    assert body["live"]["execution_table_name"] == "执行记录"
+    assert body["live"]["bug_table_name"] == "缺陷记录"
+    assert body["live"]["schema_fingerprint"] == saved["target"]["schema_fingerprint"]
 
 
 def test_a_table_must_exist_in_the_base_the_payload_names(

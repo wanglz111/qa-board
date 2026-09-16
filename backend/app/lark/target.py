@@ -21,7 +21,7 @@ from app.lark.fields import (
     missing_required_fields,
     schema_fingerprint,
 )
-from app.lark.link import LarkLinkError, parse_lark_link
+from app.lark.link import SOURCE_ID, TABLE_ID, VIEW_ID, LarkLinkError, parse_lark_link
 from app.models import Group, LarkTarget, LarkTargetRevision
 
 
@@ -230,13 +230,38 @@ def resolve(
         raise HTTPException(status_code=409, detail=str(error)) from None
 
 
-def target_for(
-    db: Session, group_id: UUID, *, for_update: bool = False
-) -> LarkTarget | None:
-    """The group's stored target; ``for_update`` locks the row for a save."""
+def target_for(db: Session, group_id: UUID) -> LarkTarget | None:
+    """The group's stored target, unlocked, for read-only callers."""
 
-    query = select(LarkTarget).where(LarkTarget.group_id == group_id)
-    return db.scalar(query.with_for_update() if for_update else query)
+    return db.scalar(select(LarkTarget).where(LarkTarget.group_id == group_id))
+
+
+def locked_target_for(db: Session, group_id: UUID) -> LarkTarget | None:
+    """The group's target taken with ``SELECT … FOR UPDATE``, for write paths.
+
+    The lock is what makes a check-then-write atomic: two administrators whose
+    saves interleave cannot both pass the fingerprint check and then overwrite
+    each other. It is a separate function rather than a flag on ``target_for`` so
+    a write path cannot take the unlocked read by accident.
+
+    ``populate_existing`` is part of the lock's meaning, not an optimisation: the
+    caller has usually read this row already in the same session, and without it
+    SQLAlchemy would hand back the attributes that earlier read cached instead of
+    the row the database just returned, so the check under the lock would inspect
+    stale values.
+
+    Keep every use of this short. A statement waiting on this lock counts against
+    the 3 s ``statement_timeout`` that ``app/db.py`` sets on every connection, so
+    holding it across the Lark HTTP reads would turn a second administrator's
+    click into a 500 instead of a clean 409.
+    """
+
+    return db.scalar(
+        select(LarkTarget)
+        .where(LarkTarget.group_id == group_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
 
 
 def _record_revision(db: Session, group_id: UUID, draft: TargetDraft) -> None:
@@ -308,6 +333,32 @@ def _draft_from(payload: TargetRequest) -> TargetDraft:
     )
 
 
+def _validate_target_tokens(payload: TargetRequest) -> None:
+    """Refuse ids that could rewrite the authenticated Lark request path.
+
+    Every token ends up interpolated into a path that carries the bearer token,
+    so a value like ``../../../../wiki/v2/spaces/get_node`` would otherwise pick
+    the endpoint the request hits. The accepted characters are the ones a pasted
+    link may already carry.
+    """
+
+    checks = [
+        ("执行库 App Token", payload.execution_base_token, SOURCE_ID),
+        ("执行记录表 id", payload.execution_table_id, TABLE_ID),
+        ("缺陷库 App Token", payload.bug_base_token, SOURCE_ID),
+        ("缺陷表 id", payload.bug_table_id, TABLE_ID),
+    ]
+    # No view is a normal choice; only a supplied id has to be a real one.
+    if payload.execution_view_id:
+        checks.append(("视图 id", payload.execution_view_id, VIEW_ID))
+    for label, value, pattern in checks:
+        if pattern.match(value) is None:
+            raise HTTPException(
+                status_code=422,
+                detail=f"{label} 不是有效的多维表格标识，请重新读取并粘贴 Lark 链接",
+            )
+
+
 def _require_group(db: Session, group_id: UUID) -> None:
     if db.get(Group, group_id) is None:
         raise HTTPException(status_code=404, detail="Group not found")
@@ -354,9 +405,11 @@ def save_target(
 ) -> dict[str, Any]:
     _require_group(db, group_id)
     draft = _draft_from(payload)
-    # The row is locked for this whole transaction so two tabs cannot both pass
-    # the acknowledgement check and race to overwrite each other.
-    previous = target_for(db, group_id, for_update=True)
+    _validate_target_tokens(payload)
+    # This read is deliberately unlocked: the checks below only need to know what
+    # the administrator's page was looking at, and their answer must not depend on
+    # a row lock held across the Lark requests that follow.
+    previous = target_for(db, group_id)
     diff = target_diff(previous, draft)
     if diff["changed"]:
         if not payload.acknowledge_change:
@@ -378,6 +431,10 @@ def save_target(
                 status_code=409, detail={"reason": "stale_page", "diff": diff}
             )
 
+    # Snapshot the fingerprint these checks were based on. The locked read below
+    # refreshes that same instance in place, so it has to be read out first.
+    checked_fingerprint = previous.target_fingerprint if previous is not None else None
+
     try:
         state = read_draft_state(client, draft)
     except LarkError as error:
@@ -385,8 +442,34 @@ def save_target(
     if state["read_errors"]:
         raise HTTPException(status_code=409, detail="；".join(state["read_errors"]))
 
+    # Only now take the row lock, for one short transaction. The read above is
+    # unlocked, so the row may have moved while those Lark requests ran; re-check
+    # it against what we based the checks on (and what we are about to save)
+    # before any of the state we read lands on it.
+    locked = locked_target_for(db, group_id)
+    locked_fingerprint = locked.target_fingerprint if locked is not None else None
+    if (
+        locked_fingerprint != checked_fingerprint
+        and locked_fingerprint != draft.fingerprint
+    ):
+        # The stored row is now neither what the page was shown nor what the page
+        # asked for: another tab re-pointed it mid-request. A supplied fingerprint
+        # that no longer matches means that page is stale; otherwise the diff is
+        # reported so the administrator can acknowledge the table actually stored.
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "reason": (
+                    "stale_page"
+                    if payload.expected_previous_fingerprint is not None
+                    else "target_changed"
+                ),
+                "diff": target_diff(locked, draft),
+            },
+        )
+
     confirmation_cleared = bool(previous and diff["changed"] and previous.confirmed_at)
-    target = previous or LarkTarget(group_id=group_id)
+    target = locked if locked is not None else LarkTarget(group_id=group_id)
     target.source_url = payload.source_url
     target.execution_base_token = draft.execution_base_token
     target.execution_base_name = state["execution_base_name"]
@@ -451,8 +534,15 @@ def confirm_target(
             status_code=409,
             detail="；".join(state["read_errors"] + state["schema_errors"]),
         )
-    target.schema_fingerprint = state["schema_fingerprint"]
-    target.confirmed_at = datetime.now(timezone.utc)
+    # The live read above takes several requests, so the row may have been
+    # re-pointed since the fingerprint check. Repeat that check under the row lock
+    # in the same short transaction as the write: an approval must never land on a
+    # table nobody approved, with a schema fingerprint read from the old one.
+    locked = locked_target_for(db, group_id)
+    if locked is None or locked.target_fingerprint != payload.target_fingerprint:
+        raise HTTPException(status_code=409, detail="目标表已变化，请重新读取后再确认")
+    locked.schema_fingerprint = state["schema_fingerprint"]
+    locked.confirmed_at = datetime.now(timezone.utc)
     db.commit()
-    db.refresh(target)
-    return serialize_target(target)
+    db.refresh(locked)
+    return serialize_target(locked)
