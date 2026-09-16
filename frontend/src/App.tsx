@@ -1,17 +1,18 @@
 import { useEffect, useState } from "react";
-import { FileStack, FlaskConical, LogOut, Upload } from "lucide-react";
+import { FileStack, FlaskConical, ListChecks, LogOut, Upload } from "lucide-react";
 
 import { ApiError, api, type User } from "./api";
+import { ExecutionView } from "./views/Execution";
 import { GroupsView } from "./views/Groups";
 import { ImportView } from "./views/Import";
 import { LoginView } from "./views/Login";
 
-type View = "groups" | "import";
+type View = "execute" | "groups" | "import";
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [checking, setChecking] = useState(true);
-  const [view, setView] = useState<View>("groups");
+  const [view, setView] = useState<View>("execute");
   const [refreshKey, setRefreshKey] = useState(0);
 
   useEffect(() => {
@@ -34,13 +35,29 @@ export default function App() {
       <header className="topbar">
         <div className="topbar-brand"><FlaskConical size={21} /><strong>TestDeck</strong></div>
         <nav aria-label="主导航">
+          <button className={view === "execute" ? "active" : ""} onClick={() => setView("execute")}><ListChecks size={17} />执行</button>
           <button className={view === "groups" ? "active" : ""} onClick={() => setView("groups")}><FileStack size={17} />测试组</button>
           <button className={view === "import" ? "active" : ""} onClick={() => setView("import")}><Upload size={17} />导入</button>
         </nav>
         <div className="account"><span>{user.email}</span><button className="icon-button" title="退出登录" aria-label="退出登录" onClick={async () => { await api.logout(); setUser(null); }}><LogOut size={17} /></button></div>
       </header>
       <main className="main-content">
-        {view === "groups" ? <GroupsView loadGroups={api.groups} loadCases={api.cases} refreshKey={refreshKey} /> : <ImportView preview={api.preview} confirm={api.confirm} onImported={() => setRefreshKey((key) => key + 1)} />}
+        {view === "execute" ? (
+          <ExecutionView
+            loadGroups={api.groups}
+            loadCases={api.cases}
+            loadProgress={api.progress}
+            loadAttempts={api.attempts}
+            submit={api.submitAttempt}
+            reserveRetest={api.reserveRetest}
+            commitReserved={api.submitReserved}
+            uploadScreenshot={api.uploadScreenshot}
+          />
+        ) : view === "groups" ? (
+          <GroupsView loadGroups={api.groups} loadCases={api.cases} refreshKey={refreshKey} />
+        ) : (
+          <ImportView preview={api.preview} confirm={api.confirm} onImported={() => setRefreshKey((key) => key + 1)} />
+        )}
       </main>
     </div>
   );

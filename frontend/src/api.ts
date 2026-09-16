@@ -36,6 +36,42 @@ export type GroupCase = PreviewCase & {
   expected: string | null;
 };
 
+export type GroupProgress = {
+  passed: number;
+  failed: number;
+  skipped: number;
+  untested: number;
+};
+
+export type AttemptResult = "通过" | "不通过" | "未执行";
+
+export type Attempt = {
+  id: string;
+  label: string;
+  sequence: number;
+  state: "started" | "committed";
+  result: AttemptResult | null;
+  note: string | null;
+  console_text: string | null;
+  created_at: string;
+};
+
+export type SubmitPayload = {
+  result: AttemptResult;
+  note: string | null;
+  console_text: string | null;
+  idempotency_key: string;
+};
+
+export type Screenshot = {
+  id: string;
+  attempt_id: string;
+  storage_key: string;
+  mime: string;
+  size_bytes: number;
+  created_at: string;
+};
+
 export class ApiError extends Error {
   constructor(public status: number, message: string) {
     super(message);
@@ -102,5 +138,33 @@ export const api = {
       body: JSON.stringify({ ticket_id: ticketId, name, mapping })
     }),
   groups: () => request<Group[]>("/api/groups"),
-  cases: (groupId: string) => request<GroupCase[]>(`/api/groups/${groupId}/cases`)
+  cases: (groupId: string) => request<GroupCase[]>(`/api/groups/${groupId}/cases`),
+  progress: (groupId: string) => request<GroupProgress>(`/api/groups/${groupId}/progress`),
+  attempts: (groupId: string, code: string) =>
+    request<Attempt[]>(`/api/groups/${groupId}/cases/${encodeURIComponent(code)}/attempts`),
+  submitAttempt: (groupId: string, code: string, payload: SubmitPayload) =>
+    mutation<Attempt>(`/api/groups/${groupId}/cases/${encodeURIComponent(code)}/attempts`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    }),
+  reserveRetest: (groupId: string, code: string) =>
+    mutation<Attempt>(`/api/groups/${groupId}/cases/${encodeURIComponent(code)}/retest`, {
+      method: "POST"
+    }),
+  submitReserved: (attemptId: string, payload: SubmitPayload) =>
+    mutation<Attempt>(`/api/attempts/${attemptId}/submit`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    }),
+  uploadScreenshot: (attemptId: string, file: File) => {
+    const body = new FormData();
+    body.append("image", file);
+    return mutation<Screenshot>(`/api/attempts/${attemptId}/screenshots`, {
+      method: "POST",
+      body
+    });
+  },
+  screenshotUrl: (screenshotId: string) => `/api/screenshots/${screenshotId}`
 };
