@@ -11,6 +11,7 @@ from app.lark.outbox import router as lark_outbox_router
 from app.lark.provision import router as lark_provision_router
 from app.lark.reconcile import router as lark_reconcile_router
 from app.lark.target import router as lark_target_router
+from app.prompts import router as prompts_router
 from app.reports import router as reports_router
 from app.screenshots import router as screenshots_router
 
@@ -27,6 +28,7 @@ app.include_router(lark_outbox_router)
 app.include_router(lark_target_router)
 app.include_router(lark_provision_router)
 app.include_router(lark_reconcile_router)
+app.include_router(prompts_router)
 
 
 @app.get("/health/live")

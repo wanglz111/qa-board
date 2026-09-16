@@ -1,12 +1,14 @@
-import { ChangeEvent, useRef, useState } from "react";
+import { ChangeEvent, useEffect, useRef, useState } from "react";
 import { AlertCircle, Check, FileText, LoaderCircle, Upload, X } from "lucide-react";
 
-import type { ImportPreview } from "../api";
+import type { AiPrompt, ImportPreview } from "../api";
+import { AiPromptPanel } from "../components/AiPromptPanel";
 
 type Props = {
   preview: (file: File) => Promise<ImportPreview>;
   confirm: (ticketId: string, name: string, mapping: Record<string, string>) => Promise<unknown>;
   onImported: () => void;
+  loadPrompts?: () => Promise<AiPrompt[]>;
 };
 
 type UploadItem = {
@@ -25,9 +27,26 @@ const MAPPING_FIELDS = [
   ["position", "顺序"]
 ] as const;
 
-export function ImportView({ preview, confirm, onImported }: Props) {
+export function ImportView({ preview, confirm, onImported, loadPrompts }: Props) {
   const [items, setItems] = useState<UploadItem[]>([]);
+  const [prompts, setPrompts] = useState<AiPrompt[]>([]);
+  const [promptError, setPromptError] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!loadPrompts) return;
+    let active = true;
+    loadPrompts()
+      .then((loaded) => {
+        if (active) setPrompts(loaded);
+      })
+      .catch(() => {
+        if (active) setPromptError("提示词加载失败，可刷新页面重试");
+      });
+    return () => {
+      active = false;
+    };
+  }, [loadPrompts]);
 
   async function chooseFiles(event: ChangeEvent<HTMLInputElement>) {
     const files = Array.from(event.target.files ?? []);
@@ -82,6 +101,9 @@ export function ImportView({ preview, confirm, onImported }: Props) {
         <button className="primary" type="button" onClick={() => inputRef.current?.click()}><Upload size={17} />选择文件</button>
         <input ref={inputRef} className="visually-hidden" aria-label="选择用例文件" type="file" multiple accept=".md,.markdown,.csv,.json,.zip" onChange={chooseFiles} />
       </div>
+
+      <AiPromptPanel prompts={prompts} />
+      {promptError ? <p className="inline-status warning" role="status"><AlertCircle size={16} />{promptError}</p> : null}
 
       {items.length === 0 ? (
         <button className="empty-import" type="button" onClick={() => inputRef.current?.click()}>

@@ -1,5 +1,13 @@
 export type User = { email: string };
 
+export type AiPrompt = {
+  id: string;
+  title: string;
+  summary: string;
+  filename: string;
+  markdown: string;
+};
+
 export type PreviewCase = {
   code: string;
   position: number;
@@ -419,6 +427,7 @@ export const api = {
   },
   screenshotUrl: (screenshotId: string) => `/api/screenshots/${screenshotId}`,
   referenceAssetUrl: (assetId: string) => `/api/case-reference-assets/${assetId}`,
+  aiPrompts: () => request<AiPrompt[]>("/api/ai-prompts"),
   reportUrl: (groupId: string, format: "csv" | "xlsx") =>
     `/api/groups/${groupId}/reports.${format}`,
   resolveLark: (url: string) =>

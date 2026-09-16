@@ -83,7 +83,7 @@ export default function App() {
         ) : view === "reconcile" ? (
           <Reconcile loadGroups={api.groups} load={api.reconcile} apply={api.applyReconcile} />
         ) : (
-          <ImportView preview={api.preview} confirm={api.confirm} onImported={() => setRefreshKey((key) => key + 1)} />
+          <ImportView preview={api.preview} confirm={api.confirm} loadPrompts={api.aiPrompts} onImported={() => setRefreshKey((key) => key + 1)} />
         )}
       </main>
     </div>
