@@ -5,6 +5,67 @@ def _groups_with_shared_case(db_session, make_group_case):
     return first.group_id, second.group_id
 
 
+CSV_HEADER = "用例编号,执行顺序,端,所属模块,用例标题,优先级,执行分层,前置条件,测试数据,执行步骤,预期结果\n"
+
+
+def _import_group(client, name: str, rows: str) -> str:
+    preview = client.post(
+        "/api/import/preview",
+        files={"file": (f"{name}.csv", (CSV_HEADER + rows).encode(), "text/csv")},
+    )
+    assert preview.status_code == 200, preview.text
+    confirmed = client.post(
+        "/api/import/confirm",
+        json={"ticket_id": preview.json()["ticket_id"], "name": name, "mapping": {}},
+    )
+    assert confirmed.status_code == 201, confirmed.text
+    return confirmed.json()["id"]
+
+
+def test_reimporting_a_newer_group_leaves_earlier_progress_untouched(
+    authenticated_client,
+):
+    older_id = _import_group(
+        authenticated_client,
+        "0918",
+        "B-001,1,Web,Account,Login,P0,Smoke,Registered user,Valid credentials,Open login page,Dashboard visible\n",
+    )
+    saved = authenticated_client.post(
+        f"/api/groups/{older_id}/cases/B-001/attempts",
+        json={"result": "通过", "idempotency_key": "checkpoint-1"},
+    )
+    assert saved.status_code == 201
+    assert authenticated_client.get(f"/api/groups/{older_id}/progress").json() == {
+        "passed": 1,
+        "failed": 0,
+        "skipped": 0,
+        "untested": 0,
+    }
+
+    newer_id = _import_group(
+        authenticated_client,
+        "0922",
+        "B-001,1,Web,Account,Login with recovery code,P0,Smoke,Registered user,New credentials,Open login page,Recovery prompt visible\n",
+    )
+
+    assert newer_id != older_id
+    assert authenticated_client.get(f"/api/groups/{older_id}/progress").json() == {
+        "passed": 1,
+        "failed": 0,
+        "skipped": 0,
+        "untested": 0,
+    }
+    assert authenticated_client.get(f"/api/groups/{newer_id}/progress").json() == {
+        "passed": 0,
+        "failed": 0,
+        "skipped": 0,
+        "untested": 1,
+    }
+    assert authenticated_client.get(
+        f"/api/groups/{newer_id}/cases/B-001/attempts"
+    ).json() == []
+
+
 def test_results_are_group_scoped_and_history_is_append_only(
     authenticated_client, db_session, make_group_case
 ):
