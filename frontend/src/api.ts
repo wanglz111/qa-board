@@ -72,48 +72,70 @@ export type Screenshot = {
   created_at: string;
 };
 
-export type LarkCheck = {
-  base_name: string | null;
-  execution_table_name: string | null;
-  bug_table_name: string | null;
-  execution_fields: Record<string, string>;
-  bug_fields: Record<string, string>;
-  required_execution_fields: string[];
-  required_bug_fields: string[];
-  schema_errors: string[];
-  read_errors: string[];
-  schema_fingerprint: string | null;
-  target_fingerprint: string | null;
-};
-
-export type LarkConfirmation = {
-  group_id: string;
+export type LarkResolved = {
+  source_url: string;
   base_token: string;
-  execution_table_id: string;
-  bug_table_id: string;
   base_name: string;
-  execution_table_name: string;
-  bug_table_name: string;
-  schema_fingerprint: string;
-  target_fingerprint: string;
-  confirmed_at: string;
-  valid: boolean;
+  tables: { table_id: string; name: string }[];
+  selected: { table_id: string | null; table_name: string | null; view_id: string | null };
+  execution_fields: Record<string, string>;
+  required_execution_fields: string[];
+  schema_errors: string[];
 };
 
-export type LarkConfirmationState = {
+export type LarkTarget = {
+  group_id: string;
+  source_url: string;
+  execution_base_token: string;
+  execution_base_name: string;
+  execution_table_id: string;
+  execution_table_name: string;
+  bug_base_token: string;
+  bug_base_name: string;
+  bug_table_id: string;
+  bug_table_name: string;
+  schema_fingerprint: string | null;
+  target_fingerprint: string;
+  confirmed_at: string | null;
   confirmed: boolean;
-  confirmation: LarkConfirmation | null;
-  current: {
-    base_token: string | null;
-    execution_table_id: string | null;
-    bug_table_id: string | null;
-    base_name: string | null;
-    execution_table_name: string | null;
-    bug_table_name: string | null;
-    schema_fingerprint: string | null;
-    target_fingerprint: string | null;
-    schema_errors: string[];
-    read_errors: string[];
+};
+
+export type LarkTargetState = {
+  target: LarkTarget | null;
+  live: { schema_errors: string[]; read_errors: string[] } | null;
+  read_errors: string[];
+};
+
+export type LarkTargetPayload = {
+  source_url: string;
+  execution_base_token: string;
+  execution_table_id: string;
+  execution_view_id?: string | null;
+  bug_base_token: string;
+  bug_table_id: string;
+  expected_previous_fingerprint?: string | null;
+  acknowledge_change?: boolean;
+};
+
+// The 409 body of a target save is a plain string for a refusal the page can
+// show as-is, but an object when the administrator has to acknowledge a change.
+export type LarkTargetChangeDetail = {
+  reason: "target_changed" | "stale_page";
+  diff: {
+    changed: boolean;
+    changed_keys: string[];
+    previous: {
+      execution_base_token: string;
+      execution_table_id: string;
+      bug_base_token: string;
+      bug_table_id: string;
+    } | null;
+    next: {
+      execution_base_token: string;
+      execution_table_id: string;
+      bug_base_token: string;
+      bug_table_id: string;
+    };
   };
 };
 
@@ -170,18 +192,12 @@ export type LegacyHistory = {
   unknown_count: number;
 };
 
-export type LarkConfirmPayload = {
-  base_token: string;
-  execution_table_id: string;
-  bug_table_id: string;
-  schema_fingerprint: string;
-  target_fingerprint: string;
-  allow_writes: boolean;
-};
-
 export class ApiError extends Error {
-  constructor(public status: number, message: string) {
-    super(message);
+  // ``detail`` stays raw because a refusal is a string while a change request
+  // is an object; callers decide which shape they are looking at.
+  constructor(public status: number, public detail: unknown) {
+    super(typeof detail === "string" ? detail : `请求失败 (${status})`);
+    this.name = "ApiError";
   }
 }
 
@@ -276,14 +292,28 @@ export const api = {
   screenshotUrl: (screenshotId: string) => `/api/screenshots/${screenshotId}`,
   reportUrl: (groupId: string, format: "csv" | "xlsx") =>
     `/api/groups/${groupId}/reports.${format}`,
-  larkCheck: () => request<LarkCheck>("/api/lark/check"),
-  larkConfirmation: (groupId: string) =>
-    request<LarkConfirmationState>(`/api/groups/${groupId}/lark/confirmation`),
-  confirmLark: (groupId: string, payload: LarkConfirmPayload) =>
-    mutation<LarkConfirmation>(`/api/groups/${groupId}/lark/confirm`, {
+  resolveLark: (url: string) =>
+    mutation<LarkResolved>("/api/lark/resolve", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
+      body: JSON.stringify({ url })
+    }),
+  larkTarget: (groupId: string) =>
+    request<LarkTargetState>(`/api/groups/${groupId}/lark/target`),
+  saveLarkTarget: (groupId: string, payload: LarkTargetPayload) =>
+    mutation<{ target: LarkTarget; confirmation_cleared: boolean }>(
+      `/api/groups/${groupId}/lark/target`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      }
+    ),
+  confirmLarkTarget: (groupId: string, targetFingerprint: string) =>
+    mutation<LarkTarget>(`/api/groups/${groupId}/lark/target/confirm`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ allow_writes: true, target_fingerprint: targetFingerprint })
     }),
   syncStatus: (groupId: string) => request<SyncStatus>(`/api/groups/${groupId}/sync`),
   enqueueSync: (groupId: string) =>

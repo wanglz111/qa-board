@@ -67,9 +67,10 @@ export default function App() {
         ) : view === "lark" ? (
           <LarkCheckView
             loadGroups={api.groups}
-            loadCheck={api.larkCheck}
-            loadConfirmation={api.larkConfirmation}
-            confirm={api.confirmLark}
+            resolve={api.resolveLark}
+            loadTarget={api.larkTarget}
+            saveTarget={api.saveLarkTarget}
+            confirmTarget={api.confirmLarkTarget}
             loadSync={api.syncStatus}
             enqueueSync={api.enqueueSync}
             retrySync={api.retrySync}
