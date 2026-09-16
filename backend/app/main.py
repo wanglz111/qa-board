@@ -3,12 +3,14 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.auth import require_csrf_for_mutation, router as auth_router
 from app.db import database_is_ready
+from app.execution import router as execution_router
 from app.groups import router as groups_router
 
 
 app = FastAPI(title="TestDeck", dependencies=[Depends(require_csrf_for_mutation)])
 app.include_router(auth_router)
 app.include_router(groups_router)
+app.include_router(execution_router)
 
 
 @app.get("/health/live")
