@@ -7,6 +7,12 @@ from app.db import database_is_ready
 
 app = FastAPI(title="TestDeck")
 app.include_router(auth_router)
+@app.middleware("http")
+async def csrf_guard(request, call_next):
+    if request.method in {"POST","PUT","DELETE","PATCH"} and request.url.path != "/api/auth/login" and request.cookies.get("testdeck_session") and not request.headers.get("X-CSRF-Token"):
+        from fastapi.responses import JSONResponse
+        return JSONResponse({"detail":"Invalid CSRF token"}, status_code=403)
+    return await call_next(request)
 
 
 @app.get("/health/live")

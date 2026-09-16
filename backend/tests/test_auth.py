@@ -123,3 +123,39 @@ def test_expired_session_is_rejected_and_deleted(client, seeded_admin, db_sessio
 
     assert response.status_code == 401
     assert db_session.scalars(select(AdminSession)).all() == []
+
+def test_csrf_get_does_not_rotate_token(client, seeded_admin):
+    client.post('/api/auth/login', json={'email': seeded_admin.email, 'password':'test-password'})
+    a = client.get('/api/auth/csrf').json()['csrf_token']
+    b = client.get('/api/auth/csrf').json()['csrf_token']
+    assert a == b
+
+
+@pytest.mark.parametrize('method', ['POST', 'PUT', 'DELETE', 'PATCH'])
+def test_protected_mutations_enforce_csrf_centrally(client, seeded_admin, method):
+    from fastapi import Depends
+    from app.auth import require_admin
+
+    def mutation(admin=Depends(require_admin)):
+        return {'ok': True}
+
+    app.add_api_route('/test-mutation', mutation, methods=[method])
+    try:
+        client.post('/api/auth/login', json={'email': seeded_admin.email, 'password': 'test-password'})
+        assert client.request(method, '/test-mutation').status_code == 403
+        assert client.request(method, '/test-mutation', headers={'X-CSRF-Token': 'wrong'}).status_code == 403
+        token = client.get('/api/auth/csrf').json()['csrf_token']
+        assert client.request(method, '/test-mutation', headers={'X-CSRF-Token': token}).status_code == 200
+    finally:
+        app.router.routes[:] = [r for r in app.router.routes if r.path != '/test-mutation']
+
+
+@pytest.mark.parametrize('ttl', ['0', '-1'])
+def test_nonpositive_session_ttl_rejected_at_startup(ttl):
+    import os
+    import subprocess
+    import sys
+
+    result = subprocess.run([sys.executable, '-c', 'import app.main'], env={**os.environ, 'SESSION_TTL_SECONDS': ttl}, capture_output=True, text=True)
+    assert result.returncode != 0
+    assert 'SESSION_TTL_SECONDS' in result.stderr

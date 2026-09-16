@@ -133,9 +133,7 @@ def csrf(
     admin_session: Annotated[AdminSession, Depends(current_session)],
     db: Annotated[Session, Depends(get_db)],
 ) -> dict[str, str]:
-    token = secrets.token_urlsafe(32)
-    admin_session.csrf_token_hash = _digest(token, settings.csrf_secret)
-    db.commit()
+    token = admin_session.token_hash
     return {"csrf_token": token}
 
 

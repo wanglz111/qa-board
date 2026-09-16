@@ -1,3 +1,5 @@
+import pytest
+from sqlalchemy.exc import IntegrityError
 import os
 import subprocess
 
@@ -62,3 +64,8 @@ def test_bootstrap_module_uses_configured_database_and_exits_zero(migrated_datab
     assert result.returncode == 0, result.stderr
     with migrated_database.connect() as connection:
         assert connection.scalar(select(func.count()).select_from(Admin)) == 1
+
+def test_admin_has_singleton_constraint(db_session):
+    first = bootstrap(db_session, config())
+    db_session.add(Admin(email='other@example.test', password_hash='x'))
+    with pytest.raises(IntegrityError): db_session.commit()

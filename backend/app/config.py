@@ -27,6 +27,8 @@ def _environment_flag(name: str, default: bool = False) -> bool:
     return value.lower() in {"1", "true", "yes", "on"}
 
 
+_ttl = int(os.environ.get("SESSION_TTL_SECONDS", "28800"))
+if _ttl <= 0: raise RuntimeError("SESSION_TTL_SECONDS must be positive")
 settings = Settings(
     database_url=_required_environment("DATABASE_URL"),
     admin_email=_required_environment("ADMIN_EMAIL"),
@@ -34,5 +36,5 @@ settings = Settings(
     session_secret=_required_environment("SESSION_SECRET"),
     csrf_secret=_required_environment("CSRF_SECRET"),
     session_cookie_secure=_environment_flag("SESSION_COOKIE_SECURE"),
-    session_ttl_seconds=int(os.environ.get("SESSION_TTL_SECONDS", "28800")),
+    session_ttl_seconds=_ttl,
 )
