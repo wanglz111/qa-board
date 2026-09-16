@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.auth import require_admin
@@ -196,3 +198,226 @@ def resolve(
         raise HTTPException(status_code=422, detail=str(error)) from None
     except PermissionError as error:
         raise HTTPException(status_code=409, detail=str(error)) from None
+
+
+def target_for(
+    db: Session, group_id: UUID, *, for_update: bool = False
+) -> LarkTarget | None:
+    """The group's stored target; ``for_update`` locks the row for a save."""
+
+    query = select(LarkTarget).where(LarkTarget.group_id == group_id)
+    return db.scalar(query.with_for_update() if for_update else query)
+
+
+def _record_revision(db: Session, group_id: UUID, draft: TargetDraft) -> None:
+    """Log a target the group has never used before; repeats are not new rows."""
+
+    existing = db.scalar(
+        select(LarkTargetRevision).where(
+            LarkTargetRevision.group_id == group_id,
+            LarkTargetRevision.target_fingerprint == draft.fingerprint,
+        )
+    )
+    if existing is None:
+        db.add(
+            LarkTargetRevision(
+                group_id=group_id,
+                execution_base_token=draft.execution_base_token,
+                execution_table_id=draft.execution_table_id,
+                bug_base_token=draft.bug_base_token,
+                bug_table_id=draft.bug_table_id,
+                target_fingerprint=draft.fingerprint,
+            )
+        )
+
+
+def serialize_target(target: LarkTarget | None) -> dict[str, Any] | None:
+    if target is None:
+        return None
+    return {
+        "group_id": target.group_id,
+        "source_url": target.source_url,
+        "execution_base_token": target.execution_base_token,
+        "execution_base_name": target.execution_base_name,
+        "execution_table_id": target.execution_table_id,
+        "execution_table_name": target.execution_table_name,
+        "execution_view_id": target.execution_view_id,
+        "execution_view_name": target.execution_view_name,
+        "bug_base_token": target.bug_base_token,
+        "bug_base_name": target.bug_base_name,
+        "bug_table_id": target.bug_table_id,
+        "bug_table_name": target.bug_table_name,
+        "schema_fingerprint": target.schema_fingerprint,
+        "target_fingerprint": target.target_fingerprint,
+        "selected_at": target.selected_at,
+        "confirmed_at": target.confirmed_at,
+        "confirmed": target.confirmed_at is not None,
+    }
+
+
+class TargetRequest(BaseModel):
+    source_url: str = ""
+    execution_base_token: str
+    execution_table_id: str
+    execution_view_id: str | None = None
+    bug_base_token: str
+    bug_table_id: str
+    # The client sends the fingerprint it saw, so a concurrent tab that already
+    # moved the group is rejected instead of silently overwriting it.
+    expected_previous_fingerprint: str | None = None
+    acknowledge_change: bool = False
+
+
+def _draft_from(payload: TargetRequest) -> TargetDraft:
+    return TargetDraft(
+        execution_base_token=payload.execution_base_token,
+        execution_table_id=payload.execution_table_id,
+        execution_view_id=payload.execution_view_id,
+        bug_base_token=payload.bug_base_token,
+        bug_table_id=payload.bug_table_id,
+    )
+
+
+def _require_group(db: Session, group_id: UUID) -> None:
+    if db.get(Group, group_id) is None:
+        raise HTTPException(status_code=404, detail="Group not found")
+
+
+@router.get("/groups/{group_id}/lark/target")
+def read_target(
+    group_id: UUID,
+    db: Annotated[Session, Depends(get_db)],
+    client: Annotated[LarkClient, Depends(get_lark_client)],
+) -> dict[str, Any]:
+    _require_group(db, group_id)
+    target = target_for(db, group_id)
+    if target is None:
+        return {"target": None, "live": None, "read_errors": []}
+    draft = TargetDraft(
+        execution_base_token=target.execution_base_token,
+        execution_table_id=target.execution_table_id,
+        execution_view_id=target.execution_view_id,
+        bug_base_token=target.bug_base_token,
+        bug_table_id=target.bug_table_id,
+    )
+    try:
+        live = read_draft_state(client, draft)
+    except LarkError as error:
+        return {
+            "target": serialize_target(target),
+            "live": None,
+            "read_errors": [str(error)],
+        }
+    return {
+        "target": serialize_target(target),
+        "live": live,
+        "read_errors": live["read_errors"],
+    }
+
+
+@router.put("/groups/{group_id}/lark/target")
+def save_target(
+    group_id: UUID,
+    payload: TargetRequest,
+    db: Annotated[Session, Depends(get_db)],
+    client: Annotated[LarkClient, Depends(get_lark_client)],
+) -> dict[str, Any]:
+    _require_group(db, group_id)
+    draft = _draft_from(payload)
+    # The row is locked for this whole transaction so two tabs cannot both pass
+    # the acknowledgement check and race to overwrite each other.
+    previous = target_for(db, group_id, for_update=True)
+    diff = target_diff(previous, draft)
+    if diff["changed"]:
+        if not payload.acknowledge_change:
+            raise HTTPException(
+                status_code=409, detail={"reason": "target_changed", "diff": diff}
+            )
+        # A fingerprint the page did not read from the stored target is stale:
+        # another tab moved this group after the page was loaded.
+        if (
+            payload.expected_previous_fingerprint is not None
+            and payload.expected_previous_fingerprint != previous.target_fingerprint
+        ):
+            raise HTTPException(
+                status_code=409, detail={"reason": "stale_page", "diff": diff}
+            )
+
+    try:
+        state = read_draft_state(client, draft)
+    except LarkError as error:
+        raise HTTPException(status_code=409, detail=f"读取目标表失败：{error}") from None
+    if state["read_errors"]:
+        raise HTTPException(status_code=409, detail="；".join(state["read_errors"]))
+
+    confirmation_cleared = bool(previous and diff["changed"] and previous.confirmed_at)
+    target = previous or LarkTarget(group_id=group_id)
+    target.source_url = payload.source_url
+    target.execution_base_token = draft.execution_base_token
+    target.execution_base_name = state["execution_base_name"]
+    target.execution_table_id = draft.execution_table_id
+    target.execution_table_name = state["execution_table_name"] or ""
+    target.execution_view_id = draft.execution_view_id
+    target.bug_base_token = draft.bug_base_token
+    target.bug_base_name = state["bug_base_name"]
+    target.bug_table_id = draft.bug_table_id
+    target.bug_table_name = state["bug_table_name"] or ""
+    target.schema_fingerprint = state["schema_fingerprint"]
+    target.target_fingerprint = draft.fingerprint
+    target.selected_at = datetime.now(timezone.utc)
+    if diff["changed"]:
+        # A changed destination can never inherit the previous write approval.
+        target.confirmed_at = None
+    db.add(target)
+    _record_revision(db, group_id, draft)
+    db.commit()
+    db.refresh(target)
+    return {
+        "target": serialize_target(target),
+        "live": state,
+        "diff": diff,
+        "confirmation_cleared": confirmation_cleared,
+    }
+
+
+class ConfirmTargetRequest(BaseModel):
+    allow_writes: bool = False
+    target_fingerprint: str
+
+
+@router.post("/groups/{group_id}/lark/target/confirm")
+def confirm_target(
+    group_id: UUID,
+    payload: ConfirmTargetRequest,
+    db: Annotated[Session, Depends(get_db)],
+    client: Annotated[LarkClient, Depends(get_lark_client)],
+) -> dict[str, Any]:
+    _require_group(db, group_id)
+    if not payload.allow_writes:
+        raise HTTPException(status_code=409, detail="需勾选允许向该表新增本组记录")
+    target = target_for(db, group_id)
+    if target is None:
+        raise HTTPException(status_code=409, detail="尚未选择该组的 Lark 表")
+    if target.target_fingerprint != payload.target_fingerprint:
+        raise HTTPException(status_code=409, detail="目标表已变化，请重新读取后再确认")
+    draft = TargetDraft(
+        execution_base_token=target.execution_base_token,
+        execution_table_id=target.execution_table_id,
+        execution_view_id=target.execution_view_id,
+        bug_base_token=target.bug_base_token,
+        bug_table_id=target.bug_table_id,
+    )
+    try:
+        state = read_draft_state(client, draft)
+    except LarkError as error:
+        raise HTTPException(status_code=409, detail=f"读取目标表失败：{error}") from None
+    if state["read_errors"] or state["schema_errors"]:
+        raise HTTPException(
+            status_code=409,
+            detail="；".join(state["read_errors"] + state["schema_errors"]),
+        )
+    target.schema_fingerprint = state["schema_fingerprint"]
+    target.confirmed_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(target)
+    return serialize_target(target)

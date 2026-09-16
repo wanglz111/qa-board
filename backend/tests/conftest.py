@@ -37,6 +37,7 @@ from app.lark import client as lark_client_module
 from app.lark.client import LarkClient, get_lark_client
 from app.lark.fields import REQUIRED_BUG_FIELD_TYPES, REQUIRED_RUN_FIELD_TYPES
 from app.lark.history import history_for
+from app.lark.target import TargetDraft
 from app.lark.write import HttpLarkWriteGateway
 from app.models import (
     Admin,
@@ -486,20 +487,21 @@ def history_ref(db_session, imported_group) -> LarkHistoryRef:
 
 @pytest.fixture
 def confirmed_group(db_session, imported_group) -> Group:
+    draft = TargetDraft("app-exec", "tbl-runs", None, "app-bug", "tbl-defects")
     db_session.add(
         LarkTarget(
             group_id=imported_group.id,
             source_url="https://tenant.larksuite.com/wiki/node-1",
-            execution_base_token="app-token",
-            execution_base_name="旧版测试管理",
+            execution_base_token="app-exec",
+            execution_base_name="执行库",
             execution_table_id="tbl-runs",
             execution_table_name="执行记录",
-            bug_base_token="app-token",
-            bug_base_name="旧版测试管理",
+            bug_base_token="app-bug",
+            bug_base_name="缺陷库",
             bug_table_id="tbl-defects",
             bug_table_name="缺陷记录",
             schema_fingerprint="schema-fixture",
-            target_fingerprint="app-token|tbl-runs|app-token|tbl-defects",
+            target_fingerprint=draft.fingerprint,
             confirmed_at=datetime.now(timezone.utc),
         )
     )
