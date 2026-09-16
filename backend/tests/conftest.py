@@ -5,13 +5,12 @@ from uuid import uuid4
 import pytest
 from alembic import command
 from alembic.config import Config
+from argon2 import PasswordHasher
+from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, inspect
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.orm import Session
 from sqlalchemy.schema import CreateSchema, DropSchema
-
-from app.models import Group, GroupCase
-
 
 os.environ.setdefault(
     "DATABASE_URL",
@@ -21,6 +20,11 @@ os.environ.setdefault("ADMIN_EMAIL", "admin@example.test")
 os.environ.setdefault("ADMIN_PASSWORD", "test-password")
 os.environ.setdefault("SESSION_SECRET", "test-only-session-secret-32-characters")
 os.environ.setdefault("CSRF_SECRET", "test-only-csrf-secret-32-characters")
+
+
+from app.db import get_db
+from app.main import app
+from app.models import Admin, Group, GroupCase
 
 
 @pytest.fixture(scope="session")
@@ -82,6 +86,44 @@ def db_session(migrated_database):
         session.close()
         transaction.rollback()
         connection.close()
+
+
+@pytest.fixture
+def client(db_session):
+    app.dependency_overrides[get_db] = lambda: db_session
+    try:
+        with TestClient(app) as test_client:
+            yield test_client
+    finally:
+        app.dependency_overrides.clear()
+
+
+@pytest.fixture
+def seeded_admin(db_session):
+    admin = Admin(
+        email="admin@example.test",
+        password_hash=PasswordHasher().hash("test-password"),
+    )
+    db_session.add(admin)
+    db_session.commit()
+    return admin
+
+
+@pytest.fixture
+def authenticated_client(client, seeded_admin):
+    login = client.post(
+        "/api/auth/login",
+        json={"email": seeded_admin.email, "password": "test-password"},
+    )
+    assert login.status_code == 200
+    csrf_token = client.get("/api/auth/csrf").json()["csrf_token"]
+    client.headers["X-CSRF-Token"] = csrf_token
+    return client
+
+
+@pytest.fixture
+def csv_book():
+    return (Path(__file__).parent / "fixtures" / "group14.csv").read_bytes()
 
 
 @pytest.fixture

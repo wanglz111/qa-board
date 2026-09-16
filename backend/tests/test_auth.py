@@ -1,34 +1,12 @@
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from argon2 import PasswordHasher
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from app.db import get_db
 from app.main import app
 from app.models import Admin, AdminSession
-
-
-@pytest.fixture
-def client(db_session):
-    app.dependency_overrides[get_db] = lambda: db_session
-    try:
-        with TestClient(app) as test_client:
-            yield test_client
-    finally:
-        app.dependency_overrides.clear()
-
-
-@pytest.fixture
-def seeded_admin(db_session):
-    admin = Admin(
-        email="admin@example.test",
-        password_hash=PasswordHasher().hash("test-password"),
-    )
-    db_session.add(admin)
-    db_session.commit()
-    return admin
 
 
 def test_admin_login_cookie_and_no_registration(client, seeded_admin):

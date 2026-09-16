@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from argon2 import PasswordHasher
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 
 from app.bootstrap import bootstrap
@@ -52,19 +52,23 @@ def test_bootstrap_module_uses_configured_database_and_exits_zero(migrated_datab
         hide_password=False
     )
 
-    result = subprocess.run(
-        [".venv/bin/python", "-m", "app.bootstrap"],
-        cwd=os.path.dirname(os.path.dirname(__file__)),
-        env={**environment, "PYTHONPATH": "."},
-        capture_output=True,
-        text=True,
-        timeout=10,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            [".venv/bin/python", "-m", "app.bootstrap"],
+            cwd=os.path.dirname(os.path.dirname(__file__)),
+            env={**environment, "PYTHONPATH": "."},
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
 
-    assert result.returncode == 0, result.stderr
-    with migrated_database.connect() as connection:
-        assert connection.scalar(select(func.count()).select_from(Admin)) == 1
+        assert result.returncode == 0, result.stderr
+        with migrated_database.connect() as connection:
+            assert connection.scalar(select(func.count()).select_from(Admin)) == 1
+    finally:
+        with migrated_database.begin() as connection:
+            connection.execute(delete(Admin))
 
 def test_admin_has_singleton_constraint(db_session):
     bootstrap(db_session, config())
