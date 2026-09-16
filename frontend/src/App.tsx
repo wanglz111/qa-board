@@ -71,6 +71,9 @@ export default function App() {
             loadTarget={api.larkTarget}
             saveTarget={api.saveLarkTarget}
             confirmTarget={api.confirmLarkTarget}
+            loadPlan={api.larkProvisionPlan}
+            provision={api.provisionLarkFields}
+            createTable={api.createLarkTable}
             loadSync={api.syncStatus}
             enqueueSync={api.enqueueSync}
             retrySync={api.retrySync}

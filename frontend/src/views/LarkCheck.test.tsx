@@ -76,6 +76,19 @@ const TARGET_STATE: LarkTargetState = {
   read_errors: []
 };
 
+// The stored table is missing two headers, so the page may offer to create them.
+const PROVISION_PLAN = {
+  roles: {
+    execution: [
+      { name: "结果", type: 1, type_name: "text", properties: {} },
+      { name: "日期", type: 5, type_name: "date", properties: {} }
+    ],
+    bug: []
+  }
+};
+
+const CLEAN_PLAN = { roles: { execution: [], bug: [] } };
+
 function confirmedTarget(): LarkTarget {
   return { ...TARGET, confirmed_at: "2026-09-16T10:00:00Z", confirmed: true };
 }
@@ -114,6 +127,8 @@ function renderCheck(overrides: Partial<Parameters<typeof LarkCheckView>[0]> = {
   const loadTarget = vi.fn().mockResolvedValue(TARGET_STATE);
   const saveTarget = vi.fn().mockResolvedValue({ target: TARGET, confirmation_cleared: false });
   const confirmTarget = vi.fn().mockResolvedValue(confirmedTarget());
+  const loadPlan = vi.fn().mockResolvedValue(CLEAN_PLAN);
+  const provision = vi.fn().mockResolvedValue({ created_fields: [], schema_errors: [], target: TARGET });
   render(
     <LarkCheckView
       loadGroups={async () => [GROUP]}
@@ -121,10 +136,12 @@ function renderCheck(overrides: Partial<Parameters<typeof LarkCheckView>[0]> = {
       loadTarget={loadTarget}
       saveTarget={saveTarget}
       confirmTarget={confirmTarget}
+      loadPlan={loadPlan}
+      provision={provision}
       {...overrides}
     />
   );
-  return { resolve, loadTarget, saveTarget, confirmTarget };
+  return { resolve, loadTarget, saveTarget, confirmTarget, loadPlan, provision };
 }
 
 async function readExecutionLink() {
@@ -731,4 +748,103 @@ it("keeps the box and the payload in agreement when a read defect link is edited
   expect(payload).toMatchObject({ bug_base_token: "app-exec", bug_table_id: "tbl-bugs" });
   // The table the administrator sees and the table on the wire are the same.
   expect(payload.bug_table_id).toBe((select as HTMLSelectElement).value);
+});
+
+it("lists the missing headers before creating them and re-reads the target after", async () => {
+  const loadPlan = vi.fn().mockResolvedValue(PROVISION_PLAN);
+  const provision = vi
+    .fn()
+    .mockResolvedValue({ created_fields: ["结果", "日期"], schema_errors: [], target: TARGET });
+  const loadTarget = vi.fn().mockResolvedValue(TARGET_STATE);
+  renderCheck({ loadPlan, provision, loadTarget });
+
+  await userEvent.click(await screen.findByRole("button", { name: "设置表头" }));
+  const dialog = await screen.findByRole("dialog");
+  expect(dialog).toHaveTextContent("结果");
+  expect(dialog).toHaveTextContent("日期");
+  expect(provision).not.toHaveBeenCalled();
+
+  await userEvent.click(screen.getByRole("button", { name: "创建这些表头" }));
+
+  expect(provision).toHaveBeenCalledWith(
+    GROUP.id,
+    expect.objectContaining({ role: "execution", field_names: ["结果", "日期"], acknowledge: true })
+  );
+  expect(await screen.findByText(/已创建 2 个表头，请重新确认写入/)).toBeVisible();
+  // Creating headers clears the group's write approval on the server, so the
+  // page has to re-read the target instead of keeping the old consent on screen.
+  expect(loadTarget).toHaveBeenCalledTimes(2);
+});
+
+it("does not offer header setup once the live schema is complete", async () => {
+  renderCheck();
+
+  expect(await screen.findByText("表头完整")).toBeVisible();
+  expect(screen.queryByRole("button", { name: "设置表头" })).not.toBeInTheDocument();
+});
+
+it("shows the cleared write approval the header creation forced", async () => {
+  const loadPlan = vi.fn().mockResolvedValue(PROVISION_PLAN);
+  const provision = vi
+    .fn()
+    .mockResolvedValue({ created_fields: ["结果"], schema_errors: [], target: TARGET });
+  // The server clears confirmed_at when it changes the schema, so the re-read
+  // comes back unconfirmed.
+  const loadTarget = vi
+    .fn()
+    .mockResolvedValueOnce(stateWith(confirmedTarget()))
+    .mockResolvedValue(stateWith(TARGET));
+  renderCheck({ loadPlan, provision, loadTarget });
+
+  expect(await screen.findByText(/已确认 执行记录 \/ 缺陷记录/)).toBeVisible();
+  await userEvent.click(await screen.findByRole("button", { name: "设置表头" }));
+  await userEvent.click(screen.getByRole("button", { name: "创建这些表头" }));
+
+  expect(await screen.findByText(/尚未确认：本地结果不会写入 Lark/)).toBeVisible();
+  expect(screen.queryByText(/已确认 执行记录 \/ 缺陷记录/)).not.toBeInTheDocument();
+});
+
+it("puts a newly created defect table into the draft the page will save", async () => {
+  const createTable = vi
+    .fn()
+    .mockResolvedValue({ table: { table_id: "tbl-fresh", name: "缺陷记录" }, role: "bug" });
+  const saveTarget = vi
+    .fn()
+    .mockResolvedValue({ target: TARGET, live: null, confirmation_cleared: false });
+  renderCheck({ createTable, saveTarget });
+
+  await readExecutionLink();
+  await userEvent.click(screen.getByRole("button", { name: "新建缺陷记录数据表" }));
+
+  expect(createTable).toHaveBeenCalledWith(GROUP.id, {
+    role: "bug",
+    base_token: "app-exec",
+    table_name: "缺陷记录",
+    acknowledge: true
+  });
+  expect(await screen.findByLabelText("缺陷记录表")).toHaveValue("tbl-fresh");
+
+  // The new table is only a draft: it becomes the group's target when saved.
+  await userEvent.click(screen.getByRole("button", { name: "保存选择" }));
+  await userEvent.click(await screen.findByRole("button", { name: "确认切换" }));
+
+  expect(saveTarget).toHaveBeenCalledTimes(1);
+  expect(saveTarget.mock.calls[0][1]).toMatchObject({
+    execution_base_token: "app-exec",
+    bug_base_token: "app-exec",
+    bug_table_id: "tbl-fresh"
+  });
+});
+
+it("leaves the draft alone when creating a table is refused", async () => {
+  const createTable = vi
+    .fn()
+    .mockRejectedValue(new ApiError(409, "新建数据表失败：没有权限"));
+  renderCheck({ createTable });
+
+  await readExecutionLink();
+  await userEvent.click(screen.getByRole("button", { name: "新建缺陷记录数据表" }));
+
+  expect(await screen.findByText(/新建数据表失败：没有权限/)).toBeVisible();
+  expect(screen.getByLabelText("缺陷记录表")).toHaveValue("tbl-bugs");
 });

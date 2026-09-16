@@ -3,14 +3,21 @@ import { LoaderCircle, RefreshCw, ShieldCheck, ShieldOff, Upload } from "lucide-
 
 import {
   ApiError,
+  type CreateTablePayload,
+  type CreateTableResult,
   type Group,
   type LarkResolved,
   type LarkTarget,
   type LarkTargetChangeDetail,
   type LarkTargetPayload,
   type LarkTargetState,
-  type SyncStatus
+  type ProvisionFieldsPayload,
+  type ProvisionFieldsResult,
+  type ProvisionPlan,
+  type SyncStatus,
+  type TableRole
 } from "../api";
+import { HeaderSetup } from "../components/HeaderSetup";
 import { TargetChangeDialog, type TargetSide } from "../components/TargetChangeDialog";
 
 type Props = {
@@ -32,6 +39,9 @@ type Props = {
     groupId: string,
     releaseUncertain?: boolean
   ) => Promise<{ requeued: number; released: number; repointed?: number }>;
+  loadPlan?: (groupId: string) => Promise<ProvisionPlan>;
+  provision?: (groupId: string, payload: ProvisionFieldsPayload) => Promise<ProvisionFieldsResult>;
+  createTable?: (groupId: string, payload: CreateTablePayload) => Promise<CreateTableResult>;
   initialGroupId?: string;
 };
 
@@ -43,6 +53,11 @@ type PendingChange = {
 
 type Table = { table_id: string; name: string };
 
+// A table this page just created lives in one base, so it is only offered
+// while that base is still the one the role points at: the select and the
+// payload keep naming the same table.
+type CreatedTable = Table & { base_token: string };
+
 type Identity = LarkTargetChangeDetail["diff"]["next"];
 
 function messageOf(reason: unknown, fallback: string): string {
@@ -51,6 +66,16 @@ function messageOf(reason: unknown, fallback: string): string {
 
 function nameOf(tables: Table[], tableId: string): string {
   return tables.find((table) => table.table_id === tableId)?.name ?? tableId;
+}
+
+function withCreatedTable(
+  tables: Table[],
+  created: CreatedTable | null,
+  baseToken: string
+): Table[] {
+  if (!created || !baseToken || created.base_token !== baseToken) return tables;
+  if (tables.some((table) => table.table_id === created.table_id)) return tables;
+  return [created, ...tables];
 }
 
 function sideOf(target: LarkTarget | null): TargetSide {
@@ -89,6 +114,9 @@ export function LarkCheckView({
   loadSync,
   enqueueSync,
   retrySync,
+  loadPlan,
+  provision,
+  createTable,
   initialGroupId
 }: Props) {
   const [groups, setGroups] = useState<Group[]>([]);
@@ -113,6 +141,10 @@ export function LarkCheckView({
   const [queueing, setQueueing] = useState(false);
   const [retryingSync, setRetryingSync] = useState(false);
   const [pendingChange, setPendingChange] = useState<PendingChange | null>(null);
+  const [createdTables, setCreatedTables] = useState<Record<TableRole, CreatedTable | null>>({
+    execution: null,
+    bug: null
+  });
 
   useEffect(() => {
     let cancelled = false;
@@ -143,6 +175,7 @@ export function LarkCheckView({
     setBugReadUrl("");
     setExecutionTableId("");
     setBugTableId("");
+    setCreatedTables({ execution: null, bug: null });
     // The header names another group now: neither its stored target (and its
     // fingerprint) nor the previous group's message may linger under it.
     setState(null);
@@ -173,7 +206,7 @@ export function LarkCheckView({
   const syncFailed = sync?.failed ?? 0;
   const syncParked = sync?.parked ?? 0;
 
-  const executionTables = resolved?.tables ?? [];
+  const executionBaseToken = resolved?.base_token ?? "";
   // The box is the source of truth for the defect base, and it only selects
   // another base while it still holds the link that was actually read. An empty
   // box — and any text the administrator has not read — means the execution
@@ -182,10 +215,16 @@ export function LarkCheckView({
   const bugReadApplies =
     bugResolved !== null && trimmedBugLink !== "" && trimmedBugLink === bugReadUrl;
   const bugBase = bugReadApplies ? bugResolved : resolved;
-  const bugTables = bugBase?.tables ?? [];
-  const bugLinkUnread = trimmedBugLink !== "" && !bugReadApplies;
-  const executionBaseToken = resolved?.base_token ?? "";
   const bugBaseToken = bugBase?.base_token ?? "";
+  // A table created through this page is added to the role's list, so the
+  // pending selection and the payload can name it like any resolved table.
+  const executionTables = withCreatedTable(
+    resolved?.tables ?? [],
+    createdTables.execution,
+    executionBaseToken
+  );
+  const bugTables = withCreatedTable(bugBase?.tables ?? [], createdTables.bug, bugBaseToken);
+  const bugLinkUnread = trimmedBugLink !== "" && !bugReadApplies;
   // A table id read from another base — or from a link the box no longer holds
   // — is not a choice this base offers; fall back to the suggestion so the
   // select and the payload can never name different tables.
@@ -274,6 +313,19 @@ export function LarkCheckView({
     } finally {
       setReadingBug(false);
     }
+  }
+
+  // A new table becomes that role's pending selection: it is not a target yet,
+  // the administrator still has to save it with 「保存选择」.
+  function acceptCreatedTable(role: TableRole, table: Table) {
+    const baseToken = role === "execution" ? executionBaseToken : bugBaseToken;
+    setCreatedTables((current) => ({ ...current, [role]: { ...table, base_token: baseToken } }));
+    if (role === "execution") {
+      setExecutionTableId(table.table_id);
+    } else {
+      setBugTableId(table.table_id);
+    }
+    setError("");
   }
 
   async function refreshTarget() {
@@ -600,6 +652,18 @@ export function LarkCheckView({
           {busy ? <LoaderCircle className="spin" size={16} /> : null}
           保存选择
         </button>
+
+        {target && loadPlan && provision ? (
+          <HeaderSetup
+            groupId={groupId}
+            loadPlan={loadPlan}
+            provision={provision}
+            onChanged={refreshTarget}
+            createTable={createTable}
+            bases={{ execution: executionBaseToken, bug: bugBaseToken }}
+            onTableCreated={acceptCreatedTable}
+          />
+        ) : null}
       </div>
 
       <div className="lark-panel">

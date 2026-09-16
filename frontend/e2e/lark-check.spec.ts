@@ -46,13 +46,31 @@ const LIVE = {
   read_errors: []
 };
 
+const COMPLETE_PLAN = { roles: { execution: [], bug: [] } };
+
+const MISSING_PLAN = {
+  roles: {
+    execution: [
+      { name: "结果", type: 1, type_name: "text", properties: {} },
+      { name: "日期", type: 5, type_name: "date", properties: {} }
+    ],
+    bug: []
+  }
+};
+
 type SavedTarget = { acknowledge_change?: boolean; execution_table_id?: string };
+type CreatedHeaders = { role: string; field_names: string[]; acknowledge: boolean };
 
 function tableName(tableId: string): string {
   return RESOLVED.tables.find((table) => table.table_id === tableId)?.name ?? tableId;
 }
 
-async function mockApi(page: Page, saved: SavedTarget[] = []) {
+async function mockApi(
+  page: Page,
+  saved: SavedTarget[] = [],
+  plan: unknown = COMPLETE_PLAN,
+  created: CreatedHeaders[] = []
+) {
   const target = { ...TARGET };
   await page.route("**/api/**", async (route: Route) => {
     const request = route.request();
@@ -81,6 +99,16 @@ async function mockApi(page: Page, saved: SavedTarget[] = []) {
     }
     if (pathname === "/api/lark/resolve") {
       return route.fulfill({ json: RESOLVED });
+    }
+    if (pathname === `/api/groups/${GROUP_ID}/lark/provision`) {
+      return route.fulfill({ json: plan });
+    }
+    if (pathname === `/api/groups/${GROUP_ID}/lark/provision/fields` && method === "POST") {
+      const body = request.postDataJSON() as CreatedHeaders;
+      created.push(body);
+      return route.fulfill({
+        json: { created_fields: body.field_names, schema_errors: [], target }
+      });
     }
     if (pathname === `/api/groups/${GROUP_ID}/lark/target` && method === "PUT") {
       const body = request.postDataJSON() as SavedTarget;
@@ -164,5 +192,43 @@ for (const viewport of ["desktop", "mobile"] as const) {
     expect(saved).toHaveLength(1);
     expect(saved[0].acknowledge_change).toBe(true);
     await expect(page.getByText(/此前的写入确认已被清除/)).toBeVisible();
+  });
+
+  test(`${viewport} setting headers sends only the ticked names after a confirmation`, async ({ page }) => {
+    await page.setViewportSize(viewport === "desktop" ? { width: 1440, height: 900 } : { width: 360, height: 800 });
+    const created: CreatedHeaders[] = [];
+    await mockApi(page, [], MISSING_PLAN, created);
+    await page.goto("/");
+    await page.getByRole("button", { name: "Lark 检查" }).click();
+
+    await expect(page.getByText(/缺少 2 个表头/)).toBeVisible();
+    await page.getByRole("button", { name: "设置表头" }).click();
+
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toContainText("结果");
+    await expect(dialog).toContainText("日期");
+    // Listing the missing headers must not create any of them.
+    expect(created).toHaveLength(0);
+
+    const openOverflow = await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth);
+    expect(openOverflow).toBe(true);
+    const dialogOverflow = await dialog.evaluate((node) => node.scrollWidth <= node.clientWidth);
+    expect(dialogOverflow).toBe(true);
+    await page.screenshot({ path: `test-results/task3-header-setup-${viewport}.png`, fullPage: true });
+
+    await dialog.getByRole("checkbox", { name: "创建表头「日期」" }).uncheck();
+    await dialog.getByRole("button", { name: "创建这些表头" }).click();
+
+    await expect(page.getByText("已创建 1 个表头，请重新确认写入")).toBeVisible();
+    expect(created).toHaveLength(1);
+    expect(created[0]).toMatchObject({
+      role: "execution",
+      field_names: ["结果"],
+      acknowledge: true
+    });
+
+    const noOverflow = await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth);
+    expect(noOverflow).toBe(true);
   });
 }

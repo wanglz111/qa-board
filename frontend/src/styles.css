@@ -87,7 +87,7 @@ table { width: 100%; border-collapse: collapse; font-size: .8rem; } th { color: 
 .lark-panel-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
 .lark-panel-heading .ghost-button { min-height: 32px; }
 .lark-roles { margin-top: 14px; }.lark-roles .inline-status { margin: 0 0 12px; }
-.target-change-overlay { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; padding: 20px; background: rgba(22, 27, 30, .45); }
+.target-change-overlay, .header-setup-overlay { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; padding: 20px; background: rgba(22, 27, 30, .45); }
 .target-change-dialog { width: min(100%, 520px); max-height: 100%; overflow: auto; padding: 22px; background: #fff; border-radius: 8px; box-shadow: 0 18px 50px rgba(28, 34, 38, .28); }
 .target-change-dialog h3 { margin-bottom: 14px; }
 .target-change-parts { display: grid; gap: 8px; margin: 0 0 16px; padding: 0; list-style: none; }
@@ -97,6 +97,26 @@ table { width: 100%; border-collapse: collapse; font-size: .8rem; } th { color: 
 .target-change-parts code { color: #176b57; font-size: .76rem; overflow-wrap: anywhere; }
 .target-change-consequences { margin: 0 0 18px; padding-left: 20px; color: #5b6469; font-size: .82rem; line-height: 1.6; }
 .target-change-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px; }
+.lark-provision { margin-top: 18px; padding-top: 14px; border-top: 1px solid #eceeef; }
+.lark-provision .inline-status { margin: 0 0 12px; }
+.lark-provision-actions { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px 14px; }
+.lark-new-tables { display: flex; flex: 1 1 100%; flex-wrap: wrap; gap: 10px 18px; }
+.lark-new-table { flex: 1 1 230px; min-width: 0; display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; }
+.lark-new-table label { flex: 1 1 130px; min-width: 0; margin-bottom: 0; font-size: .74rem; }
+.lark-new-table input { width: 100%; min-width: 0; min-height: 36px; font-size: .8rem; }
+.header-setup-dialog { width: min(100%, 560px); max-height: 100%; overflow: auto; padding: 22px; background: #fff; border-radius: 8px; box-shadow: 0 18px 50px rgba(28, 34, 38, .28); }
+.header-setup-dialog h3 { margin-bottom: 12px; }
+.header-setup-dialog .inline-status { margin: 0 0 12px; }
+.header-setup-roles { display: grid; gap: 14px; margin: 0 0 14px; padding: 0; list-style: none; }
+.header-setup-role h4 { margin: 0 0 6px; color: #4d555b; font-size: .82rem; font-weight: 800; }
+.header-setup-fields { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.header-setup-row { min-width: 0; display: flex; align-items: center; gap: 9px; padding: 8px 11px; background: #f6f7f7; border-radius: 6px; }
+.header-setup-row input { width: auto; min-height: auto; flex: 0 0 auto; }
+.header-setup-name { min-width: 0; font-size: .84rem; font-weight: 700; overflow-wrap: anywhere; }
+.header-setup-type { margin-left: auto; flex: 0 0 auto; padding: 2px 8px; color: #7c858a; background: #fff; border-radius: 999px; font-size: .72rem; }
+.header-setup-view { display: flex; align-items: center; gap: 9px; margin-bottom: 14px; font-weight: 700; }
+.header-setup-view input { width: auto; min-height: auto; flex: 0 0 auto; }
+.header-setup-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px; }
 .legacy-history { margin-top: 20px; }.legacy-tabs { display: flex; gap: 6px; margin-bottom: 12px; }
 .legacy-tabs button { display: inline-flex; align-items: center; gap: 6px; padding: 7px 12px; color: #5b6469; background: #f4f6f6; border: 1px solid transparent; border-radius: 999px; font-size: .78rem; font-weight: 700; }
 .legacy-tabs button.active { color: #176b57; background: #e8f3ef; border-color: #bcdcd0; }
@@ -118,5 +138,5 @@ table { width: 100%; border-collapse: collapse; font-size: .8rem; } th { color: 
      inside the bar instead of pushing the whole page wider than the screen. */
   .topbar nav { overflow-x: auto; scrollbar-width: none; }
   .topbar nav button { flex: 0 0 auto; padding: 0 11px; }
-  .lark-panel { padding: 16px 14px; }.target-change-overlay { padding: 12px; }.target-change-dialog { padding: 18px 14px; }
+  .lark-panel { padding: 16px 14px; }.target-change-overlay, .header-setup-overlay { padding: 12px; }.target-change-dialog, .header-setup-dialog { padding: 18px 14px; }
 }

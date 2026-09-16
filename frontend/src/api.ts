@@ -108,6 +108,44 @@ export type LarkTargetState = {
   read_errors: string[];
 };
 
+export type TableRole = "execution" | "bug";
+
+export type ProvisionField = {
+  name: string;
+  type: number;
+  type_name: string;
+  properties: Record<string, unknown>;
+};
+
+export type ProvisionPlan = {
+  roles: { execution: ProvisionField[]; bug: ProvisionField[] };
+};
+
+export type ProvisionFieldsPayload = {
+  role: TableRole;
+  field_names: string[];
+  create_view: boolean;
+  acknowledge: boolean;
+};
+
+export type ProvisionFieldsResult = {
+  created_fields: string[];
+  schema_errors: string[];
+  target: LarkTarget;
+};
+
+export type CreateTablePayload = {
+  role: TableRole;
+  base_token: string;
+  table_name: string;
+  acknowledge: boolean;
+};
+
+export type CreateTableResult = {
+  table: { table_id: string; name: string };
+  role: string;
+};
+
 export type LarkTargetPayload = {
   source_url: string;
   execution_base_token: string;
@@ -327,6 +365,20 @@ export const api = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ allow_writes: true, target_fingerprint: targetFingerprint })
+    }),
+  larkProvisionPlan: (groupId: string) =>
+    request<ProvisionPlan>(`/api/groups/${groupId}/lark/provision`),
+  provisionLarkFields: (groupId: string, payload: ProvisionFieldsPayload) =>
+    mutation<ProvisionFieldsResult>(`/api/groups/${groupId}/lark/provision/fields`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    }),
+  createLarkTable: (groupId: string, payload: CreateTablePayload) =>
+    mutation<CreateTableResult>(`/api/groups/${groupId}/lark/provision/table`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
     }),
   syncStatus: (groupId: string) => request<SyncStatus>(`/api/groups/${groupId}/sync`),
   enqueueSync: (groupId: string) =>
