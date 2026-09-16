@@ -3,13 +3,14 @@ from uuid import UUID, uuid4
 
 import pytest
 from psycopg.errors import UniqueViolation
-from sqlalchemy import delete
+from fastapi import HTTPException
+from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app import execution
-from app.execution import reserve_retest
-from app.models import Group, GroupCase
+from app.execution import AttemptCreate, reserve_retest
+from app.models import Attempt, Group, GroupCase
 
 
 def _real_group(migrated_database, *, name: str = "0918") -> tuple[UUID, str]:
@@ -237,6 +238,67 @@ def test_concurrent_retests_allocate_distinct_labels(migrated_database):
 
         assert errors == []
         assert sorted(labels) == ["B-001", f"B-001-R{short_code}-01"]
+    finally:
+        with Session(bind=migrated_database) as cleanup:
+            cleanup.execute(delete(Group).where(Group.id == group_id))
+            cleanup.commit()
+
+
+def test_racing_submits_of_two_attempts_share_one_key_without_a_server_error(
+    migrated_database, monkeypatch
+):
+    """Two reserved attempts submitted at once with one key: 201 and 409, never 500."""
+
+    group_id, short_code = _real_group(migrated_database, name="0922")
+    with Session(bind=migrated_database) as setup:
+        case_id = setup.scalar(
+            select(GroupCase.id).where(GroupCase.group_id == group_id)
+        )
+        reserved = [
+            reserve_retest(group_id, "B-001", setup)["id"] for _ in range(2)
+        ]
+
+    barrier = threading.Barrier(2)
+    commit_attempt = execution._commit_attempt
+
+    def synchronised_commit(attempt, payload):
+        # Both requests reach the idempotency write together, which is exactly
+        # the interleaving that used to escape as an IntegrityError/500.
+        barrier.wait(timeout=10)
+        commit_attempt(attempt, payload)
+
+    monkeypatch.setattr(execution, "_commit_attempt", synchronised_commit)
+    payload = AttemptCreate(
+        result="通过", note=None, console_text=None, idempotency_key="shared-submit"
+    )
+    outcomes: list[tuple[str, int | str]] = []
+
+    def submit(attempt_id: UUID) -> None:
+        try:
+            with Session(bind=migrated_database) as session:
+                payload_json = execution.submit_attempt(attempt_id, payload, session)
+                outcomes.append(("saved", payload_json["id"]))
+        except HTTPException as error:
+            outcomes.append(("conflict", error.status_code))
+        except BaseException as error:  # a 500-shaped failure would land here
+            outcomes.append(("server-error", type(error).__name__))
+
+    try:
+        threads = [threading.Thread(target=submit, args=(item,)) for item in reserved]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+
+        assert sorted(kind for kind, _ in outcomes) == ["conflict", "saved"]
+        assert ("conflict", 409) in outcomes
+        saved_id = next(value for kind, value in outcomes if kind == "saved")
+        with Session(bind=migrated_database) as check:
+            committed = check.scalars(
+                select(Attempt).where(Attempt.idempotency_key == "shared-submit")
+            ).all()
+            assert [attempt.id for attempt in committed] == [saved_id]
+            assert check.get(GroupCase, case_id) is not None
     finally:
         with Session(bind=migrated_database) as cleanup:
             cleanup.execute(delete(Group).where(Group.id == group_id))

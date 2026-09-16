@@ -125,7 +125,10 @@ def _commit_attempt(attempt: Attempt, payload: AttemptCreate) -> None:
 
 
 def _with_conflict_retry(
-    db: Session, operation: Callable[[], dict[str, Any]]
+    db: Session,
+    operation: Callable[[], dict[str, Any]],
+    *,
+    detail: str = "Could not allocate a unique attempt label",
 ) -> dict[str, Any]:
     for remaining in range(MAX_ALLOCATION_ATTEMPTS, 0, -1):
         try:
@@ -137,7 +140,7 @@ def _with_conflict_retry(
             if remaining == 1:
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
-                    detail="Could not allocate a unique attempt label",
+                    detail=detail,
                 ) from None
     raise AssertionError("unreachable")
 
@@ -194,23 +197,31 @@ def submit_attempt(
     payload: AttemptCreate,
     db: Annotated[Session, Depends(get_db)],
 ) -> dict[str, Any]:
-    attempt = db.scalar(
-        select(Attempt).where(Attempt.id == attempt_id).with_for_update()
-    )
-    if attempt is None:
-        raise HTTPException(status_code=404, detail="Attempt not found")
-    existing = _matching_attempt(db, attempt.group_case, payload)
-    if existing is not None:
-        if existing.id != attempt.id:
-            raise HTTPException(status_code=409, detail="Idempotency key conflict")
-        return _attempt_payload(existing)
-    if attempt.state != "started":
-        raise HTTPException(status_code=409, detail="Attempt is already committed")
-    _commit_attempt(attempt, payload)
-    enqueue_attempt_job(db, attempt)
-    db.commit()
-    db.refresh(attempt)
-    return _attempt_payload(attempt)
+    def operation() -> dict[str, Any]:
+        attempt = db.scalar(
+            select(Attempt).where(Attempt.id == attempt_id).with_for_update()
+        )
+        if attempt is None:
+            raise HTTPException(status_code=404, detail="Attempt not found")
+        existing = _matching_attempt(db, attempt.group_case, payload)
+        if existing is not None:
+            if existing.id != attempt.id:
+                raise HTTPException(
+                    status_code=409, detail="Idempotency key conflict"
+                )
+            return _attempt_payload(existing)
+        if attempt.state != "started":
+            raise HTTPException(status_code=409, detail="Attempt is already committed")
+        _commit_attempt(attempt, payload)
+        enqueue_attempt_job(db, attempt)
+        db.commit()
+        db.refresh(attempt)
+        return _attempt_payload(attempt)
+
+    # Two different reserved attempts can be submitted at the same moment with
+    # one idempotency key. The loser loses on the global unique constraint, so
+    # it re-reads the winner and answers 409 instead of a server error.
+    return _with_conflict_retry(db, operation, detail="Idempotency key conflict")
 
 
 @router.get("/groups/{group_id}/cases/{code}/attempts")
