@@ -362,3 +362,65 @@ def test_stale_confirmation_halts_outbound_writes(
     assert job.error_kind == "confirmation_stale"
     assert job.retry_count == 0
     assert job.next_retry_at is not None
+
+
+def _state(db_session, attempt) -> str:
+    db_session.expire_all()
+    return _job(db_session, attempt).state
+
+
+def test_failed_jobs_wait_for_an_operator_then_resume(
+    fake_lark, authenticated_client, confirmed_group, failed_attempt, db_session
+):
+    """A parked job must be recoverable, and only the missing half is resent."""
+
+    fake_lark.fail_bug_create = True
+    assert process_one_job(fake_lark, failed_attempt) == "failed"
+    assert _state(db_session, failed_attempt) == "failed"
+
+    retried = authenticated_client.post(f"/api/groups/{confirmed_group.id}/sync/retry")
+    assert retried.status_code == 200
+    assert retried.json() == {"requeued": 1, "released": 0}
+    assert _state(db_session, failed_attempt) == "pending"
+
+    fake_lark.fail_bug_create = False
+    assert process_one_job(fake_lark, failed_attempt) == "synced"
+    # The execution record already exists, so the retry must not duplicate it.
+    assert fake_lark.created_execution == 1
+    assert fake_lark.created_bug == 1
+    assert not fake_lark.put_calls and not fake_lark.delete_calls
+
+
+def test_uncertain_jobs_leave_only_after_explicit_acknowledgement(
+    fake_lark, authenticated_client, confirmed_group, failed_attempt, db_session
+):
+    """A possible duplicate needs the administrator to say they looked."""
+
+    fake_lark.timeout_after_create = True
+    fake_lark.hide_created_records = True
+    assert process_one_job(fake_lark, failed_attempt) == "uncertain"
+
+    plain = authenticated_client.post(f"/api/groups/{confirmed_group.id}/sync/retry")
+    assert plain.json() == {"requeued": 0, "released": 0}
+    assert _state(db_session, failed_attempt) == "uncertain"
+
+    acknowledged = authenticated_client.post(
+        f"/api/groups/{confirmed_group.id}/sync/retry",
+        json={"release_uncertain": True},
+    )
+    assert acknowledged.json() == {"requeued": 0, "released": 1}
+    assert _state(db_session, failed_attempt) == "pending"
+
+
+def test_sync_retry_requires_a_session_and_a_known_group(
+    anonymous_client, authenticated_client, confirmed_group
+):
+    assert (
+        anonymous_client.post(
+            f"/api/groups/{confirmed_group.id}/sync/retry"
+        ).status_code
+        == 401
+    )
+    assert (
+        authenticated_client.post(f"/api/groups/{uuid4()}/sync/retry").status_code == 404
+    )

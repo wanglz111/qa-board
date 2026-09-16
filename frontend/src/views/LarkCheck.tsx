@@ -17,6 +17,10 @@ type Props = {
   confirm: (groupId: string, payload: LarkConfirmPayload) => Promise<LarkConfirmation>;
   loadSync?: (groupId: string) => Promise<SyncStatus>;
   enqueueSync?: (groupId: string) => Promise<{ queued: number }>;
+  retrySync?: (
+    groupId: string,
+    releaseUncertain?: boolean
+  ) => Promise<{ requeued: number; released: number }>;
   initialGroupId?: string;
 };
 
@@ -27,6 +31,7 @@ export function LarkCheckView({
   confirm,
   loadSync,
   enqueueSync,
+  retrySync,
   initialGroupId
 }: Props) {
   const [groups, setGroups] = useState<Group[]>([]);
@@ -39,6 +44,7 @@ export function LarkCheckView({
   const [notice, setNotice] = useState("");
   const [sync, setSync] = useState<SyncStatus | null>(null);
   const [queueing, setQueueing] = useState(false);
+  const [retryingSync, setRetryingSync] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -143,6 +149,28 @@ export function LarkCheckView({
     }
   }
 
+  // Releasing an uncertain job can append a second remote record, so it stays a
+  // separate command that says the administrator checked the old table.
+  async function retryQueuedJobs(releaseUncertain: boolean) {
+    if (!retrySync) return;
+    setRetryingSync(true);
+    setError("");
+    try {
+      const result = await retrySync(groupId, releaseUncertain);
+      setNotice(
+        releaseUncertain
+          ? `已重新排队 ${result.requeued} 条失败结果，释放 ${result.released} 条待人工确认`
+          : `已重新排队 ${result.requeued} 条失败结果`
+      );
+      const refreshed = await loadSync?.(groupId);
+      if (refreshed) setSync(refreshed);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "重试同步失败");
+    } finally {
+      setRetryingSync(false);
+    }
+  }
+
   const confirmed = state?.confirmed === true;
   const invalidated = state?.confirmation !== null && state?.confirmation?.valid === false;
 
@@ -239,6 +267,33 @@ export function LarkCheckView({
                 {queueing ? <LoaderCircle className="spin" size={16} /> : <Upload size={16} />}
                 把已保存的本地结果排入同步
               </button>
+            ) : null}
+            {retrySync && (sync?.failed ?? 0) > 0 ? (
+              <button
+                type="button"
+                className="ghost-button"
+                disabled={retryingSync}
+                onClick={() => void retryQueuedJobs(false)}
+              >
+                {retryingSync ? <LoaderCircle className="spin" size={16} /> : null}
+                重试失败的同步（{sync?.failed} 条）
+              </button>
+            ) : null}
+            {retrySync && (sync?.uncertain ?? 0) > 0 ? (
+              <button
+                type="button"
+                className="ghost-button"
+                disabled={retryingSync}
+                onClick={() => void retryQueuedJobs(true)}
+              >
+                {retryingSync ? <LoaderCircle className="spin" size={16} /> : null}
+                已核对远端，释放待人工确认（{sync?.uncertain} 条）
+              </button>
+            ) : null}
+            {(sync?.uncertain ?? 0) > 0 ? (
+              <p className="attachment-hint">
+                释放待人工确认前，请先在旧表搜索该复测标签：若远端其实已写入，释放后会再新增一条记录。
+              </p>
             ) : null}
             <p className="attachment-hint">同步只新增执行记录；不通过时会新增缺陷，旧记录与旧缺陷不会被修改。</p>
           </div>

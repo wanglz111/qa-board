@@ -5,6 +5,7 @@ from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
@@ -303,3 +304,49 @@ def retry_failed_jobs(db: Session, group_id: UUID | None = None) -> int:
     result = db.execute(statement)
     db.commit()
     return int(result.rowcount or 0)
+
+
+def release_uncertain_jobs(db: Session, group_id: UUID) -> int:
+    """Requeue jobs parked after an unprovable write.
+
+    Only an administrator who has inspected the destination table may release
+    them: when the original create did land, the released job appends a second
+    record, so this stays an explicit choice instead of an automatic retry.
+    """
+
+    attempt_ids = (
+        select(Attempt.id)
+        .join(GroupCase, Attempt.group_case_id == GroupCase.id)
+        .where(GroupCase.group_id == group_id)
+    )
+    statement = (
+        update(SyncJob)
+        .where(SyncJob.state == "uncertain", SyncJob.attempt_id.in_(attempt_ids))
+        .values(state="pending", retry_count=0, next_retry_at=_now(), error_kind=None)
+    )
+    result = db.execute(statement)
+    db.commit()
+    return int(result.rowcount or 0)
+
+
+class SyncRetryRequest(BaseModel):
+    # Releasing an uncertain job can duplicate a remote record; the flag makes
+    # the administrator state that they checked the table first.
+    release_uncertain: bool = False
+
+
+@router.post("/groups/{group_id}/sync/retry")
+def retry_sync(
+    group_id: UUID,
+    db: Annotated[Session, Depends(get_db)],
+    payload: SyncRetryRequest | None = None,
+) -> dict[str, int]:
+    if db.get(Group, group_id) is None:
+        raise HTTPException(status_code=404, detail="Group not found")
+    requeued = retry_failed_jobs(db, group_id)
+    released = (
+        release_uncertain_jobs(db, group_id)
+        if payload is not None and payload.release_uncertain
+        else 0
+    )
+    return {"requeued": requeued, "released": released}

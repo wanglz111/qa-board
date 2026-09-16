@@ -288,6 +288,15 @@ export const api = {
   syncStatus: (groupId: string) => request<SyncStatus>(`/api/groups/${groupId}/sync`),
   enqueueSync: (groupId: string) =>
     mutation<{ queued: number }>(`/api/groups/${groupId}/sync/enqueue`, { method: "POST" }),
+  retrySync: (groupId: string, releaseUncertain = false) =>
+    mutation<{ requeued: number; released: number }>(
+      `/api/groups/${groupId}/sync/retry`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ release_uncertain: releaseUncertain })
+      }
+    ),
   legacyHistory: (groupId: string, code: string) =>
     request<LegacyHistory>(
       `/api/groups/${groupId}/cases/${encodeURIComponent(code)}/lark-history`

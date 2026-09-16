@@ -199,3 +199,54 @@ it("queues previously saved local attempts only after confirmation", async () =>
   expect(await screen.findByText(/已排入 2 条本地结果/)).toBeVisible();
   expect(await screen.findByText(/待同步 2/)).toBeVisible();
 });
+
+it("lets an operator recover failed and uncertain syncs explicitly", async () => {
+  const retrySync = vi
+    .fn()
+    .mockResolvedValueOnce({ requeued: 2, released: 0 })
+    .mockResolvedValueOnce({ requeued: 0, released: 1 });
+  const loadSync = vi.fn().mockResolvedValue({
+    confirmed: true,
+    queued: 0,
+    synced: 1,
+    failed: 2,
+    uncertain: 1,
+    last_error_kind: "create_bug_failed",
+    pending_attempts: 3,
+    detail: "目标表已确认，可显式排入同步"
+  });
+  renderCheck({
+    loadConfirmation: async () => ({
+      ...unconfirmed(),
+      confirmed: true,
+      confirmation: {
+        group_id: GROUP.id,
+        base_token: "app-token",
+        execution_table_id: "tbl-runs",
+        bug_table_id: "tbl-defects",
+        base_name: "旧版测试管理",
+        execution_table_name: "执行记录",
+        bug_table_name: "缺陷记录",
+        schema_fingerprint: "schema-1",
+        target_fingerprint: "target-1",
+        confirmed_at: "2026-09-16T10:00:00Z",
+        valid: true
+      }
+    }),
+    loadSync,
+    retrySync
+  });
+
+  expect(await screen.findByText(/失败 2/)).toBeVisible();
+
+  await userEvent.click(screen.getByRole("button", { name: /重试失败的同步/ }));
+  expect(retrySync).toHaveBeenCalledWith("0918-id", false);
+  expect(await screen.findByText(/已重新排队 2 条失败结果/)).toBeVisible();
+
+  // A duplicate is possible, so releasing "uncertain" needs its own command.
+  await userEvent.click(
+    screen.getByRole("button", { name: /已核对远端，释放待人工确认/ })
+  );
+  expect(retrySync).toHaveBeenLastCalledWith("0918-id", true);
+  expect(await screen.findByText(/释放 1 条待人工确认/)).toBeVisible();
+});
