@@ -19,6 +19,8 @@ frontend/dist/
 frontend/coverage/
 frontend/playwright-report/
 frontend/test-results/
+frontend/vite.config.js
+frontend/vite.config.d.ts
 *.tsbuildinfo
 
 # Local runtime data and exports
