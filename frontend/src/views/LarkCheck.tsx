@@ -15,6 +15,7 @@ import {
   type ProvisionFieldsResult,
   type ProvisionPlan,
   type SyncStatus,
+  type Table,
   type TableRole
 } from "../api";
 import { HeaderSetup } from "../components/HeaderSetup";
@@ -50,8 +51,6 @@ type PendingChange = {
   previous: TargetSide | null;
   next: TargetSide;
 };
-
-type Table = { table_id: string; name: string };
 
 // A table this page just created lives in one base, so it is only offered
 // while that base is still the one the role points at: the select and the
@@ -336,6 +335,18 @@ export function LarkCheckView({
     } catch (reason) {
       setError(messageOf(reason, "读取该组的 Lark 目标失败"));
     }
+  }
+
+  // A run that changed the table has already invalidated the approval on the
+  // server. Dropping it here first means a failed re-read cannot leave 「已确认」
+  // sitting next to 「已创建 …」.
+  async function reloadAfterProvision() {
+    setState((current) =>
+      current?.target
+        ? { ...current, target: { ...current.target, confirmed: false, confirmed_at: null } }
+        : current
+    );
+    await refreshTarget();
   }
 
   function identityChanged(): boolean {
@@ -658,7 +669,9 @@ export function LarkCheckView({
             groupId={groupId}
             loadPlan={loadPlan}
             provision={provision}
-            onChanged={refreshTarget}
+            onChanged={reloadAfterProvision}
+            targetFingerprint={target.target_fingerprint}
+            schemaFingerprint={target.schema_fingerprint}
             createTable={createTable}
             bases={{ execution: executionBaseToken, bug: bugBaseToken }}
             onTableCreated={acceptCreatedTable}

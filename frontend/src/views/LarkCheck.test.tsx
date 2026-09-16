@@ -804,6 +804,53 @@ it("shows the cleared write approval the header creation forced", async () => {
   expect(screen.queryByText(/已确认 执行记录 \/ 缺陷记录/)).not.toBeInTheDocument();
 });
 
+it("drops the approval the header creation invalidated even when the re-read fails", async () => {
+  const loadPlan = vi.fn().mockResolvedValue(PROVISION_PLAN);
+  const provision = vi
+    .fn()
+    .mockResolvedValue({ created_fields: ["结果"], schema_errors: [], target: TARGET });
+  const loadTarget = vi
+    .fn()
+    .mockResolvedValueOnce(stateWith(confirmedTarget()))
+    .mockRejectedValue(new Error("读取该组的 Lark 目标失败"));
+  renderCheck({ loadPlan, provision, loadTarget });
+
+  expect(await screen.findByText(/已确认 执行记录 \/ 缺陷记录/)).toBeVisible();
+  await userEvent.click(await screen.findByRole("button", { name: "设置表头" }));
+  await userEvent.click(screen.getByRole("button", { name: "创建这些表头" }));
+
+  // The server already cleared the approval, so the page may not keep showing
+  // it just because the confirming re-read failed.
+  expect(await screen.findByText(/尚未确认：本地结果不会写入 Lark/)).toBeVisible();
+  expect(screen.queryByText(/已确认 执行记录 \/ 缺陷记录/)).not.toBeInTheDocument();
+  expect(screen.getByText("读取该组的 Lark 目标失败")).toBeVisible();
+});
+
+it("re-reads the header list when the saved target moves to another table", async () => {
+  const loadPlan = vi.fn().mockResolvedValueOnce(CLEAN_PLAN).mockResolvedValue(PROVISION_PLAN);
+  const repointed: LarkTarget = {
+    ...TARGET,
+    execution_table_id: "tbl-bugs",
+    execution_table_name: "缺陷记录",
+    schema_fingerprint: "schema-2",
+    target_fingerprint: "app-exec|tbl-bugs|app-exec|tbl-bugs"
+  };
+  const saveTarget = vi
+    .fn()
+    .mockResolvedValue({ target: repointed, live: null, confirmation_cleared: true });
+  renderCheck({ loadPlan, saveTarget });
+
+  expect(await screen.findByText("表头完整")).toBeVisible();
+  await userEvent.selectOptions(await readExecutionLink(), "tbl-bugs");
+  await userEvent.click(screen.getByRole("button", { name: "保存选择" }));
+  await userEvent.click(await screen.findByRole("button", { name: "确认切换" }));
+
+  // The old list described tbl-runs; the panel must describe the table the
+  // group now points at, or an administrator approves a diff for the wrong one.
+  expect(await screen.findByText(/缺少 2 个表头/)).toBeVisible();
+  expect(loadPlan).toHaveBeenCalledTimes(2);
+});
+
 it("puts a newly created defect table into the draft the page will save", async () => {
   const createTable = vi
     .fn()

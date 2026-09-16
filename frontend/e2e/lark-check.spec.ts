@@ -46,7 +46,13 @@ const LIVE = {
   read_errors: []
 };
 
-const COMPLETE_PLAN = { roles: { execution: [], bug: [] } };
+const COMPLETE_PLAN = {
+  roles: { execution: [], bug: [] },
+  views: {
+    execution: { name: "TestDeck", exists: true, view_id: "vew-testdeck" },
+    bug: { name: "TestDeck", exists: true, view_id: "vew-testdeck" }
+  }
+};
 
 const MISSING_PLAN = {
   roles: {
@@ -55,6 +61,10 @@ const MISSING_PLAN = {
       { name: "日期", type: 5, type_name: "date", properties: {} }
     ],
     bug: []
+  },
+  views: {
+    execution: { name: "TestDeck", exists: false, view_id: null },
+    bug: { name: "TestDeck", exists: true, view_id: "vew-testdeck" }
   }
 };
 
@@ -107,7 +117,12 @@ async function mockApi(
       const body = request.postDataJSON() as CreatedHeaders;
       created.push(body);
       return route.fulfill({
-        json: { created_fields: body.field_names, schema_errors: [], target }
+        json: {
+          created_fields: body.field_names,
+          view: { name: "TestDeck", exists: true, view_id: "vew-testdeck", created: false },
+          schema_errors: [],
+          target
+        }
       });
     }
     if (pathname === `/api/groups/${GROUP_ID}/lark/target` && method === "PUT") {
@@ -208,8 +223,20 @@ for (const viewport of ["desktop", "mobile"] as const) {
     await expect(dialog).toBeVisible();
     await expect(dialog).toContainText("结果");
     await expect(dialog).toContainText("日期");
+    // The execution table has no TestDeck view yet, the defect table does.
+    await expect(dialog.getByRole("checkbox", { name: "同时创建 TestDeck 视图" })).toBeVisible();
     // Listing the missing headers must not create any of them.
     expect(created).toHaveLength(0);
+
+    // The header rows are keyboard reachable, and Tab wraps inside the overlay
+    // instead of walking out to the page behind it.
+    await expect(dialog.getByRole("button", { name: "创建这些表头" })).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(dialog.getByRole("checkbox", { name: "创建表头「结果」" })).toBeFocused();
+    await page.keyboard.press("Shift+Tab");
+    await expect(dialog.getByRole("button", { name: "创建这些表头" })).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(dialog.getByRole("checkbox", { name: "创建表头「结果」" })).toBeFocused();
 
     const openOverflow = await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth);
     expect(openOverflow).toBe(true);

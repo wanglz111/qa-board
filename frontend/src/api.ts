@@ -110,6 +110,8 @@ export type LarkTargetState = {
 
 export type TableRole = "execution" | "bug";
 
+export type Table = { table_id: string; name: string };
+
 export type ProvisionField = {
   name: string;
   type: number;
@@ -117,8 +119,17 @@ export type ProvisionField = {
   properties: Record<string, unknown>;
 };
 
+export type ProvisionView = {
+  name: string;
+  exists: boolean;
+  view_id: string | null;
+};
+
 export type ProvisionPlan = {
   roles: { execution: ProvisionField[]; bug: ProvisionField[] };
+  // Whether each role's table already carries the provisioning view, so nobody
+  // is offered a view that is already there.
+  views?: { execution: ProvisionView; bug: ProvisionView };
 };
 
 export type ProvisionFieldsPayload = {
@@ -130,8 +141,17 @@ export type ProvisionFieldsPayload = {
 
 export type ProvisionFieldsResult = {
   created_fields: string[];
+  view?: ProvisionView & { created: boolean };
   schema_errors: string[];
   target: LarkTarget;
+};
+
+// A refused run answers 409 with this object instead of a plain string: it
+// carries the readable reason and the fields created before it stopped.
+export type ProvisionFailureDetail = {
+  reason: "provision_failed";
+  message: string;
+  created_fields: string[];
 };
 
 export type CreateTablePayload = {
@@ -142,8 +162,8 @@ export type CreateTablePayload = {
 };
 
 export type CreateTableResult = {
-  table: { table_id: string; name: string };
-  role: string;
+  table: Table;
+  role: TableRole;
 };
 
 export type LarkTargetPayload = {

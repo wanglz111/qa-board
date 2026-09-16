@@ -1,23 +1,28 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { ListPlus, LoaderCircle, Table2 } from "lucide-react";
 
-import type {
-  CreateTablePayload,
-  CreateTableResult,
-  ProvisionField,
-  ProvisionFieldsPayload,
-  ProvisionFieldsResult,
-  ProvisionPlan,
-  TableRole
+import {
+  ApiError,
+  type CreateTablePayload,
+  type CreateTableResult,
+  type ProvisionFailureDetail,
+  type ProvisionField,
+  type ProvisionFieldsPayload,
+  type ProvisionFieldsResult,
+  type ProvisionPlan,
+  type Table,
+  type TableRole
 } from "../api";
-
-type Table = { table_id: string; name: string };
 
 type Props = {
   groupId: string;
   loadPlan: (groupId: string) => Promise<ProvisionPlan>;
   provision: (groupId: string, payload: ProvisionFieldsPayload) => Promise<ProvisionFieldsResult>;
   onChanged: () => void | Promise<void>;
+  // The table the plan describes. Re-pointing the group changes the identity
+  // without re-mounting this component, so the list has to be read again.
+  targetFingerprint?: string;
+  schemaFingerprint?: string | null;
   // A new table is only offered when the page can also name the base to build
   // it in; without a base the button stays out of the way.
   createTable?: (groupId: string, payload: CreateTablePayload) => Promise<CreateTableResult>;
@@ -50,6 +55,31 @@ function messageOf(reason: unknown, fallback: string): string {
   return reason instanceof Error && reason.message ? reason.message : fallback;
 }
 
+// A refused run is the one 409 whose detail is an object; every other refusal
+// is a plain string the Error already carries.
+function refusalOf(
+  reason: unknown,
+  fallback: string
+): { message: string; createdFields: string[] } {
+  if (reason instanceof ApiError && typeof reason.detail === "object" && reason.detail !== null) {
+    const detail = reason.detail as Partial<ProvisionFailureDetail>;
+    if (detail.reason === "provision_failed") {
+      return {
+        message: typeof detail.message === "string" && detail.message ? detail.message : fallback,
+        createdFields: Array.isArray(detail.created_fields) ? detail.created_fields : []
+      };
+    }
+  }
+  return { message: messageOf(reason, fallback), createdFields: [] };
+}
+
+function createdCopy(created: number, viewCreated: boolean): string {
+  const parts: string[] = [];
+  if (created > 0) parts.push(`已创建 ${created} 个表头`);
+  if (viewCreated) parts.push("已创建 TestDeck 视图");
+  return parts.join("，");
+}
+
 // The overlay is mounted only while the confirmation is pending, and it is a
 // plain div rather than a <dialog>, because jsdom does not implement showModal.
 export function HeaderSetup({
@@ -57,6 +87,8 @@ export function HeaderSetup({
   loadPlan,
   provision,
   onChanged,
+  targetFingerprint,
+  schemaFingerprint,
   createTable,
   bases,
   onTableCreated
@@ -66,6 +98,7 @@ export function HeaderSetup({
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
   const [open, setOpen] = useState(false);
+  const [runNotice, setRunNotice] = useState("");
   const [ticked, setTicked] = useState<Record<TableRole, string[]>>({
     execution: [],
     bug: []
@@ -76,32 +109,52 @@ export function HeaderSetup({
   const [tableBusy, setTableBusy] = useState<TableRole | null>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
   const confirmRef = useRef<HTMLButtonElement>(null);
+  const executionBase = bases?.execution ?? "";
+  const bugBase = bases?.bug ?? "";
+  const baseOf = (role: TableRole) => (role === "execution" ? executionBase : bugBase);
+
+  // The header names another group now: no message and no dialog may linger
+  // under it. A re-pointed target keeps its message, because the message is
+  // about the run the administrator just approved, not about the newer table.
+  useEffect(() => {
+    setNotice("");
+    setRunNotice("");
+    setError("");
+    setOpen(false);
+    setCreateView(false);
+  }, [groupId]);
 
   useEffect(() => {
     let cancelled = false;
     setPlan(null);
     setLoadError("");
-    // The header names another group now: no message may linger under it.
-    setNotice("");
-    setError("");
     loadPlan(groupId)
       .then((loaded) => !cancelled && setPlan(loaded))
       .catch((reason) => !cancelled && setLoadError(messageOf(reason, "读取缺失表头失败")));
     return () => {
       cancelled = true;
     };
-  }, [groupId, loadPlan]);
+  }, [groupId, targetFingerprint, schemaFingerprint, loadPlan]);
 
   // The overlay claims modality, so focus has to move in.
   useEffect(() => {
     if (open) confirmRef.current?.focus();
   }, [open]);
 
+  // A message about a table created in one base must not survive that base
+  // moving to another one.
+  useEffect(() => {
+    setNotice("");
+  }, [executionBase, bugBase]);
+
   const missing: Record<TableRole, ProvisionField[]> = {
     execution: plan?.roles?.execution ?? [],
     bug: plan?.roles?.bug ?? []
   };
   const missingTotal = missing.execution.length + missing.bug.length;
+  const viewExists = (role: TableRole) => plan?.views?.[role]?.exists === true;
+  const provisionedRoles = ROLES.filter((role) => missing[role].length > 0);
+  const viewMissing = provisionedRoles.some((role) => !viewExists(role));
   // Only a header the administrator can still see may be sent: a reload can
   // drop a ticked name from the plan, and a hidden tick must not create it.
   const tickedNames = (role: TableRole) =>
@@ -113,8 +166,16 @@ export function HeaderSetup({
       execution: missing.execution.map((field) => field.name),
       bug: missing.bug.map((field) => field.name)
     });
+    setRunNotice("");
+    setCreateView(false);
     setError("");
     setOpen(true);
+  }
+
+  function closeDialog() {
+    setOpen(false);
+    setRunNotice("");
+    setCreateView(false);
   }
 
   function toggle(role: TableRole, name: string) {
@@ -129,12 +190,16 @@ export function HeaderSetup({
   function handleKeyDown(event: KeyboardEvent<HTMLDivElement>) {
     if (event.key === "Escape") {
       event.preventDefault();
-      if (!busy) setOpen(false);
+      if (!busy) closeDialog();
       return;
     }
     if (event.key !== "Tab") return;
+    // Every focusable control counts: trapping only the buttons left the header
+    // checkboxes unreachable and let Shift+Tab out to the page behind.
     const focusable = Array.from(
-      dialogRef.current?.querySelectorAll<HTMLButtonElement>("button:not([disabled])") ?? []
+      dialogRef.current?.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      ) ?? []
     );
     if (focusable.length === 0) {
       event.preventDefault();
@@ -158,9 +223,10 @@ export function HeaderSetup({
     if (roles.length === 0) return;
     setBusy(true);
     setError("");
+    setRunNotice("");
     setNotice("");
     let created = 0;
-    let succeeded = 0;
+    let viewCreated = false;
     let failure = "";
     try {
       for (const role of roles) {
@@ -168,34 +234,46 @@ export function HeaderSetup({
           const result = await provision(groupId, {
             role,
             field_names: tickedNames(role),
-            create_view: createView,
+            // Never ask for a view the table already carries.
+            create_view: createView && !viewExists(role),
             acknowledge: true
           });
-          succeeded += 1;
           created += result.created_fields?.length ?? 0;
+          if (result.view?.created) viewCreated = true;
         } catch (reason) {
-          failure = messageOf(reason, "创建表头失败");
+          const refusal = refusalOf(reason, "创建表头失败");
+          failure = refusal.message;
+          // The backend creates the fields before the view, so a refusal can
+          // still have changed the table it refuses to finish.
+          created += refusal.createdFields.length;
           break;
         }
       }
-      // Any accepted call clears the group's write approval, even when Lark
-      // turned out to have every header already: the page has to re-read the
-      // target instead of keeping the old consent on screen.
-      if (succeeded > 0) {
+      // Only a run that really changed the table clears the write approval, so
+      // the page is only asked to re-read it then.
+      if (created > 0 || viewCreated) {
         try {
           await onChanged();
         } catch {
-          // The page reports its own reload failure; the call still succeeded.
+          // The page reports its own reload failure; the write still happened.
         }
-        const reloaded = await loadPlan(groupId).catch(() => null);
-        if (reloaded) setPlan(reloaded);
       }
+      // The plan is re-read after every attempt, refusals included: a run can
+      // have created fields while the panel still lists them as missing.
+      const reloaded = await loadPlan(groupId).catch(() => null);
+      if (reloaded) setPlan(reloaded);
       if (failure) {
         setError(failure);
+        // The count stays inside the dialog, next to the refusal it belongs to.
+        if (created > 0) setRunNotice(`${createdCopy(created, viewCreated)}，请重新确认写入`);
       } else {
-        setOpen(false);
+        closeDialog();
+        setNotice(
+          created > 0 || viewCreated
+            ? `${createdCopy(created, viewCreated)}，请重新确认写入`
+            : "没有缺少的表头，写入确认保持不变"
+        );
       }
-      if (succeeded > 0) setNotice(`已创建 ${created} 个表头，请重新确认写入`);
     } finally {
       setBusy(false);
     }
@@ -203,7 +281,7 @@ export function HeaderSetup({
 
   async function createRoleTable(role: TableRole) {
     if (!createTable || !onTableCreated) return;
-    const baseToken = bases?.[role] ?? "";
+    const baseToken = baseOf(role);
     const tableName = names[role].trim();
     if (!baseToken || !tableName) return;
     setTableBusy(role);
@@ -261,7 +339,8 @@ export function HeaderSetup({
                   {TABLE_NAME_LABELS[role]}
                   <input
                     value={names[role]}
-                    disabled={!bases?.[role] || tableBusy !== null}
+                    maxLength={100}
+                    disabled={!baseOf(role) || tableBusy !== null}
                     onChange={(event) =>
                       setNames((current) => ({ ...current, [role]: event.target.value }))
                     }
@@ -271,7 +350,7 @@ export function HeaderSetup({
                   type="button"
                   className="ghost-button"
                   aria-label={CREATE_TABLE_LABELS[role]}
-                  disabled={!bases?.[role] || !names[role].trim() || tableBusy !== null}
+                  disabled={!baseOf(role) || !names[role].trim() || tableBusy !== null}
                   onClick={() => void createRoleTable(role)}
                 >
                   {tableBusy === role ? (
@@ -333,15 +412,24 @@ export function HeaderSetup({
               ))}
             </ul>
 
-            <label className="header-setup-view">
-              <input
-                type="checkbox"
-                checked={createView}
-                onChange={(event) => setCreateView(event.target.checked)}
-              />
-              同时创建 TestDeck 视图
-            </label>
+            {viewMissing ? (
+              <label className="header-setup-view">
+                <input
+                  type="checkbox"
+                  checked={createView}
+                  onChange={(event) => setCreateView(event.target.checked)}
+                />
+                同时创建 TestDeck 视图
+              </label>
+            ) : (
+              <p className="inline-status">TestDeck 视图已存在，不会被重复创建。</p>
+            )}
 
+            {runNotice ? (
+              <p className="inline-status saved" role="status">
+                {runNotice}
+              </p>
+            ) : null}
             {error ? (
               <p className="inline-status error" role="alert">
                 {error}
@@ -353,7 +441,7 @@ export function HeaderSetup({
                 type="button"
                 className="ghost-button"
                 disabled={busy}
-                onClick={() => setOpen(false)}
+                onClick={closeDialog}
               >
                 取消
               </button>
