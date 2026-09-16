@@ -61,6 +61,7 @@ export default function App() {
             loadSync={api.syncStatus}
             loadLegacyHistory={api.legacyHistory}
             legacyAttachmentUrl={api.legacyAttachmentUrl}
+            referenceAssetUrl={api.referenceAssetUrl}
           />
         ) : view === "groups" ? (
           <GroupsView loadGroups={api.groups} loadCases={api.cases} refreshKey={refreshKey} />

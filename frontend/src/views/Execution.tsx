@@ -37,6 +37,7 @@ type Props = {
   loadSync?: (groupId: string) => Promise<SyncStatus>;
   loadLegacyHistory?: (groupId: string, code: string) => Promise<LegacyHistoryData>;
   legacyAttachmentUrl?: (refId: string, index: number) => string;
+  referenceAssetUrl?: (assetId: string) => string;
   initialGroupId?: string;
 };
 
@@ -68,6 +69,7 @@ export function ExecutionView({
   loadSync,
   loadLegacyHistory,
   legacyAttachmentUrl,
+  referenceAssetUrl,
   initialGroupId
 }: Props) {
   const [groups, setGroups] = useState<Group[]>([]);
@@ -354,6 +356,7 @@ export function ExecutionView({
               total={cases.length}
               onPrevious={() => void showCase(caseIndex - 1)}
               onNext={() => void showCase(caseIndex + 1)}
+              referenceAssetUrl={referenceAssetUrl}
             />
             {loadingCase ? (
               <p className="inline-status"><LoaderCircle className="spin" size={16} />读取执行记录</p>

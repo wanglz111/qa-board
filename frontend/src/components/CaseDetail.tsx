@@ -1,6 +1,7 @@
 import { ChevronLeft, ChevronRight } from "lucide-react";
 
 import type { GroupCase } from "../api";
+import { ReferenceGallery } from "./ReferenceGallery";
 
 type Props = {
   testCase: GroupCase;
@@ -8,7 +9,10 @@ type Props = {
   total: number;
   onPrevious: () => void;
   onNext: () => void;
+  referenceAssetUrl?: (assetId: string) => string;
 };
+
+const defaultAssetUrl = (assetId: string) => `/api/case-reference-assets/${assetId}`;
 
 const FIELDS: Array<[keyof GroupCase, string]> = [
   ["module", "模块"],
@@ -20,7 +24,14 @@ const FIELDS: Array<[keyof GroupCase, string]> = [
   ["expected", "预期结果"]
 ];
 
-export function CaseDetail({ testCase, position, total, onPrevious, onNext }: Props) {
+export function CaseDetail({
+  testCase,
+  position,
+  total,
+  onPrevious,
+  onNext,
+  referenceAssetUrl
+}: Props) {
   return (
     <article className="case-detail" aria-labelledby="case-title">
       <header className="case-detail-heading">
@@ -64,6 +75,23 @@ export function CaseDetail({ testCase, position, total, onPrevious, onNext }: Pr
           );
         })}
       </dl>
+      {testCase.expect_absent.length > 0 ? (
+        <ul className="expect-absent" aria-label="不应出现">
+          {testCase.expect_absent.map((text) => (
+            <li key={text}>不应出现：{text}</li>
+          ))}
+        </ul>
+      ) : null}
+      <ReferenceGallery
+        assets={testCase.reference_assets}
+        assetUrl={referenceAssetUrl ?? defaultAssetUrl}
+      />
+      {testCase.prototype_note ? (
+        <p className="prototype-note">
+          <strong>原型备注</strong>
+          <span>{testCase.prototype_note}</span>
+        </p>
+      ) : null}
     </article>
   );
 }
