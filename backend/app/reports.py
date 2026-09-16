@@ -11,12 +11,12 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 from openpyxl import Workbook
 from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.auth import require_admin
 from app.db import get_db
-from app.models import Attempt, Group, GroupCase
+from app.models import Attempt, CaseReferenceLink, Group, GroupCase
 
 router = APIRouter(prefix="/api", dependencies=[Depends(require_admin)])
 
@@ -43,6 +43,7 @@ HEADERS = (
     "attempt_label",
     "history_count",
     "screenshot_count",
+    "reference_image_count",
     "source",
 )
 
@@ -70,6 +71,7 @@ def _report_rows(db: Session, group: Group) -> list[dict[str, Any]]:
     cases = db.scalars(
         select(GroupCase).where(GroupCase.group_id == group.id).order_by(GroupCase.position)
     ).all()
+    reference_counts = _reference_counts(db, group)
     attempts = db.scalars(
         select(Attempt)
         .join(GroupCase, Attempt.group_case_id == GroupCase.id)
@@ -100,10 +102,21 @@ def _report_rows(db: Session, group: Group) -> list[dict[str, Any]]:
                 "attempt_label": latest.label if latest else None,
                 "history_count": len(case_history),
                 "screenshot_count": sum(len(attempt.screenshots) for attempt in case_history),
+                "reference_image_count": reference_counts.get(group_case.id, 0),
                 "source": latest.source if latest else None,
             }
         )
     return rows
+
+
+def _reference_counts(db: Session, group: Group) -> dict[UUID, int]:
+    rows = db.execute(
+        select(CaseReferenceLink.group_case_id, func.count(CaseReferenceLink.id))
+        .join(GroupCase, CaseReferenceLink.group_case_id == GroupCase.id)
+        .where(GroupCase.group_id == group.id)
+        .group_by(CaseReferenceLink.group_case_id)
+    ).all()
+    return dict(rows)
 
 
 def _filename(group: Group, suffix: str) -> str:

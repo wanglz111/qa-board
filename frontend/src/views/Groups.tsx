@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ChevronRight, FileStack, LoaderCircle, RefreshCw } from "lucide-react";
+import { ChevronRight, FileStack, Images, LoaderCircle, RefreshCw } from "lucide-react";
 
 import type { Group, GroupCase } from "../api";
 
@@ -61,7 +61,7 @@ export function GroupsView({ loadGroups, loadCases, refreshKey }: Props) {
       </div>
       <div className="case-index">
         <div className="case-index-heading"><div><p className="eyebrow">CASES</p><h3>{activeGroup?.name ?? "选择测试组"}</h3></div>{activeGroup && <span>{activeGroup.count} 条</span>}</div>
-        {activeGroup ? <div className="case-table-wrap"><table><thead><tr><th>顺序</th><th>编号</th><th>标题</th><th>优先级</th></tr></thead><tbody>{cases.map((testCase) => <tr key={testCase.id}><td>{testCase.position}</td><td><code>{testCase.code}</code></td><td>{testCase.title}</td><td>{testCase.priority ?? "-"}</td></tr>)}</tbody></table></div> : <div className="empty-list"><FileStack size={24} /><span>未选择测试组</span></div>}
+        {activeGroup ? <div className="case-table-wrap"><table><thead><tr><th>顺序</th><th>编号</th><th>标题</th><th>优先级</th><th>原型</th></tr></thead><tbody>{cases.map((testCase) => <tr key={testCase.id}><td>{testCase.position}</td><td><code>{testCase.code}</code></td><td>{testCase.title}</td><td>{testCase.priority ?? "-"}</td><td>{testCase.reference_assets.length > 0 ? <span className="case-asset-count"><Images size={14} />原型 {testCase.reference_assets.length} 张</span> : "-"}</td></tr>)}</tbody></table></div> : <div className="empty-list"><FileStack size={24} /><span>未选择测试组</span></div>}
       </div>
     </section>
   );

@@ -4,6 +4,8 @@ from uuid import uuid4
 
 from openpyxl import load_workbook
 
+from tests.casebook_fixture import casebook_zip
+
 
 def _rows(response) -> list[dict[str, str]]:
     return list(csv.DictReader(io.StringIO(response.text)))
@@ -128,3 +130,23 @@ def test_export_defuses_formulas_hidden_behind_leading_whitespace(
     ]
     # openpyxl normalises the CRLF pair to a single newline on write.
     assert titles == ["'\t=HYPERLINK(\"https://unsafe.test\")", "' =1+1", "'\n-2+3"]
+
+
+def test_report_counts_reference_images_separately(authenticated_client, upload_dir):
+    preview = authenticated_client.post(
+        "/api/import/preview",
+        files={"file": ("casebook.zip", casebook_zip(), "application/zip")},
+    )
+    group_id = authenticated_client.post(
+        "/api/import/confirm",
+        json={"ticket_id": preview.json()["ticket_id"], "name": "Odyssey"},
+    ).json()["id"]
+
+    rows = _rows(authenticated_client.get(f"/api/groups/{group_id}/reports.csv"))
+
+    # C-05 references two images; C-11 references one locator.
+    assert rows[0]["reference_image_count"] == "2"
+    assert rows[1]["reference_image_count"] == "1"
+    assert rows[0]["screenshot_count"] == "0"
+    assert rows[0]["source"] == ""
+    assert list(rows[0])[-1] == "source"
