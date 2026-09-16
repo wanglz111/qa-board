@@ -274,6 +274,9 @@ class FakeLark:
         self.timeout_after_create = False
         self.create_error = False
         self.fail_bug_create = False
+        # An HTTP-level refusal from Lark, as a document the app may only read
+        # answers one; None means the fake keeps creating tables normally.
+        self.table_create_http_status: int | None = None
         self.hide_created_records = False
         self.media_unauthorized = False
         self.fields_error = False
@@ -436,6 +439,11 @@ class FakeLark:
             base = self._base(path)
             if base is None:
                 return httpx.Response(404, json={"code": 1, "msg": "unsupported base"})
+            if self.table_create_http_status is not None:
+                return httpx.Response(
+                    self.table_create_http_status,
+                    json={"code": 91403, "msg": "Forbidden"},
+                )
             base_token = path.split("/apps/", 1)[1].split("/", 1)[0]
             body = json.loads(request.content or b"{}")
             table = body.get("table") or {}

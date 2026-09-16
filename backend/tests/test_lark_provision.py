@@ -181,7 +181,90 @@ def test_creating_a_table_returns_its_new_id(lark_fake, authenticated_client, pr
     assert created_table["base_token"] == "app-bug"
     assert created_table["path"] == "/open-apis/bitable/v1/apps/app-bug/tables"
     assert len(created_table["fields"]) == 6
+    fields = {field["field_name"]: field for field in created_table["fields"]}
+    # The field guide gives text fields a null property; a date field keeps its
+    # own, so the created table matches what Lark documents for both.
+    assert fields["优先级"]["property"] is None
+    assert fields["反馈时间"]["property"] == {
+        "date_formatter": "yyyy/MM/dd",
+        "auto_fill": False,
+    }
     assert lark_fake.created_views == []
+
+
+def test_creating_a_table_reports_a_lark_permission_refusal(
+    lark_fake, authenticated_client, provision_group
+):
+    """A 403 must name the status, Lark's reason and the remedy it needs."""
+
+    lark_fake.table_create_http_status = 403
+    response = authenticated_client.post(
+        f"/api/groups/{provision_group.id}/lark/provision/table",
+        json={
+            "role": "bug",
+            "base_token": "app-bug",
+            "table_name": "缺陷记录",
+            "acknowledge": True,
+        },
+    )
+
+    assert response.status_code == 409, response.text
+    detail = response.json()["detail"]
+    assert "新建数据表失败" in detail
+    assert "HTTP 403" in detail
+    assert "91403" in detail
+    assert "Forbidden" in detail
+    assert "可编辑协作者" in detail
+    assert "test-app-secret" not in response.text
+    assert not lark_fake.created_tables
+
+
+def test_a_new_execution_table_gives_the_attachment_a_null_property(
+    lark_fake, authenticated_client, provision_group
+):
+    """Lark refuses an attachment whose property is not null (800074088)."""
+
+    authenticated_client.post(
+        f"/api/groups/{provision_group.id}/lark/provision/table",
+        json={
+            "role": "execution",
+            "base_token": "app-exec",
+            "table_name": "执行记录",
+            "acknowledge": True,
+        },
+    )
+
+    fields = {field["field_name"]: field for field in lark_fake.created_tables[0]["fields"]}
+    assert fields["截图"]["type"] == 17
+    assert fields["截图"]["property"] is None
+    assert fields["用例"]["property"] is None
+    assert fields["日期"]["property"] == {
+        "date_formatter": "yyyy/MM/dd",
+        "auto_fill": False,
+    }
+
+
+def test_a_created_header_always_carries_a_property(
+    lark_fake, authenticated_client, provision_group
+):
+    """The create-field body matches the guide: null, never an empty object."""
+
+    authenticated_client.post(
+        f"/api/groups/{provision_group.id}/lark/provision/fields",
+        json={
+            "role": "execution",
+            "field_names": ["结果", "日期"],
+            "create_view": False,
+            "acknowledge": True,
+        },
+    )
+
+    created = {field["field_name"]: field for field in lark_fake.created_fields}
+    assert created["结果"]["property"] is None
+    assert created["日期"]["property"] == {
+        "date_formatter": "yyyy/MM/dd",
+        "auto_fill": False,
+    }
 
 
 def test_setting_headers_creates_the_view_when_asked_to(
@@ -335,6 +418,7 @@ def test_setting_headers_reports_a_refused_create_as_a_conflict(
     assert detail["reason"] == "provision_failed"
     assert "创建表头失败" in detail["message"]
     assert "no permission to create fields" in detail["message"]
+    assert "可编辑协作者" in detail["message"]
     assert detail["created_fields"] == []
     assert "test-app-secret" not in response.text
     assert not lark_fake.created_fields

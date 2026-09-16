@@ -24,6 +24,17 @@ class LarkTimeout(LarkError):
     """The write may or may not have reached Lark: never retried blindly."""
 
 
+# A write the app is not allowed to make is answered with HTTP 401/403 (or an
+# HTTP 400 carrying a permission message). Only Lark can grant that permission,
+# so the refusal names both places it lives. One constant keeps the table and
+# field paths wording the remedy exactly the same way.
+WRITE_PERMISSION_HINT = (
+    "；请在 Lark 开放平台为应用开通「查看、评论、编辑和管理多维表格」权限并发布，"
+    "同时把应用加为该多维表格的可编辑协作者"
+)
+_PERMISSION_WORDS = ("permission", "forbidden", "access denied", "权限")
+
+
 @dataclass(frozen=True)
 class LarkCall:
     method: str
@@ -32,6 +43,31 @@ class LarkCall:
 
 def _is_record_path(path: str) -> bool:
     return "/records" in path
+
+
+def _error_body(response: httpx.Response) -> dict[str, Any]:
+    """Lark's own code and message, when the refusal carries a JSON body."""
+
+    try:
+        parsed = response.json()
+    except (ValueError, TypeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _permission_hint(status: int | None, message: str) -> str:
+    """The Lark-side remedy, but only for a refusal that looks like one.
+
+    A parameter error must not send the administrator off to change document
+    permissions, so an unclear refusal stays with Lark's own words.
+    """
+
+    if status in (401, 403):
+        return WRITE_PERMISSION_HINT
+    normalized = str(message).lower()
+    if any(word in normalized for word in _PERMISSION_WORDS):
+        return WRITE_PERMISSION_HINT
+    return ""
 
 
 def build_lark_client(
@@ -149,7 +185,24 @@ class LarkClient:
         except httpx.TimeoutException as error:
             raise LarkTimeout(f"Lark create timed out: {type(error).__name__}") from None
         except httpx.HTTPError as error:
-            raise LarkError(f"Lark create failed: {type(error).__name__}") from None
+            # Lark puts the actionable reason in the JSON body even for HTTP
+            # errors (for example, a missing bitable permission). Preserve only
+            # the status and server message; never include the URL, request
+            # body, or credentials in the error shown to an administrator.
+            status = getattr(response, "status_code", None)
+            error_body = _error_body(response)
+            code = error_body.get("code")
+            message = str(error_body.get("msg") or "").strip().replace("\n", " ")
+            detail = ""
+            if code not in (None, ""):
+                detail += f"，Lark code {code}"
+            if message:
+                detail += f"：{message}"
+            suffix = f" HTTP {status}" if status is not None else ""
+            raise LarkError(
+                f"Lark create failed{suffix}: {type(error).__name__}{detail}"
+                f"{_permission_hint(status, message)}"
+            ) from None
         try:
             payload = response.json()
         except ValueError:
@@ -158,7 +211,10 @@ class LarkClient:
         if code not in (0, None):
             message = str(payload.get("msg") or "").strip().replace("\n", " ")
             detail = f": {message}" if message else ""
-            raise LarkError(f"Lark rejected the create (code {code}){detail}")
+            raise LarkError(
+                f"Lark rejected the create (code {code}){detail}"
+                f"{_permission_hint(None, message)}"
+            )
         data = payload.get("data")
         return data if isinstance(data, dict) else payload
 
@@ -243,9 +299,13 @@ class LarkClient:
     def create_field(
         self, app_token: str, table_id: str, name: str, type_id: int, properties: dict[str, Any]
     ) -> dict[str, Any]:
-        body: dict[str, Any] = {"field_name": name, "type": type_id}
-        if properties:
-            body["property"] = properties
+        # Text and attachment fields take a null property: Lark refuses an empty
+        # object in its place (code 800074088), so the key is always sent.
+        body: dict[str, Any] = {
+            "field_name": name,
+            "type": type_id,
+            "property": properties or None,
+        }
         return self._post_json(
             f"/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/fields", body
         )

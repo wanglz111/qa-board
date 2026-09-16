@@ -93,7 +93,9 @@ def _table_field(name: str) -> dict[str, Any]:
     return {
         "field_name": name,
         "type": type_id,
-        "property": _properties(type_id),
+        # Text and attachment fields carry no extra property, and the field
+        # guide writes those as null; an empty object is never sent in its place.
+        "property": _properties(type_id) or None,
     }
 
 
