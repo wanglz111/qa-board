@@ -60,3 +60,16 @@ def test_casebook_prompt_embeds_the_canonical_schema():
     assert json.loads(match.group("schema")) == canonical
     assert canonical["properties"]["casebook"]["const"] == "1.0"
     assert canonical["additionalProperties"] is False
+
+
+def test_format_doc_embeds_the_same_schema():
+    spec = Path(__file__).parents[2] / "docs" / "CASEBOOK-FORMAT.md"
+    if not spec.is_file():
+        pytest.skip("docs/ is not part of this checkout")
+
+    match = SCHEMA_BLOCK.search(spec.read_text(encoding="utf-8"))
+
+    assert match, "CASEBOOK-FORMAT.md must embed the schema between the markers"
+    assert json.loads(match.group("schema")) == json.loads(
+        SCHEMA.read_text(encoding="utf-8")
+    )
