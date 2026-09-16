@@ -1,6 +1,7 @@
 import os
 import json
 from dataclasses import replace
+from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -42,8 +43,8 @@ from app.models import (
     Attempt,
     Group,
     GroupCase,
-    GroupLarkConfirmation,
     LarkHistoryRef,
+    LarkTarget,
 )
 
 
@@ -391,11 +392,9 @@ def lark_fake(monkeypatch) -> FakeLark:
         lark_table_defects="tbl-defects",
     )
     monkeypatch.setattr(lark_client_module, "global_settings", configured)
-    import app.lark.confirmation as lark_confirmation
     import app.lark.history as lark_history
 
     monkeypatch.setattr(lark_history, "settings", configured)
-    monkeypatch.setattr(lark_confirmation, "settings", configured)
     previous = app.dependency_overrides.get(get_lark_client)
     app.dependency_overrides[get_lark_client] = lambda: fake.client
     try:
@@ -452,16 +451,20 @@ def known_table_names() -> dict[str, str]:
 @pytest.fixture
 def confirmed_group(db_session, imported_group) -> Group:
     db_session.add(
-        GroupLarkConfirmation(
+        LarkTarget(
             group_id=imported_group.id,
-            base_token="app-token",
+            source_url="https://tenant.larksuite.com/wiki/node-1",
+            execution_base_token="app-token",
+            execution_base_name="旧版测试管理",
             execution_table_id="tbl-runs",
-            bug_table_id="tbl-defects",
-            base_name="旧版测试管理",
             execution_table_name="执行记录",
+            bug_base_token="app-token",
+            bug_base_name="旧版测试管理",
+            bug_table_id="tbl-defects",
             bug_table_name="缺陷记录",
             schema_fingerprint="schema-fixture",
-            target_fingerprint="target-fixture",
+            target_fingerprint="app-token|tbl-runs|app-token|tbl-defects",
+            confirmed_at=datetime.now(timezone.utc),
         )
     )
     db_session.commit()

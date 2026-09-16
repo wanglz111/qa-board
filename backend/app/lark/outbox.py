@@ -13,7 +13,6 @@ from sqlalchemy.orm import Session
 from app.auth import require_admin
 from app.db import get_db
 from app.lark.client import LarkError, LarkTimeout
-from app.lark.confirmation import matches_current_configuration
 from app.lark.write import (
     LarkWriteGateway,
     bug_fields,
@@ -23,7 +22,7 @@ from app.models import (
     Attempt,
     Group,
     GroupCase,
-    GroupLarkConfirmation,
+    LarkTarget,
     SyncJob,
 )
 
@@ -48,12 +47,8 @@ def _now() -> datetime:
 
 
 def group_is_confirmed(db: Session, group_id: UUID) -> bool:
-    confirmation = db.scalar(
-        select(GroupLarkConfirmation).where(
-            GroupLarkConfirmation.group_id == group_id
-        )
-    )
-    return matches_current_configuration(confirmation)
+    target = db.scalar(select(LarkTarget).where(LarkTarget.group_id == group_id))
+    return target is not None and target.confirmed_at is not None
 
 
 def enqueue_attempt_job(db: Session, attempt: Attempt) -> SyncJob | None:

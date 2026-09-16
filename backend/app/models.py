@@ -201,28 +201,60 @@ class LarkHistoryRef(Base):
     snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
 
 
-class GroupLarkConfirmation(Base):
-    """An explicit administrator approval of the real Lark write targets.
+class LarkTarget(Base):
+    """The real Lark destination of one test group, selected by an administrator.
 
-    A confirmation pins the exact base, tables and schema fingerprint that the
-    administrator saw, so a changed target can never inherit earlier consent.
+    ``confirmed_at`` is the write approval; a changed ``target_fingerprint``
+    clears it so a re-pointed group can never inherit earlier consent.
     """
 
-    __tablename__ = "group_lark_confirmations"
+    __tablename__ = "lark_targets"
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     group_id: Mapped[UUID] = mapped_column(
         ForeignKey("groups.id", ondelete="CASCADE"), nullable=False, unique=True
     )
-    base_token: Mapped[str] = mapped_column(String, nullable=False)
+    source_url: Mapped[str] = mapped_column(String, nullable=False)
+    execution_base_token: Mapped[str] = mapped_column(String, nullable=False)
+    execution_base_name: Mapped[str] = mapped_column(String, nullable=False)
     execution_table_id: Mapped[str] = mapped_column(String, nullable=False)
-    bug_table_id: Mapped[str] = mapped_column(String, nullable=False)
-    base_name: Mapped[str] = mapped_column(String, nullable=False)
     execution_table_name: Mapped[str] = mapped_column(String, nullable=False)
+    execution_view_id: Mapped[str | None] = mapped_column(String)
+    execution_view_name: Mapped[str | None] = mapped_column(String)
+    bug_base_token: Mapped[str] = mapped_column(String, nullable=False)
+    bug_base_name: Mapped[str] = mapped_column(String, nullable=False)
+    bug_table_id: Mapped[str] = mapped_column(String, nullable=False)
     bug_table_name: Mapped[str] = mapped_column(String, nullable=False)
-    schema_fingerprint: Mapped[str] = mapped_column(String, nullable=False)
+    schema_fingerprint: Mapped[str | None] = mapped_column(String)
     target_fingerprint: Mapped[str] = mapped_column(String, nullable=False)
-    confirmed_at: Mapped[datetime] = mapped_column(
+    selected_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class LarkTargetRevision(Base):
+    """Every distinct target a group has ever used, newest last.
+
+    History and reconciliation read old tables through this log, so a table
+    that was swapped away stays reachable instead of disappearing.
+    """
+
+    __tablename__ = "lark_target_revisions"
+    __table_args__ = (
+        UniqueConstraint("group_id", "target_fingerprint", name="uq_lark_revision"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    group_id: Mapped[UUID] = mapped_column(
+        ForeignKey("groups.id", ondelete="CASCADE"), nullable=False
+    )
+    execution_base_token: Mapped[str] = mapped_column(String, nullable=False)
+    execution_table_id: Mapped[str] = mapped_column(String, nullable=False)
+    bug_base_token: Mapped[str] = mapped_column(String, nullable=False)
+    bug_table_id: Mapped[str] = mapped_column(String, nullable=False)
+    target_fingerprint: Mapped[str] = mapped_column(String, nullable=False)
+    recorded_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
@@ -248,6 +280,7 @@ class SyncJob(Base):
     next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     new_exec_record_id: Mapped[str | None] = mapped_column(String)
     new_bug_record_id: Mapped[str | None] = mapped_column(String)
+    target_fingerprint: Mapped[str | None] = mapped_column(String)
     error_kind: Mapped[str | None] = mapped_column(String)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

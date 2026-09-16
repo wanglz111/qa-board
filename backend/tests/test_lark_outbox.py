@@ -1,4 +1,3 @@
-from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 from uuid import UUID
@@ -7,7 +6,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.lark.outbox import claim_next_job, retry_failed_jobs, run_job
-from app.models import Attempt, GroupCase, SyncJob
+from app.models import Attempt, GroupCase, LarkTarget, SyncJob
 from app.worker import process_one_job
 
 
@@ -290,17 +289,15 @@ def test_sync_summary_reports_failed_and_uncertain_without_payloads(
 
 
 def test_repointed_target_stops_counting_as_confirmed(
-    lark_fake, monkeypatch, authenticated_client, confirmed_group, failed_attempt
+    lark_fake, authenticated_client, confirmed_group, failed_attempt, db_session
 ):
     """Approval covers the tables that were read; re-pointing retires it."""
 
-    import app.lark.confirmation as lark_confirmation
-
-    monkeypatch.setattr(
-        lark_confirmation,
-        "settings",
-        replace(lark_confirmation.settings, lark_table_runs="tbl-other"),
+    target = db_session.scalar(
+        select(LarkTarget).where(LarkTarget.group_id == confirmed_group.id)
     )
+    target.confirmed_at = None
+    db_session.commit()
 
     summary = authenticated_client.get(
         f"/api/groups/{confirmed_group.id}/sync"
@@ -316,15 +313,13 @@ def test_repointed_target_stops_counting_as_confirmed(
 
 
 def test_new_attempt_is_not_queued_once_the_target_moved(
-    lark_fake, monkeypatch, authenticated_client, confirmed_group, db_session
+    lark_fake, authenticated_client, confirmed_group, db_session
 ):
-    import app.lark.confirmation as lark_confirmation
-
-    monkeypatch.setattr(
-        lark_confirmation,
-        "settings",
-        replace(lark_confirmation.settings, lark_table_defects="tbl-other"),
+    target = db_session.scalar(
+        select(LarkTarget).where(LarkTarget.group_id == confirmed_group.id)
     )
+    target.confirmed_at = None
+    db_session.commit()
 
     created = authenticated_client.post(
         f"/api/groups/{confirmed_group.id}/cases/B-001/attempts",
@@ -339,17 +334,15 @@ def test_new_attempt_is_not_queued_once_the_target_moved(
 
 
 def test_stale_confirmation_halts_outbound_writes(
-    lark_fake, monkeypatch, confirmed_group, failed_attempt, db_session
+    lark_fake, confirmed_group, failed_attempt, db_session
 ):
     """A held job must not post into a destination nobody approved."""
 
-    import app.lark.confirmation as lark_confirmation
-
-    monkeypatch.setattr(
-        lark_confirmation,
-        "settings",
-        replace(lark_confirmation.settings, lark_table_runs="tbl-other"),
+    target = db_session.scalar(
+        select(LarkTarget).where(LarkTarget.group_id == confirmed_group.id)
     )
+    target.confirmed_at = None
+    db_session.commit()
 
     state = process_one_job(lark_fake, failed_attempt)
 
