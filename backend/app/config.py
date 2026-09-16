@@ -26,6 +26,7 @@ class Settings:
     lark_bug_app_token: str = ""
     lark_table_runs: str = ""
     lark_table_defects: str = ""
+    lark_legacy_alias_used: bool = False
 
     @property
     def lark_table_records(self) -> str:
@@ -57,11 +58,19 @@ settings = Settings(
     upload_dir=os.environ.get("UPLOAD_DIR") or "uploads",
     session_cookie_secure=_environment_flag("SESSION_COOKIE_SECURE"),
     session_ttl_seconds=_ttl,
-    lark_base_url=os.environ.get("LARK_BASE_URL") or "https://open.feishu.cn",
+    lark_base_url=os.environ.get("LARK_BASE_URL") or "https://open.larksuite.com",
     lark_app_id=os.environ.get("LARK_APP_ID") or "",
     lark_app_secret=os.environ.get("LARK_APP_SECRET") or "",
     lark_app_token=os.environ.get("LARK_APP_TOKEN") or os.environ.get("LARK_BUG_APP_TOKEN") or "",
     lark_bug_app_token=os.environ.get("LARK_BUG_APP_TOKEN") or os.environ.get("LARK_APP_TOKEN") or "",
     lark_table_runs=os.environ.get("LARK_TABLE_RUNS") or os.environ.get("LARK_TABLE_RECORDS") or "",
     lark_table_defects=os.environ.get("LARK_TABLE_DEFECTS") or os.environ.get("LARK_TABLE_BUGS") or "",
+    # The alias names are legacy; when they are the only source the read target
+    # may point at the new tables, so the check endpoint has to say so loudly.
+    lark_legacy_alias_used=(
+        not os.environ.get("LARK_TABLE_RUNS") and bool(os.environ.get("LARK_TABLE_RECORDS"))
+    )
+    or (
+        not os.environ.get("LARK_TABLE_DEFECTS") and bool(os.environ.get("LARK_TABLE_BUGS"))
+    ),
 )

@@ -250,6 +250,7 @@ class FakeLark:
         self.create_error = False
         self.fail_bug_create = False
         self.hide_created_records = False
+        self.media_unauthorized = False
         self.client = LarkClient(
             base_url="https://open.feishu.test",
             app_id="test-app-id",
@@ -298,6 +299,8 @@ class FakeLark:
             return httpx.Response(200, json={"code": 0, "data": {"tenant_access_token": "fake-token"}})
         if "/medias/" in path and path.endswith("/download"):
             token = path.split("/medias/", 1)[1].removesuffix("/download")
+            if self.media_unauthorized:
+                return httpx.Response(401, json={"code": 1, "msg": "unauthorized"})
             if token not in self.media:
                 return httpx.Response(404, json={"code": 1, "msg": "not found"})
             content, mime = self.media[token]

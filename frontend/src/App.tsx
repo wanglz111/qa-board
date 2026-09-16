@@ -57,6 +57,8 @@ export default function App() {
             commitReserved={api.submitReserved}
             uploadScreenshot={api.uploadScreenshot}
             loadSync={api.syncStatus}
+            loadLegacyHistory={api.legacyHistory}
+            legacyAttachmentUrl={api.legacyAttachmentUrl}
           />
         ) : view === "groups" ? (
           <GroupsView loadGroups={api.groups} loadCases={api.cases} refreshKey={refreshKey} />

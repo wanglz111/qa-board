@@ -47,6 +47,38 @@ async function mockApi(page: Page) {
       }
       return route.fulfill({ json: [] });
     }
+    if (pathname === "/api/groups/0918-id/cases/B-001/lark-history") {
+      return route.fulfill({
+        json: {
+          available: true,
+          code: "B-001",
+          read_errors: [],
+          source_table_name: "执行记录",
+          read_at: "2026-09-16T10:00:00Z",
+          certainty: "verified",
+          uncertainty: null,
+          ambiguous: false,
+          original: [],
+          retests: [],
+          bugs: [],
+          unknown_count: 0
+        }
+      });
+    }
+    if (pathname === "/api/groups/0918-id/sync") {
+      return route.fulfill({
+        json: {
+          confirmed: false,
+          queued: 0,
+          synced: 0,
+          failed: 0,
+          uncertain: 0,
+          last_error_kind: null,
+          pending_attempts: 0,
+          detail: "尚未确认目标表，本地结果不会写入 Lark"
+        }
+      });
+    }
     return route.fulfill({ json: {} });
   });
 }

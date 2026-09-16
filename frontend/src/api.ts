@@ -128,6 +128,48 @@ export type SyncStatus = {
   detail: string;
 };
 
+export type LegacyAttachment = {
+  index: number;
+  name: string | null;
+  mime: string | null;
+};
+
+export type LegacyResult = {
+  record_id: string | null;
+  case_text: string;
+  result: string | null;
+  note: string | null;
+  console_text: string | null;
+  observed_at: number | null;
+  ref_id: string;
+  attachments: LegacyAttachment[];
+};
+
+export type LegacyBug = {
+  record_id: string | null;
+  description: string;
+  status: string | null;
+  priority: string | null;
+  matched_by: string;
+};
+
+export type LegacyHistory = {
+  available: boolean;
+  code: string;
+  read_errors: string[];
+  source_table_name: string | null;
+  base_name?: string | null;
+  bug_table_name?: string | null;
+  read_at: string;
+  certainty: "verified" | "uncertain";
+  uncertainty: string | null;
+  ambiguous: boolean;
+  original: LegacyResult[];
+  retests: LegacyResult[];
+  bugs: LegacyBug[];
+  unknown_count: number;
+};
+
 export type LarkConfirmPayload = {
   base_token: string;
   execution_table_id: string;
@@ -245,5 +287,11 @@ export const api = {
     }),
   syncStatus: (groupId: string) => request<SyncStatus>(`/api/groups/${groupId}/sync`),
   enqueueSync: (groupId: string) =>
-    mutation<{ queued: number }>(`/api/groups/${groupId}/sync/enqueue`, { method: "POST" })
+    mutation<{ queued: number }>(`/api/groups/${groupId}/sync/enqueue`, { method: "POST" }),
+  legacyHistory: (groupId: string, code: string) =>
+    request<LegacyHistory>(
+      `/api/groups/${groupId}/cases/${encodeURIComponent(code)}/lark-history`
+    ),
+  legacyAttachmentUrl: (refId: string, index: number) =>
+    `/api/lark/history/${refId}/attachments/${index}`
 };

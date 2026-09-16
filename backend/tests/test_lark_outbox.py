@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 from uuid import UUID
@@ -221,7 +222,7 @@ def test_two_concurrent_workers_do_not_claim_the_same_job(
 
 
 def test_enqueue_only_works_for_confirmed_groups(
-    authenticated_client, unconfirmed_group, confirmed_group, failed_attempt
+    lark_fake, authenticated_client, unconfirmed_group, confirmed_group, failed_attempt
 ):
     assert (
         authenticated_client.post(
@@ -243,7 +244,7 @@ def test_enqueue_only_works_for_confirmed_groups(
 
 
 def test_new_attempt_queues_only_inside_a_confirmed_group(
-    authenticated_client, unconfirmed_group, confirmed_group, db_session
+    lark_fake, authenticated_client, unconfirmed_group, confirmed_group, db_session
 ):
     unconfirmed_id = unconfirmed_group.id
     confirmed_id = confirmed_group.id
@@ -286,3 +287,78 @@ def test_sync_summary_reports_failed_and_uncertain_without_payloads(
     assert body["queued"] == 0
     assert body["last_error_kind"] == "create_bug_failed"
     assert "new-1" not in str(body["last_error_kind"])
+
+
+def test_repointed_target_stops_counting_as_confirmed(
+    lark_fake, monkeypatch, authenticated_client, confirmed_group, failed_attempt
+):
+    """Approval covers the tables that were read; re-pointing retires it."""
+
+    import app.lark.confirmation as lark_confirmation
+
+    monkeypatch.setattr(
+        lark_confirmation,
+        "settings",
+        replace(lark_confirmation.settings, lark_table_runs="tbl-other"),
+    )
+
+    summary = authenticated_client.get(
+        f"/api/groups/{confirmed_group.id}/sync"
+    ).json()
+    assert summary["confirmed"] is False
+    assert summary["detail"] == "尚未确认目标表，本地结果不会写入 Lark"
+    assert (
+        authenticated_client.post(
+            f"/api/groups/{confirmed_group.id}/sync/enqueue"
+        ).status_code
+        == 409
+    )
+
+
+def test_new_attempt_is_not_queued_once_the_target_moved(
+    lark_fake, monkeypatch, authenticated_client, confirmed_group, db_session
+):
+    import app.lark.confirmation as lark_confirmation
+
+    monkeypatch.setattr(
+        lark_confirmation,
+        "settings",
+        replace(lark_confirmation.settings, lark_table_defects="tbl-other"),
+    )
+
+    created = authenticated_client.post(
+        f"/api/groups/{confirmed_group.id}/cases/B-001/attempts",
+        json={"result": "不通过", "note": "绑定未触发", "idempotency_key": "moved-1"},
+    )
+    assert created.status_code == 201
+
+    queued = db_session.scalars(
+        select(SyncJob).where(SyncJob.attempt_id == UUID(created.json()["id"]))
+    ).all()
+    assert queued == []
+
+
+def test_stale_confirmation_halts_outbound_writes(
+    lark_fake, monkeypatch, confirmed_group, failed_attempt, db_session
+):
+    """A held job must not post into a destination nobody approved."""
+
+    import app.lark.confirmation as lark_confirmation
+
+    monkeypatch.setattr(
+        lark_confirmation,
+        "settings",
+        replace(lark_confirmation.settings, lark_table_runs="tbl-other"),
+    )
+
+    state = process_one_job(lark_fake, failed_attempt)
+
+    assert state == "pending"
+    assert lark_fake.created_execution == 0
+    assert lark_fake.created_bug == 0
+    assert [request["method"] for request in lark_fake.requests] == []
+
+    job = _job(db_session, failed_attempt)
+    assert job.error_kind == "confirmation_stale"
+    assert job.retry_count == 0
+    assert job.next_retry_at is not None

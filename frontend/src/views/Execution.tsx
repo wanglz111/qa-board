@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Keyboard, LoaderCircle, PictureInPicture2, PlayCircle } from "lucide-react";
 
 import type {
@@ -7,6 +7,7 @@ import type {
   Group,
   GroupCase,
   GroupProgress,
+  LegacyHistory as LegacyHistoryData,
   Screenshot,
   SubmitPayload,
   SyncStatus
@@ -14,6 +15,7 @@ import type {
 import { CaseDetail } from "../components/CaseDetail";
 import { GroupSelector } from "../components/GroupSelector";
 import { History } from "../components/History";
+import { LegacyHistory } from "../components/LegacyHistory";
 import {
   OutcomeForm,
   type OutcomeFormHandle,
@@ -33,6 +35,8 @@ type Props = {
   commitReserved?: (attemptId: string, payload: SubmitPayload) => Promise<Attempt>;
   uploadScreenshot?: (attemptId: string, file: File) => Promise<Screenshot>;
   loadSync?: (groupId: string) => Promise<SyncStatus>;
+  loadLegacyHistory?: (groupId: string, code: string) => Promise<LegacyHistoryData>;
+  legacyAttachmentUrl?: (refId: string, index: number) => string;
   initialGroupId?: string;
 };
 
@@ -62,6 +66,8 @@ export function ExecutionView({
   commitReserved,
   uploadScreenshot,
   loadSync,
+  loadLegacyHistory,
+  legacyAttachmentUrl,
   initialGroupId
 }: Props) {
   const [groups, setGroups] = useState<Group[]>([]);
@@ -84,6 +90,16 @@ export function ExecutionView({
   const formRef = useRef<OutcomeFormHandle>(null);
   const keyFor = useIdempotencyKey();
   const pip = usePiP();
+  // Stable per-group loader: a fresh closure here would re-fetch on every render.
+  const legacyLoader = useCallback(
+    (code: string) => {
+      if (!loadLegacyHistory || !selectedGroupId) {
+        return Promise.reject(new Error("未选择测试组"));
+      }
+      return loadLegacyHistory(selectedGroupId, code);
+    },
+    [loadLegacyHistory, selectedGroupId]
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -330,6 +346,16 @@ export function ExecutionView({
             ) : (
               <History attempts={attempts} />
             )}
+            {loadLegacyHistory && selectedGroupId && activeCase ? (
+              <LegacyHistory
+                code={activeCase.code}
+                loadHistory={legacyLoader}
+                attachmentUrl={legacyAttachmentUrl}
+                attempts={attempts}
+                onStartRetest={reserveRetest ? () => void startRetest() : undefined}
+                reservedLabel={reserved?.label ?? null}
+              />
+            ) : null}
             <div className="outcome-panel">
               <div className="outcome-heading">
                 <h3>录入结果</h3>

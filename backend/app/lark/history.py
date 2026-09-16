@@ -7,6 +7,7 @@ from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Response
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.auth import require_admin
@@ -23,18 +24,20 @@ from app.lark.fields import (
     missing_required_fields,
     schema_fingerprint,
 )
-from app.models import LarkHistoryRef
+from app.models import GroupCase, LarkHistoryRef
 
 
 router = APIRouter(prefix="/api", dependencies=[Depends(require_admin)])
 
-# The case code must be the whole leading token: "B-0010" must never be read as
-# "B-001", and only an explicit "-R..." suffix marks a retest record.
+# The case code is the longest leading token, optionally followed by one
+# "-R..." retest suffix: "B-0010" must never be read as "B-001", "B-001_2" is
+# ambiguous and stays unmatched, and "TC-001-02" keeps its full code.
 CASE_REFERENCE = re.compile(
-    r"^\s*(?P<code>[A-Za-z][A-Za-z0-9]*-[A-Za-z0-9]+)"
-    r"(?P<retest>-R[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*)?"
-    r"(?![A-Za-z0-9-])"
+    r"^\s*(?P<token>[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*)(?![A-Za-z0-9_-])"
 )
+
+# A retest label is the group short code plus a sequence, e.g. -R0918-01.
+RETEST_SUFFIX = re.compile(r"(?P<retest>-R[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*)$")
 
 EXPLICIT_LINK_FIELDS = ("关联用例", "用例编号")
 CASE_TEXT_FIELDS = ("用例", "用例编号", "用例标题", "标题")
@@ -56,6 +59,7 @@ class CaseHistory:
     original: list[dict[str, Any]] = field(default_factory=list)
     retests: list[dict[str, Any]] = field(default_factory=list)
     ambiguous: list[dict[str, Any]] = field(default_factory=list)
+    unknown: list[dict[str, Any]] = field(default_factory=list)
     certainty: str = "uncertain"
     uncertainty: str | None = None
 
@@ -75,7 +79,14 @@ def parse_case_reference(text: str | None) -> CaseReference | None:
     match = CASE_REFERENCE.match(text)
     if match is None:
         return None
-    return CaseReference(code=match.group("code"), retest_label=match.group("retest"))
+    token = match.group("token")
+    retest = RETEST_SUFFIX.search(token)
+    if retest is None:
+        return CaseReference(code=token, retest_label=None)
+    code = token[: retest.start()]
+    if "-" not in code:
+        return CaseReference(code=token, retest_label=None)
+    return CaseReference(code=code, retest_label=retest.group("retest"))
 
 
 def record_fields(record: dict[str, Any]) -> dict[str, Any]:
@@ -135,9 +146,15 @@ def rank_records(
 
 def history_for(records: list[dict[str, Any]], code: str) -> CaseHistory:
     history = CaseHistory(code=code)
+    wanted = code.casefold()
     for record in records:
-        reference = parse_case_reference(record_case_text(record))
-        if reference is None or reference.code != code:
+        text = record_case_text(record)
+        reference = parse_case_reference(text)
+        if reference is None:
+            # Unparsed legacy rows stay visible instead of silently vanishing.
+            history.unknown.append(record)
+            continue
+        if reference.code.casefold() != wanted:
             continue
         if reference.is_retest:
             history.retests.append(record)
@@ -200,6 +217,167 @@ def _snapshot_attachments(snapshot: Any) -> list[dict[str, Any]]:
     return [item for item in attachments if isinstance(item, dict)]
 
 
+ALLOWED_ATTACHMENT_TYPES = (
+    "image/png",
+    "image/jpeg",
+    "image/webp",
+    "image/gif",
+    "application/pdf",
+    "text/plain",
+)
+MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
+
+
+def record_attachments(record: dict[str, Any]) -> list[dict[str, Any]]:
+    """Normalise the legacy 截图 field into display-only attachment metadata."""
+
+    value = record_fields(record).get("截图")
+    if not isinstance(value, list):
+        return []
+    attachments: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        token = item.get("file_token")
+        if not isinstance(token, str) or not token:
+            continue
+        attachments.append(
+            {
+                "file_token": token,
+                "name": str(item.get("name") or "legacy-attachment"),
+                "mime": str(item.get("type") or item.get("mime") or "application/octet-stream"),
+            }
+        )
+    return attachments
+
+
+def _legacy_result(record: dict[str, Any]) -> dict[str, Any]:
+    fields = record_fields(record)
+    return {
+        "record_id": record.get("record_id"),
+        "case_text": record_case_text(record),
+        "result": fields.get("结果"),
+        "note": fields.get("备注") or fields.get("说明") or fields.get("控制台"),
+        "console_text": fields.get("控制台"),
+        "observed_at": verified_timestamp(record),
+    }
+
+
+def _upsert_reference(
+    db: Session,
+    group_case: GroupCase,
+    record: dict[str, Any],
+    *,
+    table_id: str,
+    certainty: str,
+) -> LarkHistoryRef:
+    snapshot = {
+        "用例": record_case_text(record),
+        "结果": record_fields(record).get("结果"),
+        "attachments": record_attachments(record),
+    }
+    reference = db.scalar(
+        select(LarkHistoryRef).where(
+            LarkHistoryRef.group_case_id == group_case.id,
+            LarkHistoryRef.table_id == table_id,
+            LarkHistoryRef.old_record_id == str(record.get("record_id")),
+        )
+    )
+    if reference is None:
+        reference = LarkHistoryRef(
+            group_case_id=group_case.id,
+            table_id=table_id,
+            old_record_id=str(record.get("record_id")),
+            certainty=certainty,
+            snapshot=snapshot,
+        )
+        db.add(reference)
+    else:
+        reference.snapshot = snapshot
+        reference.certainty = certainty
+    db.flush()
+    return reference
+
+
+@router.get("/groups/{group_id}/cases/{code}/lark-history")
+def case_lark_history(
+    group_id: UUID,
+    code: str,
+    db: Annotated[Session, Depends(get_db)],
+    client: Annotated[LarkClient, Depends(get_lark_client)],
+) -> dict[str, Any]:
+    group_case = db.scalar(
+        select(GroupCase).where(GroupCase.group_id == group_id, GroupCase.code == code)
+    )
+    if group_case is None:
+        raise HTTPException(status_code=404, detail="Group case not found")
+
+    state = read_lark_state(client)
+    if state["read_errors"]:
+        return {
+            "available": False,
+            "code": code,
+            "read_errors": state["read_errors"],
+            "source_table_name": None,
+            "read_at": datetime.now(timezone.utc).isoformat(),
+            "certainty": "uncertain",
+            "uncertainty": "Lark 旧表不可读",
+            "original": [],
+            "retests": [],
+            "bugs": [],
+            "unknown_count": 0,
+            "ambiguous": False,
+        }
+
+    records = client.list_records(settings.lark_app_token, settings.lark_table_runs)
+    history = history_for(records, code)
+    case_history = history.original + history.retests
+    references = {
+        str(record.get("record_id")): _upsert_reference(
+            db,
+            group_case,
+            record,
+            table_id=settings.lark_table_runs,
+            certainty=history.certainty,
+        )
+        for record in case_history
+    }
+    bugs = match_bugs(
+        client.list_records(settings.lark_bug_app_token, settings.lark_table_defects),
+        code,
+    )
+    db.commit()
+
+    def serialize(record: dict[str, Any]) -> dict[str, Any]:
+        reference = references[str(record.get("record_id"))]
+        attachments = _snapshot_attachments(reference.snapshot)
+        return {
+            **_legacy_result(record),
+            "ref_id": str(reference.id),
+            "attachments": [
+                {"index": index, "name": item.get("name"), "mime": item.get("mime")}
+                for index, item in enumerate(attachments)
+            ],
+        }
+
+    return {
+        "available": True,
+        "code": code,
+        "read_errors": [],
+        "source_table_name": state["execution_table_name"],
+        "base_name": state["base_name"],
+        "bug_table_name": state["bug_table_name"],
+        "read_at": datetime.now(timezone.utc).isoformat(),
+        "certainty": history.certainty,
+        "uncertainty": history.uncertainty,
+        "ambiguous": bool(history.ambiguous),
+        "original": [serialize(record) for record in history.original],
+        "retests": [serialize(record) for record in history.retests],
+        "bugs": bugs,
+        "unknown_count": len(history.unknown),
+    }
+
+
 def read_lark_state(client: LarkClient) -> dict[str, Any]:
     """Read the real Lark names and field types, never secrets."""
 
@@ -208,11 +386,17 @@ def read_lark_state(client: LarkClient) -> dict[str, Any]:
         ("LARK_APP_ID", settings.lark_app_id),
         ("LARK_APP_SECRET", settings.lark_app_secret),
         ("LARK_APP_TOKEN", settings.lark_app_token),
+        ("LARK_BUG_APP_TOKEN", settings.lark_bug_app_token),
         ("LARK_TABLE_RUNS", settings.lark_table_runs),
         ("LARK_TABLE_DEFECTS", settings.lark_table_defects),
     ):
         if not value:
             read_errors.append(f"缺少配置 {name}")
+    if settings.lark_legacy_alias_used:
+        read_errors.append(
+            "检测到旧变量名 LARK_TABLE_RECORDS/LARK_TABLE_BUGS；"
+            "请改用 LARK_TABLE_RUNS/LARK_TABLE_DEFECTS 并确认它们指向旧表"
+        )
 
     payload: dict[str, Any] = {
         "base_name": None,
@@ -315,14 +499,19 @@ def legacy_attachment(
         content, content_type = client.download_media(file_token)
     except LarkError as error:
         raise HTTPException(status_code=502, detail=str(error)) from None
+    if len(content) > MAX_ATTACHMENT_BYTES:
+        raise HTTPException(status_code=502, detail="Legacy attachment is too large")
 
     filename = str(attachments[index].get("name") or "legacy-attachment")
     filename = re.sub(r'[^A-Za-z0-9._-]+', "-", filename) or "legacy-attachment"
+    declared = content_type.split(";")[0].strip().lower()
     return Response(
         content=content,
-        media_type=content_type,
+        # Never echo an upstream content type straight into the browser.
+        media_type=declared if declared in ALLOWED_ATTACHMENT_TYPES else "application/octet-stream",
         headers={
             "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
             "Content-Disposition": f'attachment; filename="{filename}"',
         },
     )

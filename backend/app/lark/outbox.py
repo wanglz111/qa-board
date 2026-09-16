@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.auth import require_admin
 from app.db import get_db
 from app.lark.client import LarkError, LarkTimeout
+from app.lark.confirmation import matches_current_configuration
 from app.lark.write import (
     LarkWriteGateway,
     bug_fields,
@@ -34,6 +35,9 @@ LEASE_SECONDS = 120
 MAX_RETRIES = 5
 BACKOFF_BASE_SECONDS = 30
 BACKOFF_CAP_SECONDS = 900
+# A job whose group lost its approval waits for the administrator instead of
+# spending retries; it wakes up on its own once the approval is restored.
+STALE_CONFIRMATION_SECONDS = 60
 
 ACTIVE_STATES = ("pending", "running")
 
@@ -43,14 +47,12 @@ def _now() -> datetime:
 
 
 def group_is_confirmed(db: Session, group_id: UUID) -> bool:
-    return (
-        db.scalar(
-            select(GroupLarkConfirmation.id).where(
-                GroupLarkConfirmation.group_id == group_id
-            )
+    confirmation = db.scalar(
+        select(GroupLarkConfirmation).where(
+            GroupLarkConfirmation.group_id == group_id
         )
-        is not None
     )
+    return matches_current_configuration(confirmation)
 
 
 def enqueue_attempt_job(db: Session, attempt: Attempt) -> SyncJob | None:
@@ -161,6 +163,16 @@ def run_job(
     job.state = "running"
     job.lease_until = moment + timedelta(seconds=LEASE_SECONDS)
     db.flush()
+
+    if not group_is_confirmed(db, case.group_id):
+        # Never post into a destination the administrator has not approved for
+        # this group; hold the job until the approval matches again.
+        job.state = "pending"
+        job.error_kind = "confirmation_stale"
+        job.lease_until = None
+        job.next_retry_at = moment + timedelta(seconds=STALE_CONFIRMATION_SECONDS)
+        db.commit()
+        return job
 
     if job.new_exec_record_id is None:
         try:

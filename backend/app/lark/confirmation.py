@@ -65,6 +65,29 @@ def _matches(confirmation: GroupLarkConfirmation, targets: dict[str, str | None]
     )
 
 
+def matches_current_configuration(
+    confirmation: GroupLarkConfirmation | None,
+) -> bool:
+    """Does a stored approval still name the destinations this process writes to?
+
+    ``_matches`` needs a live Lark read to compare field layouts, which the
+    outbox cannot do on every job. Identity is the part it can check for free,
+    and it is the part that decides *where* a new record lands: re-pointing
+    ``LARK_TABLE_RUNS``/``LARK_TABLE_DEFECTS`` (or the app token) must stop
+    writes everywhere, not only in the UI badge. Field drift on an unchanged
+    table still surfaces through ``read_confirmation`` and stays a visible
+    schema error rather than a silent write.
+    """
+
+    if confirmation is None:
+        return False
+    return (
+        confirmation.base_token == (settings.lark_app_token or "")
+        and confirmation.execution_table_id == (settings.lark_table_runs or "")
+        and confirmation.bug_table_id == (settings.lark_table_defects or "")
+    )
+
+
 def _serialize(
     confirmation: GroupLarkConfirmation | None, *, valid: bool
 ) -> dict[str, Any] | None:
