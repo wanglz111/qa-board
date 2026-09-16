@@ -10,7 +10,7 @@ from alembic.config import Config
 from argon2 import PasswordHasher
 from fastapi.testclient import TestClient
 from PIL import Image
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, func, inspect, select
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.orm import Session
 from sqlalchemy.schema import CreateSchema, DropSchema
@@ -152,6 +152,54 @@ def make_group_case():
             raw={"code": code},
         )
         session.add(group_case)
+        return group_case
+
+    return factory
+
+
+@pytest.fixture
+def imported_group(db_session) -> Group:
+    group_id = uuid4()
+    group = Group(
+        id=group_id,
+        short_code=f"0918-{group_id.hex[:6]}",
+        name="Sprint 0918",
+        source_name="0918.csv",
+        source_sha256="1" * 64,
+        source_format="csv",
+        source_version="3",
+    )
+    db_session.add(
+        GroupCase(
+            group=group,
+            code="B-001",
+            position=1,
+            title="管理员登录",
+            module="账户",
+            priority="P0",
+            raw={"code": "B-001"},
+        )
+    )
+    db_session.commit()
+    return group
+
+
+@pytest.fixture
+def add_case(db_session):
+    def factory(group_id: UUID, *, code: str, title: str, **fields) -> GroupCase:
+        last_position = db_session.scalar(
+            select(func.max(GroupCase.position)).where(GroupCase.group_id == group_id)
+        )
+        group_case = GroupCase(
+            group_id=group_id,
+            code=code,
+            position=(last_position or 0) + 1,
+            title=title,
+            raw={"code": code},
+            **fields,
+        )
+        db_session.add(group_case)
+        db_session.commit()
         return group_case
 
     return factory

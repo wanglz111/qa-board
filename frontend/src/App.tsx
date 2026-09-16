@@ -1,13 +1,14 @@
 import { useEffect, useState } from "react";
-import { FileStack, FlaskConical, ListChecks, LogOut, Upload } from "lucide-react";
+import { FileSpreadsheet, FileStack, FlaskConical, ListChecks, LogOut, Upload } from "lucide-react";
 
 import { ApiError, api, type User } from "./api";
 import { ExecutionView } from "./views/Execution";
 import { GroupsView } from "./views/Groups";
 import { ImportView } from "./views/Import";
 import { LoginView } from "./views/Login";
+import { ReportsView } from "./views/Reports";
 
-type View = "execute" | "groups" | "import";
+type View = "execute" | "groups" | "import" | "reports";
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
@@ -38,6 +39,7 @@ export default function App() {
           <button className={view === "execute" ? "active" : ""} onClick={() => setView("execute")}><ListChecks size={17} />执行</button>
           <button className={view === "groups" ? "active" : ""} onClick={() => setView("groups")}><FileStack size={17} />测试组</button>
           <button className={view === "import" ? "active" : ""} onClick={() => setView("import")}><Upload size={17} />导入</button>
+          <button className={view === "reports" ? "active" : ""} onClick={() => setView("reports")}><FileSpreadsheet size={17} />报告</button>
         </nav>
         <div className="account"><span>{user.email}</span><button className="icon-button" title="退出登录" aria-label="退出登录" onClick={async () => { await api.logout(); setUser(null); }}><LogOut size={17} /></button></div>
       </header>
@@ -55,6 +57,8 @@ export default function App() {
           />
         ) : view === "groups" ? (
           <GroupsView loadGroups={api.groups} loadCases={api.cases} refreshKey={refreshKey} />
+        ) : view === "reports" ? (
+          <ReportsView loadGroups={api.groups} reportUrl={api.reportUrl} />
         ) : (
           <ImportView preview={api.preview} confirm={api.confirm} onImported={() => setRefreshKey((key) => key + 1)} />
         )}

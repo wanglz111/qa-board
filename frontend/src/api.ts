@@ -166,5 +166,7 @@ export const api = {
       body
     });
   },
-  screenshotUrl: (screenshotId: string) => `/api/screenshots/${screenshotId}`
+  screenshotUrl: (screenshotId: string) => `/api/screenshots/${screenshotId}`,
+  reportUrl: (groupId: string, format: "csv" | "xlsx") =>
+    `/api/groups/${groupId}/reports.${format}`
 };
