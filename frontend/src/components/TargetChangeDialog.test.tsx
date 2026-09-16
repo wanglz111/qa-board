@@ -46,6 +46,8 @@ it("is a modal dialog that lists the changed table as 旧 → 新 and the conseq
   expect(dialog).toHaveTextContent("3 条已保存的本地记录");
   // The defect role did not move, so it is not offered as a change.
   expect(dialog).not.toHaveTextContent("缺陷记录 → 缺陷记录");
+  // The overlay styling belongs to this dialog alone, not to any future modal.
+  expect(dialog.parentElement).toHaveClass("target-change-overlay");
 });
 
 it("cancels without confirming and blocks both buttons while saving", async () => {
@@ -64,4 +66,34 @@ it("disables both commands while the acknowledged save is in flight", () => {
 
   expect(screen.getByRole("button", { name: "取消" })).toBeDisabled();
   expect(screen.getByRole("button", { name: /确认切换/ })).toBeDisabled();
+});
+
+it("takes focus on mount and lets Escape cancel", async () => {
+  const { onCancel, onConfirm } = renderDialog();
+
+  expect(screen.getByRole("button", { name: /确认切换/ })).toHaveFocus();
+
+  await userEvent.keyboard("{Escape}");
+
+  expect(onCancel).toHaveBeenCalledTimes(1);
+  expect(onConfirm).not.toHaveBeenCalled();
+});
+
+it("keeps Tab inside the dialog instead of reaching the page behind it", async () => {
+  renderDialog();
+  const cancel = screen.getByRole("button", { name: "取消" });
+  const confirm = screen.getByRole("button", { name: /确认切换/ });
+
+  // The primary command is first, so Tab wraps to the start of the dialog.
+  expect(confirm).toHaveFocus();
+  await userEvent.tab();
+  expect(cancel).toHaveFocus();
+  await userEvent.tab({ shift: true });
+  expect(confirm).toHaveFocus();
+});
+
+it("omits the record count when the page holds no sync status", () => {
+  renderDialog({ pendingAttempts: null });
+
+  expect(screen.getByRole("dialog")).not.toHaveTextContent("条已保存的本地记录");
 });

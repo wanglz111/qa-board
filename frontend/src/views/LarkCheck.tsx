@@ -20,14 +20,18 @@ type Props = {
   saveTarget: (
     groupId: string,
     payload: LarkTargetPayload
-  ) => Promise<{ target: LarkTarget; confirmation_cleared: boolean }>;
+  ) => Promise<{
+    target: LarkTarget;
+    live: LarkTargetState["live"];
+    confirmation_cleared: boolean;
+  }>;
   confirmTarget: (groupId: string, targetFingerprint: string) => Promise<LarkTarget>;
   loadSync?: (groupId: string) => Promise<SyncStatus>;
   enqueueSync?: (groupId: string) => Promise<{ queued: number }>;
   retrySync?: (
     groupId: string,
     releaseUncertain?: boolean
-  ) => Promise<{ requeued: number; released: number }>;
+  ) => Promise<{ requeued: number; released: number; repointed?: number }>;
   initialGroupId?: string;
 };
 
@@ -38,6 +42,8 @@ type PendingChange = {
 };
 
 type Table = { table_id: string; name: string };
+
+type Identity = LarkTargetChangeDetail["diff"]["next"];
 
 function messageOf(reason: unknown, fallback: string): string {
   return reason instanceof Error && reason.message ? reason.message : fallback;
@@ -133,6 +139,10 @@ export function LarkCheckView({
     setBugResolved(null);
     setExecutionTableId("");
     setBugTableId("");
+    // The header names another group now: neither its stored target (and its
+    // fingerprint) nor the previous group's message may linger under it.
+    setState(null);
+    setError("");
     loadTarget(groupId)
       .then((result) => !cancelled && setState(result))
       .catch(
@@ -156,6 +166,8 @@ export function LarkCheckView({
   const confirmed = target?.confirmed === true;
   const invalidated = confirmed && (state?.live?.schema_errors.length ?? 0) > 0;
   const confirmable = Boolean(target && !blocked && groupId && target.target_fingerprint);
+  const syncFailed = sync?.failed ?? 0;
+  const syncParked = sync?.parked ?? 0;
 
   const executionTables = resolved?.tables ?? [];
   const bugBase = bugResolved ?? resolved;
@@ -191,17 +203,13 @@ export function LarkCheckView({
     };
   }
 
-  function sideFromIdentity(identity: LarkTargetChangeDetail["diff"]["next"]): TargetSide {
+  // Names only exist for the tables this page resolved; an id is the honest
+  // label for a table it never read.
+  function namedSide(identity: Identity): TargetSide {
     return {
-      execution_table_name:
-        target?.execution_table_id === identity.execution_table_id
-          ? target.execution_table_name
-          : identity.execution_table_id,
+      execution_table_name: nameOf(executionTables, identity.execution_table_id),
       execution_table_id: identity.execution_table_id,
-      bug_table_name:
-        target?.bug_table_id === identity.bug_table_id
-          ? target.bug_table_name
-          : identity.bug_table_id,
+      bug_table_name: nameOf(bugTables, identity.bug_table_id),
       bug_table_id: identity.bug_table_id
     };
   }
@@ -216,9 +224,10 @@ export function LarkCheckView({
       const result = await resolve(url);
       const selected = result.selected.table_id ?? result.tables[0]?.table_id ?? "";
       setResolved(result);
-      setBugResolved(null);
       setExecutionTableId(selected);
-      setBugTableId(suggestBugTable(result, selected, target));
+      // A defect table read from its own link stays where it is: the form, the
+      // payload and the suggestion all keep describing the base it came from.
+      setBugTableId(suggestBugTable(bugResolved ?? result, selected, target));
     } catch (reason) {
       setError(messageOf(reason, "读取 Lark 表格失败"));
     } finally {
@@ -270,14 +279,19 @@ export function LarkCheckView({
     try {
       const result = await saveTarget(groupId, payload);
       setPendingChange(null);
-      setState((current) => (current ? { ...current, target: result.target } : current));
+      // The PUT already answered with the saved row and the live read it was
+      // based on; re-reading it here only added a request whose failure the
+      // page swallowed.
+      setState({
+        target: result.target,
+        live: result.live ?? null,
+        read_errors: result.live?.read_errors ?? []
+      });
       setNotice(
         result.confirmation_cleared
           ? "目标表已更换：此前的写入确认已被清除，需要重新确认"
           : "已保存该组的 Lark 目标表"
       );
-      const refreshed = await loadTarget(groupId).catch(() => null);
-      if (refreshed) setState(refreshed);
     } catch (reason) {
       if (reason instanceof ApiError && reason.status === 409) {
         const detail = reason.detail;
@@ -286,9 +300,14 @@ export function LarkCheckView({
           if (body.reason === "stale_page") {
             // Another tab moved the group after this page loaded, so the page's
             // fingerprint is not a basis for an acknowledgement: re-read instead.
+            // The dialog has to come down with it — a diff the server just
+            // refused must not stay on top of the explanation.
+            setPendingChange(null);
             const refreshed = await loadTarget(groupId).catch(() => null);
             if (refreshed) setState(refreshed);
-            setError("其他页面已改过该组的目标表，请刷新后重新选择");
+            setError(
+              "其他页面已改过该组的目标表，已重新读取；本次选择仍然保留，请核对后再次点击「保存选择」"
+            );
             return;
           }
           if (isTargetChange(detail)) {
@@ -296,10 +315,10 @@ export function LarkCheckView({
             // acknowledgement dialog stands between the two.
             setPendingChange({
               payload,
-              previous: body.diff.previous ? sideFromIdentity(body.diff.previous) : null,
-              next: body.diff.next
-                ? sideFromIdentity(body.diff.next)
-                : draftSide()
+              previous: body.diff.previous ? namedSide(body.diff.previous) : null,
+              // Name what the acknowledgement is about to send, from the tables
+              // this page resolved: the server's echo only carries ids.
+              next: namedSide(payload)
             });
             return;
           }
@@ -370,11 +389,15 @@ export function LarkCheckView({
     setError("");
     try {
       const result = await retrySync(groupId, releaseUncertain);
-      setNotice(
-        releaseUncertain
-          ? `已重新排队 ${result.requeued} 条失败结果，释放 ${result.released} 条待人工确认`
-          : `已重新排队 ${result.requeued} 条失败结果`
-      );
+      // Each count is a different decision, so only the ones that moved are
+      // reported: a parked-only group has no failures to speak of.
+      const moved: string[] = [];
+      if (result.requeued > 0) moved.push(`已重新排队 ${result.requeued} 条失败结果`);
+      if (result.released > 0) moved.push(`释放 ${result.released} 条待人工确认`);
+      if ((result.repointed ?? 0) > 0) {
+        moved.push(`${result.repointed} 条任务已重新指向新表`);
+      }
+      setNotice(moved.join("，") || "没有需要重试的同步任务");
       const refreshed = await loadSync?.(groupId);
       if (refreshed) setSync(refreshed);
     } catch (reason) {
@@ -462,6 +485,11 @@ export function LarkCheckView({
             <p className="inline-status saved" role="status">
               已读取「{resolved.base_name}」的 {resolved.tables.length} 张数据表
             </p>
+            {(resolved.read_errors ?? []).map((item) => (
+              <p key={item} className="inline-status error" role="alert">
+                {item}
+              </p>
+            ))}
             <label>
               执行记录表
               <select
@@ -509,6 +537,12 @@ export function LarkCheckView({
           {readingBug ? <LoaderCircle className="spin" size={16} /> : null}
           读取缺陷表
         </button>
+
+        {(bugResolved?.read_errors ?? []).map((item) => (
+          <p key={item} className="inline-status error" role="alert">
+            {item}
+          </p>
+        ))}
 
         {bugTables.length > 0 ? (
           <label>
@@ -574,7 +608,7 @@ export function LarkCheckView({
         {confirmed ? (
           <div className="lark-queue">
             <p className="inline-status">
-              待同步 {sync?.queued ?? 0} · 已同步 {sync?.synced ?? 0} · 失败 {sync?.failed ?? 0} · 待人工确认 {sync?.uncertain ?? 0}
+              待同步 {sync?.queued ?? 0} · 已同步 {sync?.synced ?? 0} · 失败 {syncFailed} · 待人工确认 {sync?.uncertain ?? 0} · 待重新指向 {syncParked}
               {sync?.last_error_kind ? ` · 最近错误 ${sync.last_error_kind}` : ""}
             </p>
             {enqueueSync ? (
@@ -588,7 +622,7 @@ export function LarkCheckView({
                 把已保存的本地结果排入同步
               </button>
             ) : null}
-            {retrySync && (sync?.failed ?? 0) > 0 ? (
+            {retrySync && (syncFailed > 0 || syncParked > 0) ? (
               <button
                 type="button"
                 className="ghost-button"
@@ -596,7 +630,9 @@ export function LarkCheckView({
                 onClick={() => void retryQueuedJobs(false)}
               >
                 {retryingSync ? <LoaderCircle className="spin" size={16} /> : null}
-                重试失败的同步（{sync?.failed} 条）
+                {syncFailed > 0
+                  ? `重试失败的同步（${syncFailed} 条）`
+                  : `把暂停的同步重新指向新表（${syncParked} 条）`}
               </button>
             ) : null}
             {retrySync && (sync?.uncertain ?? 0) > 0 ? (
@@ -615,6 +651,11 @@ export function LarkCheckView({
                 释放待人工确认前，请先在旧表搜索该复测标签：若远端其实已写入，释放后会再新增一条记录。
               </p>
             ) : null}
+            {syncParked > 0 ? (
+              <p className="attachment-hint">
+                {syncParked} 条记录因目标表更换而暂停，需要管理员确认它们属于新表后才会重新同步。
+              </p>
+            ) : null}
             <p className="attachment-hint">同步只新增执行记录；不通过时会新增缺陷，旧记录与旧缺陷不会被修改。</p>
           </div>
         ) : null}
@@ -626,7 +667,7 @@ export function LarkCheckView({
         <TargetChangeDialog
           previous={pendingChange.previous}
           next={pendingChange.next}
-          pendingAttempts={sync?.pending_attempts ?? 0}
+          pendingAttempts={sync?.pending_attempts ?? null}
           busy={busy}
           onCancel={() => setPendingChange(null)}
           onConfirm={() => void confirmChange()}

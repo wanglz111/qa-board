@@ -81,6 +81,8 @@ export type LarkResolved = {
   execution_fields: Record<string, string>;
   required_execution_fields: string[];
   schema_errors: string[];
+  // A base can answer 200 and still explain why it yielded no tables.
+  read_errors: string[];
 };
 
 export type LarkTarget = {
@@ -145,6 +147,9 @@ export type SyncStatus = {
   synced: number;
   failed: number;
   uncertain: number;
+  // Jobs parked by a table switch: they wait for an administrator to re-point
+  // them, which is a different decision from retrying a failure.
+  parked?: number;
   last_error_kind: string | null;
   pending_attempts: number;
   detail: string;
@@ -205,7 +210,14 @@ let csrfToken: string | null = null;
 let csrfRequest: Promise<string> | null = null;
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const response = await fetch(path, { ...init, credentials: "same-origin" });
+  let response: Response;
+  try {
+    response = await fetch(path, { ...init, credentials: "same-origin" });
+  } catch {
+    // A rejected fetch is a transport failure; its native text is "Failed to
+    // fetch", which tells an administrator nothing they can act on.
+    throw new ApiError(0, "无法连接服务器，请重试");
+  }
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
     if (response.status === 401) {
@@ -301,7 +313,7 @@ export const api = {
   larkTarget: (groupId: string) =>
     request<LarkTargetState>(`/api/groups/${groupId}/lark/target`),
   saveLarkTarget: (groupId: string, payload: LarkTargetPayload) =>
-    mutation<{ target: LarkTarget; confirmation_cleared: boolean }>(
+    mutation<{ target: LarkTarget; live: LarkTargetState["live"]; confirmation_cleared: boolean }>(
       `/api/groups/${groupId}/lark/target`,
       {
         method: "PUT",
@@ -319,7 +331,7 @@ export const api = {
   enqueueSync: (groupId: string) =>
     mutation<{ queued: number }>(`/api/groups/${groupId}/sync/enqueue`, { method: "POST" }),
   retrySync: (groupId: string, releaseUncertain = false) =>
-    mutation<{ requeued: number; released: number }>(
+    mutation<{ requeued: number; released: number; repointed: number }>(
       `/api/groups/${groupId}/sync/retry`,
       {
         method: "POST",

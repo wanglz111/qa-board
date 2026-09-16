@@ -32,7 +32,25 @@ const RESOLVED: LarkResolved = {
   selected: { table_id: "tbl-runs", table_name: "执行记录", view_id: "vew-main" },
   execution_fields: { 用例: "text", 结果: "single_select", 截图: "attachment" },
   required_execution_fields: ["用例", "结果", "截图"],
-  schema_errors: []
+  schema_errors: [],
+  read_errors: []
+};
+
+// A group whose defect table lives in a second multi-dimensional table: the
+// 缺陷库链接 field is what keeps the two roles apart.
+const BUG_RESOLVED: LarkResolved = {
+  source_url: "https://tenant.larksuite.com/wiki/node-2?table=tbl-online",
+  base_token: "app-bugs",
+  base_name: "缺陷库",
+  tables: [
+    { table_id: "tbl-online", name: "线上缺陷" },
+    { table_id: "tbl-past", name: "历史缺陷" }
+  ],
+  selected: { table_id: "tbl-online", table_name: "线上缺陷", view_id: null },
+  execution_fields: {},
+  required_execution_fields: [],
+  schema_errors: [],
+  read_errors: []
 };
 
 const TARGET: LarkTarget = {
@@ -79,11 +97,16 @@ function syncStatus(overrides: Partial<SyncStatus> = {}): SyncStatus {
     synced: 1,
     failed: 0,
     uncertain: 0,
+    parked: 0,
     last_error_kind: null,
     pending_attempts: 2,
     detail: "目标表已确认，可显式排入同步",
     ...overrides
   };
+}
+
+function emptyTargetState(): LarkTargetState {
+  return { target: null, live: null, read_errors: [] };
 }
 
 function renderCheck(overrides: Partial<Parameters<typeof LarkCheckView>[0]> = {}) {
@@ -240,10 +263,43 @@ it("asks for confirmation before switching a group to another table", async () =
   expect(saveTarget).not.toHaveBeenCalled();
 
   await userEvent.click(screen.getByRole("button", { name: "确认切换" }));
-  expect(saveTarget).toHaveBeenLastCalledWith(
-    GROUP.id,
-    expect.objectContaining({ acknowledge_change: true })
-  );
+  expect(saveTarget).toHaveBeenCalledTimes(1);
+  expect(saveTarget).toHaveBeenLastCalledWith(GROUP.id, {
+    source_url: RESOLVED.source_url,
+    execution_base_token: "app-exec",
+    execution_table_id: "tbl-bugs",
+    execution_view_id: null,
+    bug_base_token: "app-exec",
+    bug_table_id: "tbl-bugs",
+    expected_previous_fingerprint: "app-exec|tbl-runs|app-exec|tbl-bugs",
+    acknowledge_change: true
+  });
+});
+
+it("acknowledges the selection the dialog was opened for, not a later edit", async () => {
+  const saveTarget = vi.fn().mockResolvedValue({ target: TARGET, live: null, confirmation_cleared: false });
+  renderCheck({ saveTarget });
+
+  const executionSelect = await readExecutionLink();
+  await userEvent.selectOptions(executionSelect, "tbl-bugs");
+  await userEvent.click(screen.getByRole("button", { name: "保存选择" }));
+  await screen.findByRole("dialog");
+
+  // The page behind the dialog is still live code; changing the draft must not
+  // change what the acknowledgement puts on the wire.
+  await userEvent.selectOptions(screen.getByLabelText("缺陷记录表"), "tbl-runs");
+  await userEvent.click(screen.getByRole("button", { name: "确认切换" }));
+
+  expect(saveTarget).toHaveBeenLastCalledWith(GROUP.id, {
+    source_url: RESOLVED.source_url,
+    execution_base_token: "app-exec",
+    execution_table_id: "tbl-bugs",
+    execution_view_id: null,
+    bug_base_token: "app-exec",
+    bug_table_id: "tbl-bugs",
+    expected_previous_fingerprint: "app-exec|tbl-runs|app-exec|tbl-bugs",
+    acknowledge_change: true
+  });
 });
 
 it("cancels a re-point without saving anything", async () => {
@@ -289,10 +345,11 @@ it("opens the dialog when the server alone reports the group already moved", asy
 });
 
 it("shows a plain server refusal as a readable message", async () => {
+  // The token check refuses these ids with 422, not with a change request.
   const saveTarget = vi
     .fn()
     .mockRejectedValue(
-      new ApiError(409, "缺陷表 id 不是有效的多维表格标识，请重新读取并粘贴 Lark 链接")
+      new ApiError(422, "缺陷表 id 不是有效的多维表格标识，请重新读取并粘贴 Lark 链接")
     );
   renderCheck({ saveTarget });
 
@@ -334,4 +391,239 @@ it("tells the administrator to refresh when another page already moved the group
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   // The page re-reads the stored target instead of letting a stale page acknowledge.
   expect(loadTarget).toHaveBeenCalledTimes(2);
+});
+
+it("closes the change dialog when the server calls the page stale", async () => {
+  const stale = {
+    reason: "stale_page",
+    diff: {
+      changed: true,
+      changed_keys: ["execution_table_id"],
+      previous: {
+        execution_base_token: "app-exec",
+        execution_table_id: "tbl-runs",
+        bug_base_token: "app-exec",
+        bug_table_id: "tbl-bugs"
+      },
+      next: {
+        execution_base_token: "app-exec",
+        execution_table_id: "tbl-bugs",
+        bug_base_token: "app-exec",
+        bug_table_id: "tbl-bugs"
+      }
+    }
+  };
+  const saveTarget = vi.fn().mockRejectedValue(new ApiError(409, stale));
+  const loadTarget = vi.fn().mockResolvedValue(TARGET_STATE);
+  renderCheck({ saveTarget, loadTarget });
+
+  await userEvent.selectOptions(await readExecutionLink(), "tbl-bugs");
+  await userEvent.click(screen.getByRole("button", { name: "保存选择" }));
+  await userEvent.click(await screen.findByRole("button", { name: "确认切换" }));
+
+  // The scrim used to stay above the explanation, offering a diff the server
+  // had already refused; the message is what the administrator must see.
+  expect(await screen.findByText(/其他页面已改过该组的目标表/)).toBeVisible();
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  // The page re-reads the stored target and never acknowledges a second time.
+  expect(loadTarget).toHaveBeenCalledTimes(2);
+  const acknowledged = saveTarget.mock.calls.filter(([, payload]) => payload.acknowledge_change);
+  expect(acknowledged).toHaveLength(1);
+
+  // The draft survives, so the administrator may press 保存选择 again — that
+  // re-opens the gate instead of silently replaying the refused PUT.
+  expect(screen.getByLabelText("执行记录表")).toHaveValue("tbl-bugs");
+  await userEvent.click(screen.getByRole("button", { name: "保存选择" }));
+
+  expect(await screen.findByRole("dialog")).toBeVisible();
+  expect(saveTarget).toHaveBeenCalledTimes(1);
+});
+
+it("sends the defect role from the second base the administrator read", async () => {
+  const resolve = vi.fn().mockResolvedValueOnce(RESOLVED).mockResolvedValueOnce(BUG_RESOLVED);
+  const saveTarget = vi.fn().mockResolvedValue({ target: TARGET, live: null, confirmation_cleared: false });
+  renderCheck({ resolve, saveTarget, loadTarget: async () => emptyTargetState() });
+
+  await readExecutionLink();
+  await userEvent.type(screen.getByLabelText(/缺陷库链接/), BUG_RESOLVED.source_url);
+  await userEvent.click(screen.getByRole("button", { name: "读取缺陷表" }));
+  await userEvent.selectOptions(await screen.findByLabelText("缺陷记录表"), "tbl-past");
+  await userEvent.click(screen.getByRole("button", { name: "保存选择" }));
+
+  expect(saveTarget).toHaveBeenCalledTimes(1);
+  expect(saveTarget.mock.calls[0][1]).toMatchObject({
+    execution_base_token: "app-exec",
+    execution_table_id: "tbl-runs",
+    bug_base_token: "app-bugs",
+    bug_table_id: "tbl-past"
+  });
+});
+
+it("keeps the second base's defect link when the execution link is re-read", async () => {
+  const reread: LarkResolved = { ...RESOLVED, base_name: "执行库（重读）" };
+  const resolve = vi
+    .fn()
+    .mockResolvedValueOnce(RESOLVED)
+    .mockResolvedValueOnce(BUG_RESOLVED)
+    .mockResolvedValue(reread);
+  const saveTarget = vi.fn().mockResolvedValue({ target: TARGET, live: null, confirmation_cleared: false });
+  renderCheck({ resolve, saveTarget, loadTarget: async () => emptyTargetState() });
+
+  const link = screen.getByLabelText("Lark 文档链接");
+  await readExecutionLink();
+  await userEvent.type(screen.getByLabelText(/缺陷库链接/), BUG_RESOLVED.source_url);
+  await userEvent.click(screen.getByRole("button", { name: "读取缺陷表" }));
+
+  // Re-reading the execution link must not silently move the defect role back
+  // into the execution base while the form still shows the other base.
+  await userEvent.clear(link);
+  await userEvent.type(link, RESOLVED.source_url);
+  await userEvent.click(screen.getByRole("button", { name: "读取表格" }));
+
+  expect(await screen.findByText(/已读取「执行库（重读）」的 2 张数据表/)).toBeVisible();
+  expect(resolve).toHaveBeenCalledTimes(3);
+  expect(screen.getByLabelText(/缺陷库链接/)).toHaveValue(BUG_RESOLVED.source_url);
+  expect(await screen.findByLabelText("缺陷记录表")).toHaveValue("tbl-online");
+
+  await userEvent.click(screen.getByRole("button", { name: "保存选择" }));
+  expect(saveTarget).toHaveBeenCalledTimes(1);
+  expect(saveTarget.mock.calls[0][1]).toMatchObject({
+    execution_base_token: "app-exec",
+    bug_base_token: "app-bugs",
+    bug_table_id: "tbl-online"
+  });
+});
+
+it("names the tables the page will send when only the server reports the change", async () => {
+  const detail = {
+    reason: "target_changed",
+    diff: {
+      changed: true,
+      changed_keys: ["bug_table_id"],
+      previous: {
+        execution_base_token: "app-exec",
+        execution_table_id: "tbl-runs",
+        bug_base_token: "app-exec",
+        bug_table_id: "tbl-gone"
+      },
+      next: {
+        execution_base_token: "app-exec",
+        execution_table_id: "tbl-runs",
+        bug_base_token: "app-exec",
+        bug_table_id: "tbl-bugs"
+      }
+    }
+  };
+  // The group gained a target after this page loaded, so the page holds no
+  // fingerprint and the server answers with the change it just found.
+  const saveTarget = vi.fn().mockRejectedValue(new ApiError(409, detail));
+  renderCheck({ saveTarget, loadTarget: async () => emptyTargetState() });
+
+  await readExecutionLink();
+  await userEvent.click(screen.getByRole("button", { name: "保存选择" }));
+
+  const dialog = await screen.findByRole("dialog");
+  // The name slot carries the table the page is about to send, not its id.
+  expect(dialog.querySelector(".target-change-pair")).toHaveTextContent("tbl-gone → 缺陷记录");
+  expect(dialog).toHaveTextContent("tbl-gone → tbl-bugs");
+});
+
+it("does not leave one group's target under another group's header", async () => {
+  const other: Group = { ...GROUP, id: "0919-id", name: "Sprint 0919" };
+  const resolve = vi.fn().mockRejectedValue(new Error("读取 Lark 表格失败"));
+  const loadTarget = vi
+    .fn()
+    .mockResolvedValueOnce(TARGET_STATE)
+    .mockReturnValue(new Promise(() => {}));
+  renderCheck({ loadGroups: async () => [GROUP, other], loadTarget, resolve });
+
+  expect(await screen.findByText("执行库")).toBeVisible();
+  await userEvent.type(screen.getByLabelText("Lark 文档链接"), RESOLVED.source_url);
+  await userEvent.click(screen.getByRole("button", { name: "读取表格" }));
+  expect(await screen.findByText("读取 Lark 表格失败")).toBeVisible();
+
+  await userEvent.selectOptions(screen.getByLabelText("测试组"), other.id);
+
+  expect(screen.queryByText("执行库")).not.toBeInTheDocument();
+  expect(screen.queryByText("读取 Lark 表格失败")).not.toBeInTheDocument();
+  expect(screen.getByText(/该组还没有选择 Lark 表/)).toBeVisible();
+});
+
+it("shows the target and the live read the save itself returned", async () => {
+  const saved = { ...TARGET, execution_table_name: "新执行记录" };
+  const saveTarget = vi.fn().mockResolvedValue({
+    target: saved,
+    live: { schema_errors: ["缺少必填字段「截图」"], read_errors: [] },
+    confirmation_cleared: false
+  });
+  const loadTarget = vi.fn().mockResolvedValue(TARGET_STATE);
+  renderCheck({ saveTarget, loadTarget });
+
+  await readExecutionLink();
+  await userEvent.click(screen.getByRole("button", { name: "保存选择" }));
+
+  expect(await screen.findByText(/已保存该组的 Lark 目标表/)).toBeVisible();
+  expect(screen.getByText("缺少必填字段「截图」")).toBeVisible();
+  // The PUT already answered with the saved row and its live state.
+  expect(loadTarget).toHaveBeenCalledTimes(1);
+});
+
+it("does not claim a record count while the sync status is unreadable", async () => {
+  const loadSync = vi.fn().mockRejectedValue(new Error("读取同步状态失败"));
+  renderCheck({ loadSync });
+
+  await userEvent.selectOptions(await readExecutionLink(), "tbl-bugs");
+  await userEvent.click(screen.getByRole("button", { name: "保存选择" }));
+
+  const dialog = await screen.findByRole("dialog");
+  expect(dialog).not.toHaveTextContent("条已保存的本地记录");
+});
+
+it("renders the reason a base yielded no tables", async () => {
+  renderCheck({
+    resolve: async () => ({
+      ...RESOLVED,
+      tables: [],
+      read_errors: ["该多维表格中没有数据表，请先在 Lark 中新建数据表"]
+    })
+  });
+
+  await userEvent.type(screen.getByLabelText("Lark 文档链接"), RESOLVED.source_url);
+  await userEvent.click(screen.getByRole("button", { name: "读取表格" }));
+
+  expect(await screen.findByText(/该多维表格中没有数据表/)).toBeVisible();
+});
+
+it("renders the reason the second link yielded no defect tables", async () => {
+  const resolve = vi.fn().mockResolvedValueOnce(RESOLVED).mockResolvedValue({
+    ...BUG_RESOLVED,
+    tables: [],
+    read_errors: ["缺陷库中没有数据表，请先在 Lark 中新建数据表"]
+  });
+  renderCheck({ resolve, loadTarget: async () => emptyTargetState() });
+
+  await readExecutionLink();
+  await userEvent.type(screen.getByLabelText(/缺陷库链接/), BUG_RESOLVED.source_url);
+  await userEvent.click(screen.getByRole("button", { name: "读取缺陷表" }));
+
+  expect(await screen.findByText(/缺陷库中没有数据表/)).toBeVisible();
+});
+
+it("lets a parked-only group re-point its jobs and says how many moved", async () => {
+  const retrySync = vi.fn().mockResolvedValueOnce({ requeued: 0, released: 0, repointed: 2 });
+  const loadSync = vi.fn().mockResolvedValue(syncStatus({ failed: 0, parked: 2 }));
+  renderCheck({
+    loadTarget: async () => stateWith(confirmedTarget()),
+    loadSync,
+    retrySync
+  });
+
+  expect(await screen.findByText(/待同步 0/)).toBeVisible();
+  expect(screen.getByText(/待重新指向 2/)).toBeVisible();
+  expect(screen.getByText(/因目标表更换而暂停/)).toBeVisible();
+
+  await userEvent.click(screen.getByRole("button", { name: /重新指向新表/ }));
+
+  expect(retrySync).toHaveBeenCalledWith("0918-id", false);
+  expect(await screen.findByText(/2 条任务已重新指向新表/)).toBeVisible();
 });

@@ -14,7 +14,8 @@ const RESOLVED = {
   selected: { table_id: "tbl-runs", table_name: "执行记录", view_id: "vew-main" },
   execution_fields: { 用例: "text", 结果: "single_select", 截图: "attachment" },
   required_execution_fields: ["用例", "结果", "截图"],
-  schema_errors: []
+  schema_errors: [],
+  read_errors: []
 };
 
 const TARGET = {

@@ -87,7 +87,7 @@ table { width: 100%; border-collapse: collapse; font-size: .8rem; } th { color: 
 .lark-panel-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
 .lark-panel-heading .ghost-button { min-height: 32px; }
 .lark-roles { margin-top: 14px; }.lark-roles .inline-status { margin: 0 0 12px; }
-.dialog-overlay { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; padding: 20px; background: rgba(22, 27, 30, .45); }
+.target-change-overlay { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; padding: 20px; background: rgba(22, 27, 30, .45); }
 .target-change-dialog { width: min(100%, 520px); max-height: 100%; overflow: auto; padding: 22px; background: #fff; border-radius: 8px; box-shadow: 0 18px 50px rgba(28, 34, 38, .28); }
 .target-change-dialog h3 { margin-bottom: 14px; }
 .target-change-parts { display: grid; gap: 8px; margin: 0 0 16px; padding: 0; list-style: none; }
@@ -96,7 +96,7 @@ table { width: 100%; border-collapse: collapse; font-size: .8rem; } th { color: 
 .target-change-pair { font-weight: 750; overflow-wrap: anywhere; }
 .target-change-parts code { color: #176b57; font-size: .76rem; overflow-wrap: anywhere; }
 .target-change-consequences { margin: 0 0 18px; padding-left: 20px; color: #5b6469; font-size: .82rem; line-height: 1.6; }
-.dialog-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px; }
+.target-change-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px; }
 .legacy-history { margin-top: 20px; }.legacy-tabs { display: flex; gap: 6px; margin-bottom: 12px; }
 .legacy-tabs button { display: inline-flex; align-items: center; gap: 6px; padding: 7px 12px; color: #5b6469; background: #f4f6f6; border: 1px solid transparent; border-radius: 999px; font-size: .78rem; font-weight: 700; }
 .legacy-tabs button.active { color: #176b57; background: #e8f3ef; border-color: #bcdcd0; }
@@ -118,5 +118,5 @@ table { width: 100%; border-collapse: collapse; font-size: .8rem; } th { color: 
      inside the bar instead of pushing the whole page wider than the screen. */
   .topbar nav { overflow-x: auto; scrollbar-width: none; }
   .topbar nav button { flex: 0 0 auto; padding: 0 11px; }
-  .lark-panel { padding: 16px 14px; }.dialog-overlay { padding: 12px; }.target-change-dialog { padding: 18px 14px; }
+  .lark-panel { padding: 16px 14px; }.target-change-overlay { padding: 12px; }.target-change-dialog { padding: 18px 14px; }
 }
