@@ -170,3 +170,32 @@ class ImportTicket(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+
+class LarkHistoryRef(Base):
+    """A read-only pointer to one legacy Lark record for a group case.
+
+    The snapshot is display-only: nothing here is ever used as a write target.
+    """
+
+    __tablename__ = "lark_history_refs"
+    __table_args__ = (
+        UniqueConstraint(
+            "group_case_id", "table_id", "old_record_id", name="uq_lark_history_ref"
+        ),
+        CheckConstraint(
+            "certainty IN ('verified', 'uncertain')", name="ck_lark_history_certainty"
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    group_case_id: Mapped[UUID] = mapped_column(
+        ForeignKey("group_cases.id", ondelete="CASCADE"), nullable=False
+    )
+    table_id: Mapped[str] = mapped_column(String, nullable=False)
+    old_record_id: Mapped[str] = mapped_column(String, nullable=False)
+    certainty: Mapped[str] = mapped_column(String, nullable=False, default="uncertain")
+    observed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)

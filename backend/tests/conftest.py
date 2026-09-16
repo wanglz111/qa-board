@@ -2,8 +2,10 @@ import os
 from dataclasses import replace
 from io import BytesIO
 from pathlib import Path
+from typing import Any
 from uuid import UUID, uuid4
 
+import httpx
 import pytest
 from alembic import command
 from alembic.config import Config
@@ -29,7 +31,11 @@ from app.db import get_db
 from app.main import app
 from app import screenshots
 from app.config import settings
-from app.models import Admin, Attempt, Group, GroupCase
+from app.lark import client as lark_client_module
+from app.lark.client import LarkClient, get_lark_client
+from app.lark.fields import REQUIRED_BUG_FIELD_TYPES, REQUIRED_RUN_FIELD_TYPES
+from app.lark.history import history_for
+from app.models import Admin, Attempt, Group, GroupCase, LarkHistoryRef
 
 
 @pytest.fixture(scope="session")
@@ -203,6 +209,134 @@ def add_case(db_session):
         return group_case
 
     return factory
+
+
+class FakeLark:
+    """In-process Lark API double that records every request it receives."""
+
+    def __init__(self, *, page_size: int = 500) -> None:
+        self.page_size = page_size
+        self.records: list[dict[str, Any]] = []
+        self.bug_records: list[dict[str, Any]] = []
+        self.fields: list[dict[str, Any]] = [
+            {"field_name": name, "type": types[0]}
+            for name, types in REQUIRED_RUN_FIELD_TYPES.items()
+        ]
+        self.bug_fields: list[dict[str, Any]] = [
+            {"field_name": name, "type": types[0]}
+            for name, types in REQUIRED_BUG_FIELD_TYPES.items()
+        ]
+        self.base_name = "旧版测试管理"
+        self.runs_table_name = "执行记录"
+        self.defects_table_name = "缺陷记录"
+        self.media: dict[str, tuple[bytes, str]] = {}
+        self.requests: list[dict[str, str]] = []
+        self.client = LarkClient(
+            base_url="https://open.feishu.test",
+            app_id="test-app-id",
+            app_secret="test-app-secret",
+            transport=httpx.MockTransport(self.handle),
+        )
+
+    @property
+    def record_methods(self) -> list[str]:
+        return [call.method for call in self.client.calls if "/records" in call.path]
+
+    @property
+    def record_requests(self) -> list[dict[str, str]]:
+        return [request for request in self.requests if "/records" in request["path"]]
+
+    def history_for(self, code: str):
+        return history_for(self.records, code)
+
+    def handle(self, request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        self.requests.append({"method": request.method, "path": path})
+        if path == "/open-apis/auth/v3/tenant_access_token/internal":
+            return httpx.Response(200, json={"code": 0, "data": {"tenant_access_token": "fake-token"}})
+        if "/medias/" in path and path.endswith("/download"):
+            token = path.split("/medias/", 1)[1].removesuffix("/download")
+            if token not in self.media:
+                return httpx.Response(404, json={"code": 1, "msg": "not found"})
+            content, mime = self.media[token]
+            return httpx.Response(200, content=content, headers={"content-type": mime})
+        if path.endswith("/fields"):
+            fields = self.bug_fields if "tbl-defects" in path else self.fields
+            return httpx.Response(200, json={"code": 0, "data": {"items": fields, "has_more": False}})
+        if path.endswith("/records"):
+            records = self.bug_records if "tbl-defects" in path else self.records
+            offset = int(request.url.params.get("page_token") or 0)
+            page = records[offset : offset + self.page_size]
+            has_more = offset + self.page_size < len(records)
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {
+                        "items": page,
+                        "has_more": has_more,
+                        "page_token": str(offset + self.page_size),
+                    },
+                },
+            )
+        if "/tables/" in path:
+            table_id = path.rsplit("/", 1)[-1]
+            name = self.defects_table_name if table_id == "tbl-defects" else self.runs_table_name
+            return httpx.Response(200, json={"code": 0, "data": {"table": {"table_id": table_id, "name": name}}})
+        if "/apps/" in path:
+            return httpx.Response(200, json={"code": 0, "data": {"app": {"name": self.base_name}}})
+        return httpx.Response(404, json={"code": 1, "msg": "unsupported path"})
+
+
+@pytest.fixture
+def lark_fake(monkeypatch) -> FakeLark:
+    fake = FakeLark()
+    configured = replace(
+        settings,
+        lark_base_url="https://open.feishu.test",
+        lark_app_id="test-app-id",
+        lark_app_secret="test-app-secret",
+        lark_app_token="app-token",
+        lark_bug_app_token="app-token",
+        lark_table_runs="tbl-runs",
+        lark_table_defects="tbl-defects",
+    )
+    monkeypatch.setattr(lark_client_module, "global_settings", configured)
+    import app.lark.history as lark_history
+
+    monkeypatch.setattr(lark_history, "settings", configured)
+    previous = app.dependency_overrides.get(get_lark_client)
+    app.dependency_overrides[get_lark_client] = lambda: fake.client
+    try:
+        yield fake
+    finally:
+        if previous is None:
+            app.dependency_overrides.pop(get_lark_client, None)
+        else:
+            app.dependency_overrides[get_lark_client] = previous
+
+
+@pytest.fixture
+def history_ref(db_session, imported_group) -> LarkHistoryRef:
+    group_case = db_session.scalar(
+        select(GroupCase).where(GroupCase.group_id == imported_group.id)
+    )
+    reference = LarkHistoryRef(
+        group_case_id=group_case.id,
+        table_id="tbl-runs",
+        old_record_id="old1",
+        certainty="verified",
+        snapshot={
+            "用例": "B-001 Login",
+            "结果": "不通过",
+            "attachments": [
+                {"file_token": "secret-file-token", "name": "../../old shot.png", "mime": "image/png"}
+            ],
+        },
+    )
+    db_session.add(reference)
+    db_session.commit()
+    return reference
 
 
 @pytest.fixture
