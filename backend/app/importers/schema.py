@@ -27,6 +27,7 @@ class ParsedCase:
     test_data: str | None
     steps: str | None
     expected: str | None
+    prototype_note: str | None
     raw: dict[str, Any]
 
 
@@ -41,6 +42,7 @@ FIELDS = (
     "test_data",
     "steps",
     "expected",
+    "prototype_note",
 )
 
 ALIASES: dict[str, tuple[str, ...]] = {
@@ -54,6 +56,7 @@ ALIASES: dict[str, tuple[str, ...]] = {
     "test_data": ("test_data", "testData", "测试数据"),
     "steps": ("steps", "执行步骤", "步骤"),
     "expected": ("expected", "checkpoints", "预期结果", "预期"),
+    "prototype_note": ("prototype_note", "protoNote", "原型备注", "核图提示"),
 }
 
 
@@ -148,6 +151,7 @@ def normalize_record(
         test_data=values["test_data"],
         steps=values["steps"],
         expected=values["expected"],
+        prototype_note=values["prototype_note"],
         raw=dict(record),
     )
 
