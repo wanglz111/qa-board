@@ -43,6 +43,7 @@ HEADERS = (
     "attempt_label",
     "history_count",
     "screenshot_count",
+    "source",
 )
 
 
@@ -99,6 +100,7 @@ def _report_rows(db: Session, group: Group) -> list[dict[str, Any]]:
                 "attempt_label": latest.label if latest else None,
                 "history_count": len(case_history),
                 "screenshot_count": sum(len(attempt.screenshots) for attempt in case_history),
+                "source": latest.source if latest else None,
             }
         )
     return rows

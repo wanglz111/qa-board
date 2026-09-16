@@ -1,14 +1,17 @@
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.auth import require_admin
 from app.db import get_db
+from app.execution import allocate_attempt
 from app.lark.client import LarkClient, LarkError, get_lark_client
 from app.lark.history import parse_case_reference, record_case_text, record_fields
 from app.lark.target import target_for
@@ -196,3 +199,115 @@ def read_reconcile(
             1 for row in rows if row["status"] != "same" and row["decision"] is None
         ),
     }
+
+
+class Decision(BaseModel):
+    key: str
+    action: Literal["use_remote", "use_local"]
+
+
+class ApplyRequest(BaseModel):
+    decisions: list[Decision]
+
+
+def _adopt(db: Session, group_id: UUID, row: dict[str, Any]) -> str | None:
+    """Adopt one remote record by appending. Returns a skip reason, or None."""
+
+    remote = row["remote"]
+    if remote is None:
+        return "表里没有这条记录"
+    if row["status"] == "unmatched":
+        return "本组没有这个用例编号"
+    group_case = db.scalar(
+        select(GroupCase)
+        .where(GroupCase.group_id == group_id, GroupCase.code == remote["case_code"])
+        .with_for_update()
+    )
+    if group_case is None:
+        return "本组没有这个用例编号"
+
+    # Reuse the table's label when it is free, so the next read pairs this row
+    # with that record; a taken label means the group's own rule allocates one.
+    taken = db.scalar(
+        select(Attempt.id).where(
+            Attempt.group_case_id == group_case.id, Attempt.label == remote["label"]
+        )
+    )
+    adopted = allocate_attempt(db, group_case, label=None if taken else remote["label"])
+    adopted.state = "committed"
+    adopted.result = remote["result"]
+    adopted.console_text = remote["console_text"]
+    # Provenance: this row mirrors the table, it was not executed here, and it
+    # must never be queued back to Lark as a new record.
+    adopted.source = "reconcile"
+    adopted.idempotency_key = f"reconcile-{group_id}-{adopted.label}"
+    db.flush()
+    return None
+
+
+@router.post("/groups/{group_id}/reconcile/apply")
+def apply_reconcile(
+    group_id: UUID,
+    payload: ApplyRequest,
+    db: Annotated[Session, Depends(get_db)],
+    client: Annotated[LarkClient, Depends(get_lark_client)],
+) -> dict[str, Any]:
+    read = read_reconcile(group_id, db, client, source="live")
+    if read["read_errors"]:
+        raise HTTPException(status_code=409, detail="；".join(read["read_errors"]))
+    rows = {row["key"]: row for row in read["rows"]}
+    pulled = kept = 0
+    skipped: list[dict[str, str]] = []
+    # The mark is written inside this transaction, so a payload that names the
+    # same key twice would otherwise adopt it twice before the read state moves.
+    decided_keys: set[str] = set()
+    try:
+        for decision in payload.decisions:
+            row = rows.get(decision.key)
+            if row is None:
+                skipped.append({"key": decision.key, "reason": "本次读取没有这条记录"})
+                continue
+            if row["status"] == "same":
+                # Both sides already agree, so this key needs no decision.
+                continue
+            if row["decision"] is not None or decision.key in decided_keys:
+                skipped.append({"key": decision.key, "reason": "这条已经核对过"})
+                continue
+            if decision.action == "use_remote":
+                reason = _adopt(db, group_id, row)
+                if reason is not None:
+                    skipped.append({"key": decision.key, "reason": reason})
+                    continue
+                pulled += 1
+            else:
+                # The remote table only ever receives new records, so keeping the
+                # local version is recorded rather than written back.
+                kept += 1
+            decided_keys.add(decision.key)
+            mark = db.scalar(
+                select(ReconcileMark).where(
+                    ReconcileMark.group_id == group_id,
+                    ReconcileMark.record_key == decision.key,
+                )
+            ) or ReconcileMark(group_id=group_id, record_key=decision.key)
+            mark.decision = decision.action
+            mark.remote_record_id = (row["remote"] or {}).get("record_id")
+            db.add(mark)
+        db.commit()
+    except IntegrityError as error:
+        db.rollback()
+        if getattr(error.orig, "sqlstate", None) != "23505":
+            raise
+        # Another apply decided the same record between this request's read and
+        # its write. Nothing this request wrote survives the rollback, and the
+        # row now carries a decision, so the honest answer is the one a fresh
+        # read would have produced.
+        return {
+            "pulled": 0,
+            "kept": 0,
+            "skipped": [
+                {"key": decision.key, "reason": "这条已经核对过"}
+                for decision in payload.decisions
+            ],
+        }
+    return {"pulled": pulled, "kept": kept, "skipped": skipped}
