@@ -130,6 +130,37 @@ class LarkClient:
         data = body.get("data")
         return data if isinstance(data, dict) else body
 
+    def _post_json(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
+        """POST one JSON body and return Lark's ``data`` dict.
+
+        Every create-only write goes through here, so the audit records one
+        method and path per request. A timeout is reported as ``LarkTimeout``
+        because the write may have landed anyway, and a refusal carries Lark's
+        own ``msg``: the request body (which can hold record values) and the
+        credentials never reach the message.
+        """
+
+        headers = {"Authorization": f"Bearer {self._token_value()}"}
+        self.calls.append(LarkCall(method="POST", path=path))
+        try:
+            response = self._client.post(path, json=body, headers=headers)
+            response.raise_for_status()
+        except httpx.TimeoutException as error:
+            raise LarkTimeout(f"Lark create timed out: {type(error).__name__}") from None
+        except httpx.HTTPError as error:
+            raise LarkError(f"Lark create failed: {type(error).__name__}") from None
+        try:
+            payload = response.json()
+        except ValueError:
+            raise LarkError("Lark returned a non-JSON response") from None
+        code = payload.get("code")
+        if code not in (0, None):
+            message = str(payload.get("msg") or "").strip().replace("\n", " ")
+            detail = f": {message}" if message else ""
+            raise LarkError(f"Lark rejected the create (code {code}){detail}")
+        data = payload.get("data")
+        return data if isinstance(data, dict) else payload
+
     def app_metadata(self, app_token: str) -> dict[str, Any]:
         return self._send("GET", f"/open-apis/bitable/v1/apps/{app_token}")
 
@@ -196,25 +227,40 @@ class LarkClient:
     ) -> dict[str, Any]:
         """Create one brand-new record; no legacy record is ever touched."""
 
-        path = f"/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records"
-        headers = {"Authorization": f"Bearer {self._token_value()}"}
-        self.calls.append(LarkCall(method="POST", path=path))
-        try:
-            response = self._client.post(path, json={"fields": fields}, headers=headers)
-            response.raise_for_status()
-        except httpx.TimeoutException as error:
-            raise LarkTimeout(f"Lark create timed out: {type(error).__name__}") from None
-        except httpx.HTTPError as error:
-            raise LarkError(f"Lark create failed: {type(error).__name__}") from None
-        try:
-            body = response.json()
-        except ValueError:
-            raise LarkError("Lark returned a non-JSON response") from None
-        code = body.get("code")
-        if code not in (0, None):
-            raise LarkError(f"Lark rejected the create (code {code})")
-        data = body.get("data")
-        record = (data or {}).get("record") if isinstance(data, dict) else None
+        data = self._post_json(
+            f"/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records",
+            {"fields": fields},
+        )
+        record = data.get("record")
         if not isinstance(record, dict) or not record.get("record_id"):
             raise LarkError("Lark create returned no record id")
         return record
+
+    def create_field(
+        self, app_token: str, table_id: str, name: str, type_id: int, properties: dict[str, Any]
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {"field_name": name, "type": type_id}
+        if properties:
+            body["property"] = properties
+        return self._post_json(
+            f"/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/fields", body
+        )
+
+    def create_view(self, app_token: str, table_id: str, name: str) -> dict[str, Any]:
+        return self._post_json(
+            f"/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/views",
+            {"view_name": name, "view_type": "grid"},
+        )
+
+    def create_table(
+        self, app_token: str, name: str, fields: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        data = self._post_json(
+            f"/open-apis/bitable/v1/apps/{app_token}/tables",
+            {"table": {"name": name, "default_view_name": "主视图", "fields": fields}},
+        )
+        # The live API answers with the new table's own keys; a ``table``
+        # envelope wrapping them is also accepted so either shape reports the
+        # id and name of the table that was just created.
+        table = data.get("table")
+        return table if isinstance(table, dict) else data

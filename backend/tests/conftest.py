@@ -259,6 +259,9 @@ class FakeLark:
         self.media: dict[str, tuple[bytes, str]] = {}
         self.requests: list[dict[str, str]] = []
         self.created_records: list[dict[str, Any]] = []
+        self.created_fields: list[dict[str, Any]] = []
+        self.created_views: list[dict[str, Any]] = []
+        self.created_tables: list[dict[str, Any]] = []
         self.created_execution = 0
         self.created_bug = 0
         self.put_calls: list[str] = []
@@ -270,6 +273,7 @@ class FakeLark:
         self.hide_created_records = False
         self.media_unauthorized = False
         self.fields_error = False
+        self.field_create_error = False
         self.client = LarkClient(
             base_url="https://open.feishu.test",
             app_id="test-app-id",
@@ -379,6 +383,72 @@ class FakeLark:
                 self.timeout_after_create = False
                 raise httpx.ReadTimeout("create timed out")
             return httpx.Response(200, json={"code": 0, "data": {"record": record}})
+        if request.method == "POST" and path.endswith("/fields"):
+            if self.field_create_error:
+                # Lark answers a refusal with its own message and a non-zero code.
+                return httpx.Response(
+                    200, json={"code": 1254302, "msg": "no permission to create fields"}
+                )
+            role = self.field_roles.get(self._base_token_and_table(path))
+            if role is None:
+                return httpx.Response(404, json={"code": 1, "msg": "unsupported table"})
+            body = json.loads(request.content or b"{}")
+            self.created_fields.append(body)
+            # The new header has to appear in the next read of this table, so it
+            # joins the same schema store the /fields listing answers from.
+            store = self.bug_fields if role == "bug" else self.fields
+            store.append({"field_name": body.get("field_name"), "type": body.get("type")})
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {
+                        "field": {
+                            "field_id": f"fld-{len(self.created_fields)}",
+                            **body,
+                        }
+                    },
+                },
+            )
+        if request.method == "POST" and path.endswith("/views"):
+            if self._base_token_and_table(path) is None:
+                return httpx.Response(404, json={"code": 1, "msg": "unsupported table"})
+            body = json.loads(request.content or b"{}")
+            self.created_views.append(body)
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {
+                        "view": {
+                            "view_id": "vew-new",
+                            "view_name": body.get("view_name"),
+                            "view_type": body.get("view_type") or "grid",
+                        }
+                    },
+                },
+            )
+        if request.method == "POST" and path.endswith("/tables"):
+            base = self._base(path)
+            if base is None:
+                return httpx.Response(404, json={"code": 1, "msg": "unsupported base"})
+            body = json.loads(request.content or b"{}")
+            table = body.get("table") or {}
+            self.created_tables.append(table)
+            # A created table really does show up in the base's listing afterwards.
+            base[1].append(("tbl-new", str(table.get("name") or "")))
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {
+                        "table": {
+                            "table_id": "tbl-new",
+                            "name": str(table.get("name") or ""),
+                        }
+                    },
+                },
+            )
         if path.endswith("/fields"):
             if self.fields_error:
                 return httpx.Response(500, json={"code": 1, "msg": "fields unavailable"})
