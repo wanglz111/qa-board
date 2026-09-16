@@ -17,6 +17,8 @@ EXPECTED_TABLES = {
     "admins",
     "alembic_version",
     "attempts",
+    "case_reference_assets",
+    "case_reference_links",
     "group_cases",
     "groups",
     "import_tickets",
@@ -33,7 +35,7 @@ def test_empty_test_schema_upgrades_to_head_twice(migrated_database):
     with migrated_database.connect() as connection:
         assert set(inspect(connection).get_table_names()) == EXPECTED_TABLES
         assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-            "0010_reconcile_marks"
+            "0011_case_reference_assets"
         )
         assert "target_fingerprint" in {
             column["name"] for column in inspect(connection).get_columns("sync_jobs")
@@ -159,7 +161,7 @@ def test_short_code_backfill_keeps_existing_groups_addressable(database_at_0004)
 
     with database_at_0004.connect() as connection:
         assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-            "0010_reconcile_marks"
+            "0011_case_reference_assets"
         )
         assert connection.scalar(
             text("SELECT short_code FROM groups WHERE id = :id"), {"id": group_id}
@@ -168,3 +170,53 @@ def test_short_code_backfill_keeps_existing_groups_addressable(database_at_0004)
             constraint["name"]
             for constraint in inspect(connection).get_unique_constraints("groups")
         }
+
+
+def test_reference_asset_tables_are_created(migrated_database):
+    with migrated_database.connect() as connection:
+        assets = {
+            column["name"]
+            for column in inspect(connection).get_columns("case_reference_assets")
+        }
+        assert assets == {
+            "id",
+            "group_id",
+            "asset_key",
+            "name",
+            "storage_key",
+            "mime",
+            "size_bytes",
+            "width",
+            "height",
+            "asset_type",
+            "screen",
+            "state",
+            "source_path",
+            "prototype_version",
+            "created_at",
+        }
+        links = {
+            column["name"]
+            for column in inspect(connection).get_columns("case_reference_links")
+        }
+        assert links == {
+            "id",
+            "group_case_id",
+            "asset_id",
+            "role",
+            "caption",
+            "focus",
+            "sort_order",
+            "created_at",
+        }
+        assert "uq_case_reference_asset_key" in {
+            constraint["name"]
+            for constraint in inspect(connection).get_unique_constraints(
+                "case_reference_assets"
+            )
+        }
+        case_columns = {
+            column["name"]
+            for column in inspect(connection).get_columns("group_cases")
+        }
+        assert {"prototype_note", "expect_absent", "visual_check"} <= case_columns

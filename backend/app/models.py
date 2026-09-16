@@ -14,6 +14,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -74,6 +75,9 @@ class Group(Base):
     cases: Mapped[list[GroupCase]] = relationship(
         back_populates="group", cascade="all, delete-orphan", passive_deletes=True
     )
+    reference_assets: Mapped[list[CaseReferenceAsset]] = relationship(
+        back_populates="group", cascade="all, delete-orphan", passive_deletes=True
+    )
 
 
 class GroupCase(Base):
@@ -81,6 +85,10 @@ class GroupCase(Base):
     __table_args__ = (
         UniqueConstraint("group_id", "code", name="uq_group_case_code"),
         UniqueConstraint("group_id", "position", name="uq_group_case_position"),
+        CheckConstraint(
+            "visual_check IN ('text_and_visual', 'visual_only', 'not_verifiable')",
+            name="ck_group_cases_visual_check",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
@@ -97,9 +105,22 @@ class GroupCase(Base):
     test_data: Mapped[str | None] = mapped_column(Text)
     steps: Mapped[str | None] = mapped_column(Text)
     expected: Mapped[str | None] = mapped_column(Text)
+    expect_absent: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    visual_check: Mapped[str] = mapped_column(
+        String, nullable=False, default="text_and_visual", server_default="text_and_visual"
+    )
+    prototype_note: Mapped[str | None] = mapped_column(Text)
     raw: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
 
     group: Mapped[Group] = relationship(back_populates="cases")
+    reference_links: Mapped[list[CaseReferenceLink]] = relationship(
+        back_populates="group_case",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="CaseReferenceLink.sort_order",
+    )
     attempts: Mapped[list[Attempt]] = relationship(
         back_populates="group_case", cascade="all, delete-orphan", passive_deletes=True
     )
@@ -162,6 +183,82 @@ class Screenshot(Base):
     )
 
     attempt: Mapped[Attempt] = relationship(back_populates="screenshots")
+
+
+class CaseReferenceAsset(Base):
+    """One prototype image inside one test group.
+
+    The file is stored once per group and shared by every case that checks it,
+    so re-exporting a design frame replaces a single file.
+    """
+
+    __tablename__ = "case_reference_assets"
+    __table_args__ = (
+        UniqueConstraint(
+            "group_id", "asset_key", name="uq_case_reference_asset_key"
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    group_id: Mapped[UUID] = mapped_column(
+        ForeignKey("groups.id", ondelete="CASCADE"), nullable=False
+    )
+    asset_key: Mapped[str] = mapped_column(String, nullable=False)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    storage_key: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    mime: Mapped[str] = mapped_column(String, nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    width: Mapped[int] = mapped_column(Integer, nullable=False)
+    height: Mapped[int] = mapped_column(Integer, nullable=False)
+    asset_type: Mapped[str] = mapped_column(
+        String, nullable=False, default="page", server_default="page"
+    )
+    screen: Mapped[str | None] = mapped_column(String)
+    state: Mapped[str | None] = mapped_column(String)
+    source_path: Mapped[str] = mapped_column(String, nullable=False)
+    prototype_version: Mapped[str | None] = mapped_column(String)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    group: Mapped[Group] = relationship(back_populates="reference_assets")
+    links: Mapped[list[CaseReferenceLink]] = relationship(
+        back_populates="asset", cascade="all, delete-orphan", passive_deletes=True
+    )
+
+
+class CaseReferenceLink(Base):
+    """One case pointing at one asset, with the reason it is checked."""
+
+    __tablename__ = "case_reference_links"
+    __table_args__ = (
+        UniqueConstraint("group_case_id", "asset_id", name="uq_case_reference_link"),
+        CheckConstraint(
+            "role IN ('expected', 'locator')", name="ck_case_reference_links_role"
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    group_case_id: Mapped[UUID] = mapped_column(
+        ForeignKey("group_cases.id", ondelete="CASCADE"), nullable=False
+    )
+    asset_id: Mapped[UUID] = mapped_column(
+        ForeignKey("case_reference_assets.id", ondelete="CASCADE"), nullable=False
+    )
+    role: Mapped[str] = mapped_column(
+        String, nullable=False, default="expected", server_default="expected"
+    )
+    caption: Mapped[str | None] = mapped_column(Text)
+    focus: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    group_case: Mapped[GroupCase] = relationship(back_populates="reference_links")
+    asset: Mapped[CaseReferenceAsset] = relationship(back_populates="links")
 
 
 class ImportTicket(Base):
