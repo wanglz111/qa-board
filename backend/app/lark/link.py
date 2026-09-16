@@ -12,8 +12,10 @@ CONTENT_KINDS = ("wiki", "base")
 # 文档 id 会拼进带 Bearer token 的请求路径，所以只能接受 token 字符，
 # 否则 `..`、`%2e` 或空白之类的输入能改写请求落到哪个 endpoint。
 SOURCE_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
-TABLE_ID = re.compile(r"^tbl[A-Za-z0-9]+$")
-VIEW_ID = re.compile(r"^vew[A-Za-z0-9]+$")
+# 表和视图 id 同样会拼进带 Bearer token 的请求路径，所以只接受 unreserved
+# 字符：`-`、`_`、字母和数字，`/`、`.`、`%` 与空白仍然无法通过。
+TABLE_ID = re.compile(r"^tbl[A-Za-z0-9_-]+$")
+VIEW_ID = re.compile(r"^vew[A-Za-z0-9_-]+$")
 
 
 class LarkLinkError(ValueError):

@@ -35,6 +35,24 @@ def test_lowercases_the_host_without_touching_the_document_id():
     assert link.source_id == "FEQQwK3YtiJG9KkKbZrjm08upsg"
 
 
+def test_keeps_hyphenated_table_and_view_ids():
+    """Each plan's fixtures use ids like `tbl-runs`, so they must survive."""
+
+    link = parse_lark_link(
+        "https://tenant.larksuite.com/wiki/node-1?table=tbl-runs&view=vew-main"
+    )
+    assert link.table_id == "tbl-runs"
+    assert link.view_id == "vew-main"
+
+
+def test_keeps_underscored_table_and_view_ids():
+    link = parse_lark_link(
+        "https://tenant.larksuite.com/base/bascnAbc123?table=tbl_run_1&view=vew_main_view"
+    )
+    assert link.table_id == "tbl_run_1"
+    assert link.view_id == "vew_main_view"
+
+
 @pytest.mark.parametrize(
     ("url", "reason"),
     [
@@ -45,6 +63,10 @@ def test_lowercases_the_host_without_touching_the_document_id():
         ("https://larksuite.com.evil.example.com/wiki/node1", "只支持 larksuite.com"),
         ("not-a-url", "请粘贴"),
         ("https://tenant.larksuite.com/wiki/node1?table=notatable", "table 参数"),
+        ("https://tenant.larksuite.com/wiki/node1?table=tbl-a/b", "table 参数"),
+        ("https://tenant.larksuite.com/wiki/node1?table=tbl-a.b", "table 参数"),
+        ("https://tenant.larksuite.com/wiki/node1?view=vew-a/b", "view 参数"),
+        ("https://tenant.larksuite.com/wiki/node1?view=vew-a.b", "view 参数"),
         ("https://tenant.larksuite.com/base/..", "文档 id"),
         ("https://tenant.larksuite.com/base/node%201", "文档 id"),
         ("https://tenant.larksuite.com/base/" + "a" * 65, "文档 id"),
