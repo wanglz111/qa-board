@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -22,6 +22,10 @@ router = APIRouter(prefix="/api", dependencies=[Depends(require_admin)])
 
 
 READABLE_RESULTS = ("通过", "不通过", "未执行")
+# A concurrent apply can claim a row between this request's read and its write.
+# The loser retries against a fresh read, where the raced key reads as decided
+# and the rest of the payload is genuinely applied.
+MAX_APPLY_ATTEMPTS = 5
 
 
 def normalize_result(value: Any) -> str:
@@ -245,13 +249,20 @@ def _adopt(db: Session, group_id: UUID, row: dict[str, Any]) -> str | None:
     return None
 
 
-@router.post("/groups/{group_id}/reconcile/apply")
-def apply_reconcile(
+def _unique_violation(error: IntegrityError) -> str | None:
+    """The constraint a Postgres unique violation named, when it named one."""
+
+    return getattr(getattr(error.orig, "diag", None), "constraint_name", None)
+
+
+def _apply_decisions(
+    db: Session,
     group_id: UUID,
+    client: LarkClient,
     payload: ApplyRequest,
-    db: Annotated[Session, Depends(get_db)],
-    client: Annotated[LarkClient, Depends(get_lark_client)],
 ) -> dict[str, Any]:
+    """One attempt at applying a whole payload against a fresh read."""
+
     read = read_reconcile(group_id, db, client, source="live")
     if read["read_errors"]:
         raise HTTPException(status_code=409, detail="；".join(read["read_errors"]))
@@ -261,53 +272,61 @@ def apply_reconcile(
     # The mark is written inside this transaction, so a payload that names the
     # same key twice would otherwise adopt it twice before the read state moves.
     decided_keys: set[str] = set()
-    try:
-        for decision in payload.decisions:
-            row = rows.get(decision.key)
-            if row is None:
-                skipped.append({"key": decision.key, "reason": "本次读取没有这条记录"})
+    for decision in payload.decisions:
+        row = rows.get(decision.key)
+        if row is None:
+            skipped.append({"key": decision.key, "reason": "本次读取没有这条记录"})
+            continue
+        if row["status"] == "same":
+            # Both sides already agree, so this key needs no decision.
+            continue
+        if row["decision"] is not None or decision.key in decided_keys:
+            skipped.append({"key": decision.key, "reason": "这条已经核对过"})
+            continue
+        if decision.action == "use_remote":
+            reason = _adopt(db, group_id, row)
+            if reason is not None:
+                skipped.append({"key": decision.key, "reason": reason})
                 continue
-            if row["status"] == "same":
-                # Both sides already agree, so this key needs no decision.
-                continue
-            if row["decision"] is not None or decision.key in decided_keys:
-                skipped.append({"key": decision.key, "reason": "这条已经核对过"})
-                continue
-            if decision.action == "use_remote":
-                reason = _adopt(db, group_id, row)
-                if reason is not None:
-                    skipped.append({"key": decision.key, "reason": reason})
-                    continue
-                pulled += 1
-            else:
-                # The remote table only ever receives new records, so keeping the
-                # local version is recorded rather than written back.
-                kept += 1
-            decided_keys.add(decision.key)
-            mark = db.scalar(
-                select(ReconcileMark).where(
-                    ReconcileMark.group_id == group_id,
-                    ReconcileMark.record_key == decision.key,
-                )
-            ) or ReconcileMark(group_id=group_id, record_key=decision.key)
-            mark.decision = decision.action
-            mark.remote_record_id = (row["remote"] or {}).get("record_id")
-            db.add(mark)
-        db.commit()
-    except IntegrityError as error:
-        db.rollback()
-        if getattr(error.orig, "sqlstate", None) != "23505":
-            raise
-        # Another apply decided the same record between this request's read and
-        # its write. Nothing this request wrote survives the rollback, and the
-        # row now carries a decision, so the honest answer is the one a fresh
-        # read would have produced.
-        return {
-            "pulled": 0,
-            "kept": 0,
-            "skipped": [
-                {"key": decision.key, "reason": "这条已经核对过"}
-                for decision in payload.decisions
-            ],
-        }
+            pulled += 1
+        else:
+            # The remote table only ever receives new records, so keeping the
+            # local version is recorded rather than written back.
+            kept += 1
+        decided_keys.add(decision.key)
+        mark = db.scalar(
+            select(ReconcileMark).where(
+                ReconcileMark.group_id == group_id,
+                ReconcileMark.record_key == decision.key,
+            )
+        ) or ReconcileMark(group_id=group_id, record_key=decision.key)
+        mark.decision = decision.action
+        mark.remote_record_id = (row["remote"] or {}).get("record_id")
+        db.add(mark)
+    db.commit()
     return {"pulled": pulled, "kept": kept, "skipped": skipped}
+
+
+@router.post("/groups/{group_id}/reconcile/apply")
+def apply_reconcile(
+    group_id: UUID,
+    payload: ApplyRequest,
+    db: Annotated[Session, Depends(get_db)],
+    client: Annotated[LarkClient, Depends(get_lark_client)],
+) -> dict[str, Any]:
+    for remaining in range(MAX_APPLY_ATTEMPTS, 0, -1):
+        try:
+            return _apply_decisions(db, group_id, client, payload)
+        except IntegrityError as error:
+            db.rollback()
+            # Only the decision log means "someone already reconciled this row".
+            # Any other unique violation is a real error and must not be
+            # reported as a recorded decision.
+            if _unique_violation(error) != "uq_reconcile_key":
+                raise
+            if remaining == 1:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="这条记录刚被另一次核对写入，请重新读取后再核对",
+                ) from None
+    raise AssertionError("unreachable")

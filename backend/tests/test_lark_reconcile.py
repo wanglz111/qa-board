@@ -1,8 +1,13 @@
+import csv
+import io
+
+import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.lark.reconcile import reconcile_rows
-from app.models import Attempt
+from app.models import Attempt, ReconcileMark
 
 
 def _local(label: str, result: str, console: str | None = None) -> dict:
@@ -157,6 +162,7 @@ def test_conflict_adoption_appends_and_leaves_the_original_untouched(
     original_result = failed_attempt.result
     original_console = failed_attempt.console_text
     original_sequence = failed_attempt.sequence
+    original_label = failed_attempt.label
     lark_fake.records = [
         {"record_id": "r1", "fields": {"用例": "B-001 管理员登录", "结果": "通过"}}
     ]
@@ -169,6 +175,7 @@ def test_conflict_adoption_appends_and_leaves_the_original_untouched(
     db_session.refresh(failed_attempt)
     assert failed_attempt.result == original_result
     assert failed_attempt.console_text == original_console
+    assert failed_attempt.label == original_label
     assert failed_attempt.source == "execution"
 
     appended = db_session.scalar(select(Attempt).where(Attempt.source == "reconcile"))
@@ -213,7 +220,9 @@ def test_keeping_the_local_record_appends_nothing(
     assert failed_attempt.result == "不通过"
     assert db_session.scalars(select(Attempt).where(Attempt.source == "reconcile")).all() == []
     assert not any(
-        request["method"] in ("PUT", "PATCH", "DELETE") for request in lark_fake.requests
+        request["method"] in ("PUT", "PATCH", "DELETE")
+        or (request["method"] == "POST" and request["path"].endswith("/records"))
+        for request in lark_fake.requests
     )
 
 
@@ -274,7 +283,82 @@ def test_a_key_named_twice_in_one_payload_is_adopted_once(
     )
 
 
-def test_a_racing_apply_is_told_the_record_is_already_reconciled(
+def test_a_racing_apply_retries_and_still_applies_the_other_keys(
+    lark_fake,
+    authenticated_client,
+    confirmed_group,
+    failed_attempt,
+    add_case,
+    db_session,
+    monkeypatch,
+):
+    from app.lark import reconcile as reconcile_module
+
+    add_case(confirmed_group.id, code="B-002", title="钱包绑定")
+    lark_fake.records = [
+        {"record_id": "r1", "fields": {"用例": "B-001 管理员登录", "结果": "通过"}},
+        {"record_id": "r2", "fields": {"用例": "B-002 钱包绑定", "结果": "通过"}},
+    ]
+    authenticated_client.post(
+        f"/api/groups/{confirmed_group.id}/reconcile/apply",
+        json={"decisions": [{"key": "B-001", "action": "use_remote"}]},
+    )
+
+    # A second request can run its read and its mark lookups before the first one
+    # commits, so B-001 looks undecided to it and its own mark insert loses on
+    # uq_reconcile_key. The retry re-reads, sees the winner's decision, and
+    # applies the key that did not race.
+    payload = {
+        "decisions": [
+            {"key": "B-001", "action": "use_remote"},
+            {"key": "B-002", "action": "use_remote"},
+        ]
+    }
+    real_read = reconcile_module.read_reconcile
+    real_scalar = Session.scalar
+    reads = {"count": 0}
+
+    def stale_first_read(group_id, db, client, source="live"):
+        body = real_read(group_id, db, client, source=source)
+        reads["count"] += 1
+        if reads["count"] == 1:
+            body["rows"] = [{**row, "decision": None} for row in body["rows"]]
+        return body
+
+    def blind_first_lookups(self, statement, *args, **kwargs):
+        if reads["count"] == 1 and "reconcile_marks" in str(statement):
+            return None
+        return real_scalar(self, statement, *args, **kwargs)
+
+    monkeypatch.setattr(reconcile_module, "read_reconcile", stale_first_read)
+    monkeypatch.setattr(Session, "scalar", blind_first_lookups)
+    second = authenticated_client.post(
+        f"/api/groups/{confirmed_group.id}/reconcile/apply", json=payload
+    )
+
+    assert second.status_code == 200
+    assert second.json() == {
+        "pulled": 1,
+        "kept": 0,
+        "skipped": [{"key": "B-001", "reason": "这条已经核对过"}],
+    }
+    marks = {
+        mark.record_key: mark.decision
+        for mark in db_session.scalars(select(ReconcileMark)).all()
+    }
+    assert marks == {"B-001": "use_remote", "B-002": "use_remote"}
+    labels = sorted(
+        attempt.label
+        for attempt in db_session.scalars(
+            select(Attempt).where(Attempt.source == "reconcile")
+        ).all()
+    )
+    assert len(labels) == 2
+    assert labels[0].startswith("B-001-R0918-")
+    assert labels[1] == "B-002"
+
+
+def test_a_race_that_never_settles_answers_conflict(
     lark_fake, authenticated_client, confirmed_group, failed_attempt, db_session, monkeypatch
 ):
     from app.lark import reconcile as reconcile_module
@@ -287,38 +371,211 @@ def test_a_racing_apply_is_told_the_record_is_already_reconciled(
         f"/api/groups/{confirmed_group.id}/reconcile/apply", json=payload
     )
 
-    # A second request can run its read and its mark lookup before the first one
-    # commits, so it sees neither the decision nor the mark and writes its own
-    # copy, which then loses on uq_reconcile_key.
+    # Every attempt reads a stale table and misses the mark, so the conflict
+    # survives the whole retry budget instead of resolving.
     real_read = reconcile_module.read_reconcile
     real_scalar = Session.scalar
 
-    def stale_read(group_id, db, client, source="live"):
+    def always_stale_read(group_id, db, client, source="live"):
         body = real_read(group_id, db, client, source=source)
         body["rows"] = [{**row, "decision": None} for row in body["rows"]]
         return body
 
-    def blind_scalar(self, statement, *args, **kwargs):
+    def blind_lookups(self, statement, *args, **kwargs):
         if "reconcile_marks" in str(statement):
             return None
         return real_scalar(self, statement, *args, **kwargs)
 
-    monkeypatch.setattr(reconcile_module, "read_reconcile", stale_read)
-    monkeypatch.setattr(Session, "scalar", blind_scalar)
-    second = authenticated_client.post(
+    monkeypatch.setattr(reconcile_module, "read_reconcile", always_stale_read)
+    monkeypatch.setattr(Session, "scalar", blind_lookups)
+    response = authenticated_client.post(
         f"/api/groups/{confirmed_group.id}/reconcile/apply", json=payload
     )
 
-    assert second.status_code == 200
-    assert second.json() == {
-        "pulled": 0,
-        "kept": 0,
-        "skipped": [{"key": "B-001", "reason": "这条已经核对过"}],
-    }
+    assert response.status_code == 409
     assert (
         len(db_session.scalars(select(Attempt).where(Attempt.source == "reconcile")).all())
         == 1
     )
+    assert len(db_session.scalars(select(ReconcileMark)).all()) == 1
+
+
+def test_a_foreign_unique_violation_surfaces_instead_of_a_fake_skip(
+    lark_fake, authenticated_client, confirmed_group, failed_attempt, monkeypatch
+):
+    lark_fake.records = [
+        {"record_id": "r1", "fields": {"用例": "B-001 管理员登录", "结果": "通过"}}
+    ]
+    # Pretend the label check ran before the original attempt was visible, so
+    # adoption names its row after a taken label and loses on uq_attempt_case_label
+    # instead of on the decision log. That is a real error, not a recorded skip.
+    real_scalar = Session.scalar
+
+    def blind_label_check(self, statement, *args, **kwargs):
+        if "attempts.label" in str(statement):
+            return None
+        return real_scalar(self, statement, *args, **kwargs)
+
+    monkeypatch.setattr(Session, "scalar", blind_label_check)
+    with pytest.raises(IntegrityError) as error:
+        authenticated_client.post(
+            f"/api/groups/{confirmed_group.id}/reconcile/apply",
+            json={"decisions": [{"key": "B-001", "action": "use_remote"}]},
+        )
+
+    assert "uq_attempt_case_label" in str(error.value)
+
+
+def test_adoption_leaves_the_original_attempts_screenshots_attached(
+    lark_fake,
+    authenticated_client,
+    confirmed_group,
+    failed_attempt,
+    valid_png,
+    upload_dir,
+    db_session,
+):
+    uploaded = authenticated_client.post(
+        f"/api/attempts/{failed_attempt.id}/screenshots",
+        files={"image": ("shot.png", valid_png, "image/png")},
+    ).json()
+    lark_fake.records = [
+        {"record_id": "r1", "fields": {"用例": "B-001 管理员登录", "结果": "通过"}}
+    ]
+    authenticated_client.post(
+        f"/api/groups/{confirmed_group.id}/reconcile/apply",
+        json={"decisions": [{"key": "B-001", "action": "use_remote"}]},
+    )
+
+    db_session.refresh(failed_attempt)
+    # The screenshot still evidences the original conclusion, so it stays on the
+    # original row and is still downloadable.
+    assert [str(shot.id) for shot in failed_attempt.screenshots] == [uploaded["id"]]
+    downloaded = authenticated_client.get(f"/api/screenshots/{uploaded['id']}")
+    assert downloaded.status_code == 200
+    assert downloaded.content == valid_png
+
+    rows = list(
+        csv.DictReader(
+            io.StringIO(
+                authenticated_client.get(
+                    f"/api/groups/{confirmed_group.id}/reports.csv"
+                ).text
+            )
+        )
+    )
+    assert rows[0]["screenshot_count"] == "1"
+    assert rows[0]["history_count"] == "2"
+    assert rows[0]["source"] == "reconcile"
+
+
+def test_adoption_copies_the_remote_console_text(
+    lark_fake, authenticated_client, confirmed_group, db_session
+):
+    lark_fake.records = [
+        {
+            "record_id": "r9",
+            "fields": {
+                "用例": "B-001-R0918-01 管理员登录",
+                "结果": "不通过",
+                "控制台": "远端控制台：连接超时",
+            },
+        }
+    ]
+    body = authenticated_client.post(
+        f"/api/groups/{confirmed_group.id}/reconcile/apply",
+        json={"decisions": [{"key": "B-001-R0918-01", "action": "use_remote"}]},
+    ).json()
+
+    assert body["pulled"] == 1
+    adopted = db_session.scalar(select(Attempt).where(Attempt.source == "reconcile"))
+    assert adopted.result == "不通过"
+    assert adopted.console_text == "远端控制台：连接超时"
+
+
+def test_keeping_the_local_record_records_the_decision(
+    lark_fake, authenticated_client, confirmed_group, failed_attempt, db_session
+):
+    lark_fake.records = [
+        {"record_id": "r1", "fields": {"用例": "B-001 管理员登录", "结果": "通过"}}
+    ]
+    authenticated_client.post(
+        f"/api/groups/{confirmed_group.id}/reconcile/apply",
+        json={"decisions": [{"key": "B-001", "action": "use_local"}]},
+    )
+
+    mark = db_session.scalar(
+        select(ReconcileMark).where(
+            ReconcileMark.group_id == confirmed_group.id,
+            ReconcileMark.record_key == "B-001",
+        )
+    )
+    assert mark.decision == "use_local"
+    assert mark.remote_record_id == "r1"
+    # The decision is what stops the row from resurfacing as unresolved.
+    body = authenticated_client.get(
+        f"/api/groups/{confirmed_group.id}/reconcile?source=live"
+    ).json()
+    assert body["rows"][0]["decision"] == "use_local"
+    assert body["unresolved"] == 0
+    assert db_session.scalars(select(Attempt).where(Attempt.source == "reconcile")).all() == []
+
+
+def test_a_row_that_already_agrees_needs_no_decision(
+    lark_fake, authenticated_client, confirmed_group, failed_attempt, db_session
+):
+    lark_fake.records = [
+        {
+            "record_id": "r1",
+            "fields": {
+                "用例": "B-001 管理员登录",
+                "结果": "不通过",
+                "控制台": "wallet.bind timeout",
+            },
+        }
+    ]
+    body = authenticated_client.post(
+        f"/api/groups/{confirmed_group.id}/reconcile/apply",
+        json={"decisions": [{"key": "B-001", "action": "use_remote"}]},
+    ).json()
+
+    assert body == {"pulled": 0, "kept": 0, "skipped": []}
+    assert db_session.scalars(select(ReconcileMark)).all() == []
+    assert db_session.scalars(select(Attempt).where(Attempt.source == "reconcile")).all() == []
+
+
+def test_adopting_a_row_that_is_not_in_the_table_is_skipped(
+    lark_fake, authenticated_client, confirmed_group, failed_attempt
+):
+    lark_fake.records = []
+    body = authenticated_client.post(
+        f"/api/groups/{confirmed_group.id}/reconcile/apply",
+        json={"decisions": [{"key": "B-001", "action": "use_remote"}]},
+    ).json()
+
+    assert body == {
+        "pulled": 0,
+        "kept": 0,
+        "skipped": [{"key": "B-001", "reason": "表里没有这条记录"}],
+    }
+
+
+def test_a_decision_for_a_row_that_was_not_read_is_skipped(
+    lark_fake, authenticated_client, confirmed_group, failed_attempt
+):
+    lark_fake.records = [
+        {"record_id": "r1", "fields": {"用例": "B-001 管理员登录", "结果": "通过"}}
+    ]
+    body = authenticated_client.post(
+        f"/api/groups/{confirmed_group.id}/reconcile/apply",
+        json={"decisions": [{"key": "B-404", "action": "use_remote"}]},
+    ).json()
+
+    assert body == {
+        "pulled": 0,
+        "kept": 0,
+        "skipped": [{"key": "B-404", "reason": "本次读取没有这条记录"}],
+    }
 
 
 def test_a_table_sourced_attempt_is_never_queued_for_sync(
