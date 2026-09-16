@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import { LoaderCircle, PlayCircle } from "lucide-react";
+import { Keyboard, LoaderCircle, PictureInPicture2, PlayCircle } from "lucide-react";
 
 import type {
   Attempt,
+  AttemptResult,
   Group,
   GroupCase,
   GroupProgress,
@@ -12,7 +13,14 @@ import type {
 import { CaseDetail } from "../components/CaseDetail";
 import { GroupSelector } from "../components/GroupSelector";
 import { History } from "../components/History";
-import { OutcomeForm, type SaveInput, type SaveStatus } from "../components/OutcomeForm";
+import {
+  OutcomeForm,
+  type OutcomeFormHandle,
+  type SaveInput,
+  type SaveStatus
+} from "../components/OutcomeForm";
+import { dispatchCaseKey, useCaseKeys, type CaseKeyHandlers } from "../useCaseKeys";
+import { usePiP } from "../usePiP";
 
 type Props = {
   loadGroups: () => Promise<Group[]>;
@@ -68,7 +76,10 @@ export function ExecutionView({
   const [failure, setFailure] = useState("");
   const [lastAttemptId, setLastAttemptId] = useState<string | null>(null);
   const caseRequest = useRef(0);
+  const deskRef = useRef<HTMLDivElement>(null);
+  const formRef = useRef<OutcomeFormHandle>(null);
   const keyFor = useIdempotencyKey();
+  const pip = usePiP();
 
   useEffect(() => {
     let cancelled = false;
@@ -218,6 +229,45 @@ export function ExecutionView({
     }
   }
 
+  // Keyboard shortcuts must not submit while a request is in flight, and the
+  // failure shortcut only opens the note field because the note is mandatory.
+  function quickSave(result: AttemptResult) {
+    if (submitting || !cases[caseIndex]) return;
+    formRef.current?.setResult(result);
+    void save({ result, note: null, consoleText: null });
+  }
+
+  function revealFailure() {
+    if (submitting || !cases[caseIndex]) return;
+    formRef.current?.setResult("不通过");
+    formRef.current?.focusNote();
+  }
+
+  const keyHandlers: CaseKeyHandlers = {
+    enabled: !submitting,
+    onPass: () => quickSave("通过"),
+    onFail: revealFailure,
+    onSkip: () => quickSave("未执行"),
+    onPrevious: () => void showCase(caseIndex - 1),
+    onNext: () => void showCase(caseIndex + 1),
+    onBack: () => void showCase(caseIndex - 1),
+    onTogglePiP: () => void pip.toggle(deskRef.current),
+    onEscape: () => pip.close()
+  };
+  const keyHandlersRef = useRef(keyHandlers);
+  keyHandlersRef.current = keyHandlers;
+  useCaseKeys(keyHandlers);
+
+  useEffect(() => {
+    const pipDocument = pip.pipWindow?.document;
+    if (!pipDocument) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (dispatchCaseKey(event, keyHandlersRef.current)) event.preventDefault();
+    };
+    pipDocument.addEventListener("keydown", onKeyDown);
+    return () => pipDocument.removeEventListener("keydown", onKeyDown);
+  }, [pip.pipWindow]);
+
   const activeCase = cases[caseIndex];
 
   return (
@@ -239,7 +289,25 @@ export function ExecutionView({
         )}
       </aside>
 
-      <div className="execution-desk">
+      <div className="execution-desk" ref={deskRef}>
+        <div className="execution-toolbar">
+          <span className="shortcut-hint" title="Enter 通过 · Backspace 不通过 · Ctrl+B 未执行 · ←/→ 切换用例 · Ctrl+P 画中画">
+            <Keyboard size={15} />
+            Enter 通过 · Backspace 不通过 · Ctrl+B 未执行 · ←/→ 切换
+          </span>
+          <button
+            type="button"
+            className="ghost-button"
+            disabled={!pip.supported}
+            aria-pressed={pip.pipWindow !== null}
+            title={pip.supported ? "在独立小窗口中查看当前用例（Ctrl+P）" : "当前浏览器不支持画中画"}
+            onClick={() => void pip.toggle(deskRef.current)}
+          >
+            <PictureInPicture2 size={16} />
+            {pip.pipWindow ? "关闭画中画" : "画中画"}
+          </button>
+        </div>
+        {pip.supported ? null : <p className="inline-status">当前浏览器不支持画中画，执行工作台可继续使用。</p>}
         {failure ? <p className="inline-status error" role="alert">{failure}</p> : null}
         {activeCase ? (
           <>
@@ -270,6 +338,7 @@ export function ExecutionView({
                 ) : null}
               </div>
               <OutcomeForm
+                ref={formRef}
                 onSave={(input) => void save(input)}
                 submitting={submitting}
                 images={images}

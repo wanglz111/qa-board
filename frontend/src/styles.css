@@ -52,6 +52,9 @@ table { width: 100%; border-collapse: collapse; font-size: .8rem; } th { color: 
 .execution-layout { display: grid; grid-template-columns: minmax(240px, 310px) minmax(0, 1fr); gap: 1px; background: #dde1e3; border: 1px solid #dde1e3; border-radius: 8px; overflow: hidden; }
 .execution-groups { min-height: calc(100vh - 124px); padding: 20px 0; background: #fff; }.execution-groups .section-heading { padding: 0 18px; margin-bottom: 16px; }
 .execution-desk { min-width: 0; min-height: calc(100vh - 124px); padding: 20px 22px 30px; background: #fff; }
+.execution-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 14px; }
+.shortcut-hint { display: inline-flex; align-items: center; gap: 7px; color: #7b8489; font-size: .74rem; }
+.pip-surface { padding: 16px; background: #fff; }.pip-surface .execution-toolbar { display: none; }
 .case-detail-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }.case-detail-heading h2 { margin-top: 2px; overflow-wrap: anywhere; }
 .case-detail-heading code { color: #176b57; }.case-stepper { display: flex; gap: 6px; flex-shrink: 0; }
 .case-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); gap: 5px 18px; margin: 16px 0 0; padding: 0; }

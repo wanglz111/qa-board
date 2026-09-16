@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { forwardRef, useImperativeHandle, useRef, useState } from "react";
 import { ImagePlus, LoaderCircle, RotateCcw, Save, X } from "lucide-react";
 
 import type { AttemptResult } from "../api";
@@ -14,6 +14,11 @@ export type SaveStatus = {
   text: string;
 };
 
+export type OutcomeFormHandle = {
+  setResult: (result: AttemptResult) => void;
+  focusNote: () => void;
+};
+
 type Props = {
   onSave: (input: SaveInput) => void;
   submitting: boolean;
@@ -25,19 +30,24 @@ type Props = {
 
 const RESULTS: AttemptResult[] = ["通过", "不通过", "未执行"];
 
-export function OutcomeForm({
-  onSave,
-  submitting,
-  images,
-  onImagesChange,
-  status,
-  onRetryUpload
-}: Props) {
+export const OutcomeForm = forwardRef<OutcomeFormHandle, Props>(function OutcomeForm(
+  { onSave, submitting, images, onImagesChange, status, onRetryUpload },
+  ref
+) {
   const [result, setResult] = useState<AttemptResult | null>(null);
   const [note, setNote] = useState("");
   const [consoleText, setConsoleText] = useState("");
   const [validation, setValidation] = useState("");
   const imageInput = useRef<HTMLInputElement>(null);
+  const noteInput = useRef<HTMLTextAreaElement>(null);
+
+  useImperativeHandle(ref, () => ({
+    setResult: (next: AttemptResult) => {
+      setResult(next);
+      setValidation("");
+    },
+    focusNote: () => noteInput.current?.focus()
+  }));
 
   function appendImages(files: File[]) {
     const additions = files.filter((file) => file.type.startsWith("image/"));
@@ -89,6 +99,7 @@ export function OutcomeForm({
       <label>
         失败说明
         <textarea
+          ref={noteInput}
           name="note"
           rows={3}
           value={note}
@@ -176,4 +187,4 @@ export function OutcomeForm({
       </div>
     </form>
   );
-}
+});
