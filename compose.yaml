@@ -1,0 +1,108 @@
+# TestDeck deployment: the server needs this file, infra/Caddyfile, and one
+# .env that pins the two published images. Nothing else is configured in place.
+name: testdeck
+
+x-lark-environment: &lark-environment
+  LARK_BASE_URL: ${LARK_BASE_URL:-https://open.larksuite.com}
+  LARK_APP_ID: ${LARK_APP_ID:-}
+  LARK_APP_SECRET: ${LARK_APP_SECRET:-}
+  LARK_APP_TOKEN: ${LARK_APP_TOKEN:-}
+  LARK_BUG_APP_TOKEN: ${LARK_BUG_APP_TOKEN:-}
+  LARK_TABLE_RUNS: ${LARK_TABLE_RUNS:-}
+  LARK_TABLE_DEFECTS: ${LARK_TABLE_DEFECTS:-}
+
+x-api-environment: &api-environment
+  # The password stays out of the URL, so any generated password works.
+  DATABASE_URL: postgresql+psycopg://testdeck@db:5432/testdeck
+  PGPASSWORD: ${DATABASE_PASSWORD:?DATABASE_PASSWORD is required}
+  ADMIN_EMAIL: ${ADMIN_EMAIL:?ADMIN_EMAIL is required}
+  ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD is required}
+  SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET is required}
+  CSRF_SECRET: ${CSRF_SECRET:?CSRF_SECRET is required}
+  SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-true}
+  UPLOAD_DIR: /data/screenshots
+  # The API sits behind two proxies; it has to trust their scheme and host so
+  # a same-origin login is not rejected as a cross-origin request.
+  FORWARDED_ALLOW_IPS: "*"
+  <<: *lark-environment
+
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: testdeck
+      POSTGRES_DB: testdeck
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:?DATABASE_PASSWORD is required}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U testdeck -d testdeck"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  # One-shot first-start initialization: migrate, then bootstrap the single
+  # administrator. Both steps are idempotent, so every restart is safe.
+  migrate:
+    image: ${API_IMAGE:?API_IMAGE is required}
+    restart: "no"
+    command: ["sh", "-c", "alembic upgrade head && python -m app.bootstrap"]
+    environment: *api-environment
+    depends_on:
+      db:
+        condition: service_healthy
+
+  api:
+    image: ${API_IMAGE:?API_IMAGE is required}
+    restart: unless-stopped
+    environment: *api-environment
+    volumes:
+      - screenshots:/data
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  worker:
+    image: ${API_IMAGE:?API_IMAGE is required}
+    restart: unless-stopped
+    command: ["python", "-m", "app.worker"]
+    environment: *api-environment
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  # Serves the built UI and proxies /api on the same origin. Not published.
+  web:
+    image: ${WEB_IMAGE:?WEB_IMAGE is required}
+    restart: unless-stopped
+    depends_on:
+      - api
+
+  # The only service that is reachable from outside.
+  proxy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    environment:
+      # ":80" keeps a plain-HTTP local run working; a real DOMAIN switches the
+      # proxy to automatic HTTPS.
+      SITE_ADDRESS: ${DOMAIN:-:80}
+    ports:
+      - "${PROXY_HTTP_PORT:-80}:80"
+      - "${PROXY_HTTPS_PORT:-443}:443"
+    volumes:
+      - ./infra/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - web
+
+volumes:
+  pgdata:
+  screenshots:
+  caddy_data:
+  caddy_config:

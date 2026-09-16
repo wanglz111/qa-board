@@ -1,0 +1,25 @@
+# Edge proxy: the only service that publishes ports. With DOMAIN set it
+# terminates TLS with an automatic certificate; without DOMAIN it serves plain
+# HTTP on port 80 so a local Compose run can be checked end to end.
+# Caddy only applies a placeholder default when the variable is unset, so the
+# ":80" fallback is provided by Compose instead of being written here.
+{$SITE_ADDRESS} {
+	encode zstd gzip
+
+	reverse_proxy web:8080 {
+		header_up X-Forwarded-Proto {scheme}
+		header_up X-Forwarded-Host {host}
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options nosniff
+		Referrer-Policy same-origin
+		-Server
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}

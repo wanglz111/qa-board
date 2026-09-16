@@ -1,0 +1,38 @@
+# Serves the built single-page app and keeps the browser on one origin by
+# proxying the API through the same host. Only the edge proxy publishes ports.
+:8080 {
+	encode zstd gzip
+	root * /srv
+
+	handle /api/* {
+		reverse_proxy api:8080 {
+			# Keep the scheme and host the browser used, otherwise the API
+			# would treat a same-origin login as cross-origin.
+			header_up X-Forwarded-Proto {http.request.header.X-Forwarded-Proto}
+			header_up X-Forwarded-Host {http.request.header.X-Forwarded-Host}
+		}
+	}
+
+	handle /health/* {
+		reverse_proxy api:8080 {
+			header_up X-Forwarded-Proto {http.request.header.X-Forwarded-Proto}
+			header_up X-Forwarded-Host {http.request.header.X-Forwarded-Host}
+		}
+	}
+
+	handle {
+		try_files {path} /index.html
+		file_server
+	}
+
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy same-origin
+		-Server
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}

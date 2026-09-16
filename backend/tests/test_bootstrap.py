@@ -1,5 +1,6 @@
 import os
 import subprocess
+from dataclasses import replace
 from unittest.mock import MagicMock
 
 import pytest
@@ -9,7 +10,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app.bootstrap import bootstrap
 from app.config import Settings
-from app.models import Admin
+from app.models import Admin, Group
 
 
 def config(*, email="admin@example.test", password="test-password") -> Settings:
@@ -88,3 +89,40 @@ def test_bootstrap_reraises_unrelated_integrity_error():
 
     assert raised.value is original
     session.rollback.assert_called_once_with()
+
+
+@pytest.fixture
+def seed_admin_group(db_session):
+    """A volume that already survived one container start."""
+
+    admin = bootstrap(db_session, config())
+    group = Group(
+        short_code="0918-abcdef",
+        name="Sprint 0918",
+        source_name="0918.csv",
+        source_sha256="1" * 64,
+        source_format="csv",
+        source_version="3",
+    )
+    db_session.add(group)
+    db_session.commit()
+    return admin.password_hash, group.id
+
+
+def test_second_boot_keeps_admin_and_group(db_session, seed_admin_group):
+    old_hash, old_group_id = seed_admin_group
+    restarted = config(email="replacement@example.test", password="replacement-password")
+
+    bootstrap(db_session, restarted)
+    bootstrap(db_session, restarted)
+
+    assert db_session.query(Admin).one().password_hash == old_hash
+    assert db_session.query(Group).one().id == old_group_id
+
+
+def test_bootstrap_prepares_the_upload_directory(db_session, tmp_path):
+    target = tmp_path / "screenshots"
+
+    bootstrap(db_session, replace(config(), upload_dir=str(target)))
+
+    assert target.is_dir()
