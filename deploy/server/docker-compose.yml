@@ -1,0 +1,103 @@
+# TestDeck on a host where an existing nginx container is the only public edge.
+#
+# This stack publishes no ports at all: the `web` container also joins the
+# external `monitor_net` network, so the existing nginx (compose project
+# `nginx`, config `/root/nginx/nginx.conf`) can reach it as `testdeck-web:8080`
+# and terminate `testdeck.<domain>` in front of it.
+#
+# The deployed copy of this file lives at /home/ubuntu/testdeck/docker-compose.yml
+# and is driven by the sibling `.env` (never committed). See
+# docs/HANDOFF-RELEASE.md for the release and rollback procedure.
+name: testdeck
+
+x-api-environment: &api-environment
+  DATABASE_URL: postgresql+psycopg://testdeck@db:5432/testdeck
+  PGPASSWORD: ${DATABASE_PASSWORD:?DATABASE_PASSWORD is required}
+  ADMIN_EMAIL: ${ADMIN_EMAIL:?ADMIN_EMAIL is required}
+  ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD is required}
+  SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET is required}
+  CSRF_SECRET: ${CSRF_SECRET:?CSRF_SECRET is required}
+  # Cloudflare terminates TLS, so the browser request is https while the
+  # origin hop to this container is http.
+  SESSION_COOKIE_SECURE: "true"
+  UPLOAD_DIR: /data/screenshots
+  # nginx and Caddy both sit in front of the API.
+  FORWARDED_ALLOW_IPS: "*"
+  LARK_BASE_URL: ${LARK_BASE_URL:-https://open.larksuite.com}
+  LARK_APP_ID: ${LARK_APP_ID:-}
+  LARK_APP_SECRET: ${LARK_APP_SECRET:-}
+
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: testdeck
+      POSTGRES_DB: testdeck
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:?DATABASE_PASSWORD is required}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U testdeck -d testdeck"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  # One-shot: migrate, then bootstrap the single administrator. Both steps are
+  # idempotent, so this runs on every start without resetting data.
+  migrate:
+    image: ${API_IMAGE:?API_IMAGE is required}
+    restart: "no"
+    command: ["sh", "-c", "alembic upgrade head && python -m app.bootstrap"]
+    environment: *api-environment
+    healthcheck:
+      disable: true
+    depends_on:
+      db:
+        condition: service_healthy
+
+  api:
+    image: ${API_IMAGE:?API_IMAGE is required}
+    restart: unless-stopped
+    environment: *api-environment
+    volumes:
+      - screenshots:/data
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  worker:
+    image: ${API_IMAGE:?API_IMAGE is required}
+    restart: unless-stopped
+    command: ["python", "-m", "app.worker"]
+    environment: *api-environment
+    healthcheck:
+      disable: true
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  # Caddy serves the built SPA and proxies /api on the same origin. It is not
+  # published; nginx reaches it over monitor_net.
+  web:
+    image: ${WEB_IMAGE:?WEB_IMAGE is required}
+    container_name: testdeck-web
+    restart: unless-stopped
+    depends_on:
+      - api
+    networks:
+      - default
+      - monitor_net
+
+networks:
+  # Created by the existing nginx compose project; must already exist.
+  monitor_net:
+    external: true
+
+volumes:
+  pgdata:
+  screenshots:
