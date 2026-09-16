@@ -38,6 +38,17 @@ describe("dispatchCaseKey", () => {
     expect(onPass).not.toHaveBeenCalled();
   });
 
+  it("leaves Enter to the focused control so a button keeps its own action", () => {
+    const onPass = vi.fn();
+    const button = document.createElement("button");
+    button.textContent = "不通过";
+    document.body.append(button);
+    button.focus();
+
+    expect(dispatchCaseKey(key({ key: "Enter" }), { onPass })).toBe(false);
+    expect(onPass).not.toHaveBeenCalled();
+  });
+
   it("submits a pass when nothing editable has focus", () => {
     const onPass = vi.fn();
     expect(dispatchCaseKey(key({ key: "Enter" }), onPass)).toBe(true);

@@ -22,12 +22,28 @@ export function isTypingTarget(target: EventTarget | null | undefined): boolean 
   return editable !== null && editable !== undefined && editable !== "false";
 }
 
+// Enter activates the focused control itself, so a focused button, link or
+// custom widget keeps its own meaning instead of being read as "通过".
+export function isEnterOwnedByControl(target: EventTarget | null | undefined): boolean {
+  const element = target as HTMLElement | null | undefined;
+  if (!element || typeof element.tagName !== "string") return false;
+  const tag = element.tagName.toLowerCase();
+  if (tag === "button" || tag === "a" || tag === "summary") return true;
+  const role = element.getAttribute?.("role");
+  return role === "button" || role === "tab" || role === "menuitem" || role === "switch";
+}
+
 // Keyboard shortcuts must never fire while the tester is typing a failure note,
 // so the check reads both the event target and the live focus owner. Tests build
 // bare KeyboardEvents, which carry no target even when a field holds focus.
 function isTypingContext(event: KeyboardEvent): boolean {
   if (isTypingTarget(event.target)) return true;
   return typeof document !== "undefined" && isTypingTarget(document.activeElement);
+}
+
+function isControlContext(event: KeyboardEvent): boolean {
+  if (isEnterOwnedByControl(event.target)) return true;
+  return typeof document !== "undefined" && isEnterOwnedByControl(document.activeElement);
 }
 
 export function resolveCaseKey(
@@ -37,6 +53,7 @@ export function resolveCaseKey(
   if (handlers.enabled === false) return null;
   if (event.defaultPrevented || event.altKey) return null;
   if (isTypingContext(event)) return null;
+  if (event.key === "Enter" && isControlContext(event)) return null;
   const ctrl = event.ctrlKey || event.metaKey;
   switch (event.key) {
     case "Enter":

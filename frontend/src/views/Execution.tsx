@@ -209,11 +209,25 @@ export function ExecutionView({
       setReserved(null);
       setAttempts(await loadAttempts(selectedGroupId, current.code));
       await refreshProgress(selectedGroupId);
-      void loadSync?.(selectedGroupId).then(setSync).catch(() => undefined);
+      let confirmed = sync?.confirmed ?? false;
+      if (loadSync) {
+        try {
+          const latestSync = await loadSync(selectedGroupId);
+          setSync(latestSync);
+          confirmed = latestSync.confirmed;
+        } catch {
+          // The badge keeps its previous value; the save itself already succeeded.
+        }
+      }
       const uploaded = await uploadAll(saved.id, images);
       setStatus(
         uploaded
-          ? { tone: "saved", text: "已保存到本地 · Lark 同步待确认（Plan 03）" }
+          ? {
+              tone: "saved",
+              text: confirmed
+                ? "已保存到本地 · 将新增到 Lark 旧表"
+                : "已保存到本地 · 尚未确认 Lark 目标表"
+            }
           : { tone: "error", text: "结果已保存到本地，但截图上传失败" }
       );
       if (uploaded) setImages([]);

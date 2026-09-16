@@ -83,7 +83,14 @@ export function usePiP(): PipWindowHandle {
         return current.current;
       }
 
-      const pip = await documentPictureInPicture.requestWindow({ width: 420, height: 620 });
+      // The browser can reject the request (no user activation, policy). The
+      // command then simply does nothing instead of raising an unhandled error.
+      let pip: PipWindow;
+      try {
+        pip = await documentPictureInPicture.requestWindow({ width: 420, height: 620 });
+      } catch {
+        return null;
+      }
       copyStyles(document, pip.document);
       const container = pip.document.createElement("div");
       container.className = "pip-surface";
