@@ -16,6 +16,7 @@ class Settings:
     admin_password: str
     session_secret: str
     csrf_secret: str
+    upload_dir: str = "uploads"
     session_cookie_secure: bool = False
     session_ttl_seconds: int = 28_800
 
@@ -38,6 +39,7 @@ settings = Settings(
     admin_password=_required_environment("ADMIN_PASSWORD"),
     session_secret=_required_environment("SESSION_SECRET"),
     csrf_secret=_required_environment("CSRF_SECRET"),
+    upload_dir=os.environ.get("UPLOAD_DIR") or "uploads",
     session_cookie_secure=_environment_flag("SESSION_COOKIE_SECURE"),
     session_ttl_seconds=_ttl,
 )

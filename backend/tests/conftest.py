@@ -1,12 +1,15 @@
 import os
+from dataclasses import replace
+from io import BytesIO
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from alembic import command
 from alembic.config import Config
 from argon2 import PasswordHasher
 from fastapi.testclient import TestClient
+from PIL import Image
 from sqlalchemy import create_engine, inspect
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.orm import Session
@@ -24,7 +27,9 @@ os.environ.setdefault("CSRF_SECRET", "test-only-csrf-secret-32-characters")
 
 from app.db import get_db
 from app.main import app
-from app.models import Admin, Group, GroupCase
+from app import screenshots
+from app.config import settings
+from app.models import Admin, Attempt, Group, GroupCase
 
 
 @pytest.fixture(scope="session")
@@ -150,3 +155,57 @@ def make_group_case():
         return group_case
 
     return factory
+
+
+@pytest.fixture
+def valid_png() -> bytes:
+    buffer = BytesIO()
+    Image.new("RGB", (1, 1), (255, 0, 0)).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+@pytest.fixture
+def upload_dir(tmp_path, monkeypatch) -> Path:
+    directory = tmp_path / "uploads"
+    directory.mkdir()
+    monkeypatch.setattr(
+        screenshots, "settings", replace(settings, upload_dir=str(directory))
+    )
+    return directory
+
+
+@pytest.fixture
+def local_attempt(db_session, make_group_case) -> Attempt:
+    group_case = make_group_case(db_session, group_name="0918", code="B-001")
+    attempt = Attempt(
+        group_case=group_case,
+        label="B-001",
+        sequence=1,
+        state="committed",
+        result="不通过",
+        note="binding failed",
+        idempotency_key="fixture-attempt-1",
+    )
+    db_session.add(attempt)
+    db_session.commit()
+    return attempt
+
+
+@pytest.fixture
+def attempt_id(local_attempt) -> UUID:
+    return local_attempt.id
+
+
+@pytest.fixture
+def anonymous_client(db_session) -> TestClient:
+    previous_override = app.dependency_overrides.get(get_db)
+    app.dependency_overrides[get_db] = lambda: db_session
+    try:
+        with TestClient(app) as test_client:
+            test_client.cookies.clear()
+            yield test_client
+    finally:
+        if previous_override is None:
+            app.dependency_overrides.pop(get_db, None)
+        else:
+            app.dependency_overrides[get_db] = previous_override
