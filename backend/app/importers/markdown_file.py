@@ -7,10 +7,11 @@ from typing import Any
 from .schema import ALIASES, ImportErrorDetail, decode_utf8
 
 
-CASE_HEADING = re.compile(
-    r"^####\s+(?P<code>[A-Za-z0-9]+-\d+(?:-[A-Za-z0-9]+)*)\s*(?:[·]\s*)?(?P<title>.*?)\s*$",
-    re.MULTILINE,
+H4_HEADING = re.compile(r"^####\s+(?P<body>.*?)\s*$", re.MULTILINE)
+CASE_HEADING_BODY = re.compile(
+    r"(?P<code>\S+?)(?:\s*·\s*|\s+)(?P<title>.+)"
 )
+LIKELY_CASE_CODE = re.compile(r"[A-Za-z0-9]+-\d+(?:-[A-Za-z0-9]+)*")
 BREAK = re.compile(r"<br\s*/?>", re.IGNORECASE)
 BOLD_SECTION = re.compile(r"^\*\*(?P<name>[^*]+)\*\*\s*$", re.MULTILINE)
 
@@ -25,29 +26,58 @@ def parse_markdown(content: bytes) -> list[dict[str, Any]]:
 
 
 def _heading_cases(text: str) -> list[dict[str, Any]]:
-    matches = list(CASE_HEADING.finditer(text))
+    matches = list(H4_HEADING.finditer(text))
     records: list[dict[str, Any]] = []
     for index, match in enumerate(matches):
         end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        section = text[match.end() : end]
         field_tables = [
             table
-            for table in _tables(text[match.end() : end])
+            for table in _tables(section)
             if len(table[0]) == 2 and _markdown_value(table[0][0]) in {"字段", "项", "Field"}
         ]
+        heading = CASE_HEADING_BODY.fullmatch(match.group("body"))
+        if heading is None or not LIKELY_CASE_CODE.fullmatch(heading.group("code")):
+            if field_tables:
+                raise ImportErrorDetail(
+                    "Markdown case boundaries are incomplete: a field table follows an unrecognized H4 heading"
+                )
+            continue
         if not field_tables:
+            if LIKELY_CASE_CODE.fullmatch(heading.group("code")):
+                raise ImportErrorDetail(
+                    f"Markdown case boundaries are incomplete: {heading.group('code')} has no case field table"
+                )
+            continue
+        if len(field_tables) > 1:
             raise ImportErrorDetail(
-                f"Markdown case boundaries are incomplete: {match.group('code')} has no case field table"
+                f"Markdown case boundaries are ambiguous: {heading.group('code')} has multiple case field tables"
             )
         fields: dict[str, Any] = {
-            "用例编号": match.group("code"),
-            "用例标题": _markdown_value(match.group("title")),
+            "用例编号": heading.group("code"),
+            "用例标题": _markdown_value(heading.group("title")),
         }
+        code_aliases = {alias.casefold() for alias in ALIASES["code"]}
+        title_aliases = {alias.casefold() for alias in ALIASES["title"]}
         for table in field_tables:
             for row in table[1:]:
                 if len(row) != 2:
                     raise ImportErrorDetail("Markdown case field table has an inconsistent column count")
-                fields[_markdown_value(row[0])] = _markdown_value(row[1])
-        section = text[match.end() : end]
+                key = _markdown_value(row[0])
+                value = _markdown_value(row[1])
+                if key.casefold() in code_aliases:
+                    if value != fields["用例编号"]:
+                        raise ImportErrorDetail(
+                            f"Markdown case code {value} conflicts with heading {fields['用例编号']}"
+                        )
+                    continue
+                if key.casefold() in title_aliases:
+                    if value != fields["用例标题"]:
+                        raise ImportErrorDetail(
+                            f"Markdown case title {value} conflicts with heading {fields['用例标题']}"
+                        )
+                    continue
+                fields[key] = value
         steps = _section_body(section, "执行步骤")
         if steps:
             fields["执行步骤"] = _steps_text(steps)
@@ -110,7 +140,28 @@ def _is_table_line(line: str) -> bool:
 
 
 def _split_row(line: str) -> list[str]:
-    return [cell.strip() for cell in line.strip().strip("|").split("|")]
+    content = line.strip()[1:-1]
+    cells: list[str] = []
+    current: list[str] = []
+    escaped = False
+    for character in content:
+        if escaped:
+            if character == "|":
+                current.append(character)
+            else:
+                current.extend(("\\", character))
+            escaped = False
+        elif character == "\\":
+            escaped = True
+        elif character == "|":
+            cells.append("".join(current).strip())
+            current = []
+        else:
+            current.append(character)
+    if escaped:
+        current.append("\\")
+    cells.append("".join(current).strip())
+    return cells
 
 
 def _is_separator(row: list[str]) -> bool:

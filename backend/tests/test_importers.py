@@ -161,3 +161,77 @@ def test_markdown_heading_without_a_case_field_table_is_rejected():
 
     with pytest.raises(ImportErrorDetail, match="case boundaries"):
         parse_file("report.md", report.encode())
+
+
+def test_csv_rejects_an_unclosed_quoted_field():
+    content = b'id,title\nX-1,"First\nX-2,Second\n'
+
+    with pytest.raises(ImportErrorDetail, match="Invalid CSV"):
+        parse_file("broken.csv", content)
+
+
+def test_json_rejects_fractional_positions_and_nonstandard_numbers():
+    fractional = b'[{"id":"X-1","order":1.9,"title":"Fractional"}]'
+    nonstandard = b'[{"id":"X-1","title":"Not finite","priority":NaN}]'
+
+    with pytest.raises(ImportErrorDetail, match="invalid position"):
+        parse_file("fractional.json", fractional)
+    with pytest.raises(ImportErrorDetail, match="Invalid JSON"):
+        parse_file("nan.json", nonstandard)
+
+
+def test_markdown_table_preserves_escaped_pipes():
+    markdown = """\
+| 编号 | 标题 | 步骤 | 预期 |
+| --- | --- | --- | --- |
+| T-001 | Filter | Enter a \\| b | Shows a \\| b |
+"""
+
+    case = parse_file("pipes.md", markdown.encode())[0]
+
+    assert case.steps == "Enter a | b"
+    assert case.expected == "Shows a | b"
+
+
+def test_markdown_unrecognized_h4_cannot_be_merged_into_previous_case():
+    markdown = """\
+#### M-001 · First
+| 字段 | 内容 |
+| --- | --- |
+| 用例编号 | M-001 |
+| 用例标题 | First |
+
+#### 登录场景
+| 字段 | 内容 |
+| --- | --- |
+| 用例编号 | M-002 |
+| 用例标题 | Second |
+"""
+
+    with pytest.raises(ImportErrorDetail, match="case boundaries"):
+        parse_file("merged.md", markdown.encode())
+
+
+def test_markdown_heading_identity_cannot_be_overwritten_by_its_table():
+    markdown = """\
+#### M-001 · First
+| 字段 | 内容 |
+| --- | --- |
+| 用例编号 | M-999 |
+| 用例标题 | First |
+"""
+
+    with pytest.raises(ImportErrorDetail, match="conflicts with heading"):
+        parse_file("conflict.md", markdown.encode())
+
+
+def test_markdown_document_heading_with_field_table_is_not_a_case():
+    markdown = """\
+#### Feature overview
+| Field | Value |
+| --- | --- |
+| Owner | QA |
+"""
+
+    with pytest.raises(ImportErrorDetail, match="case boundaries"):
+        parse_file("guide.md", markdown.encode())

@@ -10,7 +10,7 @@ from .schema import ImportErrorDetail, decode_utf8
 def parse_csv(content: bytes) -> list[dict[str, Any]]:
     text = decode_utf8(content, bom=True)
     try:
-        reader = csv.DictReader(io.StringIO(text))
+        reader = csv.DictReader(io.StringIO(text), strict=True)
         if not reader.fieldnames or not any(name and name.strip() for name in reader.fieldnames):
             raise ImportErrorDetail("The CSV file is missing a header row")
         records = list(reader)

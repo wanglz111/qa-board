@@ -129,7 +129,9 @@ def normalize_record(
                     raise ValueError
                 position = int(position_match.group(1))
             else:
-                position = int(raw_position)
+                if isinstance(raw_position, bool) or not isinstance(raw_position, int):
+                    raise ValueError
+                position = raw_position
         except (TypeError, ValueError) as exc:
             raise ImportErrorDetail(f"Case {code} has invalid position: {raw_position}") from exc
         if position < 1:
