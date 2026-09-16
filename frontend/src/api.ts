@@ -257,6 +257,28 @@ export type LegacyHistory = {
   unknown_count: number;
 };
 
+export type ReconcileRow = {
+  key: string;
+  case_code: string;
+  label: string;
+  status: "same" | "local_only" | "remote_only" | "conflict" | "unmatched";
+  differing: string[];
+  local: { attempt_id: string; result: string | null; console_text: string | null } | null;
+  remote: { record_id: string | null; result: string | null; console_text: string | null } | null;
+  decision: "use_remote" | "use_local" | null;
+};
+
+export type ReconcileDiff = {
+  source: "live" | "stored";
+  source_table_name: string | null;
+  read_errors: string[];
+  rows: ReconcileRow[];
+  counts: Record<ReconcileRow["status"], number>;
+  unresolved: number;
+};
+
+export type ReconcileDecision = { key: string; action: "use_remote" | "use_local" };
+
 export class ApiError extends Error {
   // ``detail`` stays raw because a refusal is a string while a change request
   // is an object; callers decide which shape they are looking at.
@@ -418,5 +440,16 @@ export const api = {
       `/api/groups/${groupId}/cases/${encodeURIComponent(code)}/lark-history`
     ),
   legacyAttachmentUrl: (refId: string, index: number) =>
-    `/api/lark/history/${refId}/attachments/${index}`
+    `/api/lark/history/${refId}/attachments/${index}`,
+  reconcile: (groupId: string, source: "live" | "stored") =>
+    request<ReconcileDiff>(`/api/groups/${groupId}/reconcile?source=${source}`),
+  applyReconcile: (groupId: string, decisions: ReconcileDecision[]) =>
+    mutation<{ pulled: number; kept: number; skipped: { key: string; reason: string }[] }>(
+      `/api/groups/${groupId}/reconcile/apply`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ decisions })
+      }
+    )
 };

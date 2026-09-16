@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { FileSpreadsheet, FileStack, FlaskConical, ListChecks, LogOut, ShieldCheck, Upload } from "lucide-react";
+import { FileSpreadsheet, FileStack, FlaskConical, GitCompare, ListChecks, LogOut, ShieldCheck, Upload } from "lucide-react";
 
 import { ApiError, api, type User } from "./api";
 import { ExecutionView } from "./views/Execution";
@@ -7,9 +7,10 @@ import { GroupsView } from "./views/Groups";
 import { ImportView } from "./views/Import";
 import { LarkCheckView } from "./views/LarkCheck";
 import { LoginView } from "./views/Login";
+import { Reconcile } from "./views/Reconcile";
 import { ReportsView } from "./views/Reports";
 
-type View = "execute" | "groups" | "import" | "reports" | "lark";
+type View = "execute" | "groups" | "import" | "reports" | "lark" | "reconcile";
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
@@ -42,6 +43,7 @@ export default function App() {
           <button className={view === "import" ? "active" : ""} onClick={() => setView("import")}><Upload size={17} />导入</button>
           <button className={view === "reports" ? "active" : ""} onClick={() => setView("reports")}><FileSpreadsheet size={17} />报告</button>
           <button className={view === "lark" ? "active" : ""} onClick={() => setView("lark")}><ShieldCheck size={17} />Lark 检查</button>
+          <button className={view === "reconcile" ? "active" : ""} onClick={() => setView("reconcile")}><GitCompare size={17} />对账</button>
         </nav>
         <div className="account"><span>{user.email}</span><button className="icon-button" title="退出登录" aria-label="退出登录" onClick={async () => { await api.logout(); setUser(null); }}><LogOut size={17} /></button></div>
       </header>
@@ -78,6 +80,8 @@ export default function App() {
             enqueueSync={api.enqueueSync}
             retrySync={api.retrySync}
           />
+        ) : view === "reconcile" ? (
+          <Reconcile loadGroups={api.groups} load={api.reconcile} apply={api.applyReconcile} />
         ) : (
           <ImportView preview={api.preview} confirm={api.confirm} onImported={() => setRefreshKey((key) => key + 1)} />
         )}
