@@ -1,8 +1,14 @@
 import os
+from pathlib import Path
+from uuid import uuid4
 
 import pytest
-from sqlalchemy import create_engine
+from alembic import command
+from alembic.config import Config
+from sqlalchemy import create_engine, inspect
+from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.orm import Session
+from sqlalchemy.schema import CreateSchema, DropSchema
 
 from app.models import Group, GroupCase
 
@@ -17,14 +23,56 @@ os.environ.setdefault("SESSION_SECRET", "test-only-session-secret-32-characters"
 os.environ.setdefault("CSRF_SECRET", "test-only-csrf-secret-32-characters")
 
 
-@pytest.fixture
-def db_session():
+@pytest.fixture(scope="session")
+def migrated_database() -> Engine:
     test_database_url = os.environ.get("TEST_DATABASE_URL")
     if not test_database_url:
         pytest.fail("TEST_DATABASE_URL is required for database integration tests")
 
-    engine = create_engine(test_database_url)
-    connection = engine.connect()
+    schema = f"testdeck_test_{uuid4().hex}"
+    administrative_engine = create_engine(test_database_url)
+    with administrative_engine.begin() as connection:
+        connection.execute(CreateSchema(schema))
+
+    isolated_engine = None
+
+    try:
+        isolated_url = make_url(test_database_url).update_query_dict(
+            {"options": f"-csearch_path={schema}"}
+        )
+        isolated_database_url = isolated_url.render_as_string(hide_password=False)
+        alembic_config = Config(str(Path(__file__).parents[1] / "alembic.ini"))
+        previous_database_url = os.environ.get("DATABASE_URL")
+        isolated_engine = create_engine(isolated_url)
+
+        with isolated_engine.connect() as connection:
+            if inspect(connection).get_table_names():
+                pytest.fail("isolated test schema must start empty")
+
+        try:
+            os.environ["DATABASE_URL"] = isolated_database_url
+            command.upgrade(alembic_config, "head")
+            command.upgrade(alembic_config, "head")
+        finally:
+            if previous_database_url is None:
+                os.environ.pop("DATABASE_URL", None)
+            else:
+                os.environ["DATABASE_URL"] = previous_database_url
+
+        yield isolated_engine
+    finally:
+        if isolated_engine is not None:
+            isolated_engine.dispose()
+        try:
+            with administrative_engine.begin() as connection:
+                connection.execute(DropSchema(schema, cascade=True, if_exists=True))
+        finally:
+            administrative_engine.dispose()
+
+
+@pytest.fixture
+def db_session(migrated_database):
+    connection = migrated_database.connect()
     transaction = connection.begin()
     session = Session(bind=connection, join_transaction_mode="create_savepoint")
 
@@ -34,7 +82,6 @@ def db_session():
         session.close()
         transaction.rollback()
         connection.close()
-        engine.dispose()
 
 
 @pytest.fixture

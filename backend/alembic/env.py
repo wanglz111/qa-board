@@ -11,7 +11,8 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-config.set_main_option("sqlalchemy.url", os.environ["DATABASE_URL"])
+database_url = os.environ["DATABASE_URL"].replace("%", "%%")
+config.set_main_option("sqlalchemy.url", database_url)
 target_metadata = Base.metadata
 
 
