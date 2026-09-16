@@ -93,7 +93,7 @@ GIT_SSH_COMMAND="ssh -o ProxyCommand=none" git push origin main
 GIT_SSH_COMMAND="ssh -o ProxyCommand=none" git push origin v0.1.3
 ```
 
-`main` 目前尚未在远端存在过；第一次推送会新建该分支（`--dry-run` 已验证有权限）。
+远端现在是 `main` = `feature/cloud-testdeck` = `760d9af`，标签 `v0.1.2`。
 
 ### 4.2 GitHub Actions：镜像发布
 
@@ -118,7 +118,7 @@ sudo docker compose --env-file .env -f docker-compose.yml up -d --pull always
 sudo docker compose --env-file .env -f docker-compose.yml ps
 ```
 
-装了 `deploy.sh` 的话，上面三步合成一条：`./deploy.sh v0.1.3`。
+服务器上已经放好了 `deploy.sh`，上面三步可以合成一条：`./deploy.sh v0.1.3`。
 
 ### 4.4 验收（每次发版都做）
 
@@ -213,6 +213,22 @@ Cloudflare 侧只需 `testdeck.gleaftex.com` 的 A 记录指向 `43.167.241.33`�
 ## 10. 这次交付做了什么（v0.1.2）
 
 - 把 `feature/cloud-testdeck` 的 62 个提交合并进 `main`（快进），并打了 `v0.1.2`；此前远端只有 `feature/cloud-testdeck`、`v0.1.0`、`v0.1.1`。
+- GitHub Actions 运行 [#3](https://github.com/wanglz111/qa-board/actions/runs/35097363739) 成功：`verify`（后端 pytest + 前端 vitest/build + compose 校验）与两个 `publish` 都是 success，镜像 `v0.1.2` 与 `sha-760d9af` 已推到 GHCR，服务器匿名拉取成功。
 - 服务器 `/home/ubuntu/testdeck/` 只放 `docker-compose.yml` + `.env`，从公开 GHCR 镜像拉起 4 个容器，未克隆仓库、未改动其他项目。
 - 在既有 `nginx-proxy` 上新增 `testdeck.gleaftex.com` 的 server 块（原配置文件已备份为 `/root/nginx/nginx.conf.bak-20260916`），TestDeck 的 `web` 容器加入 `monitor_net`，两边网络打通。其他 server 块、dozzle、sub2api 等未改动。
-- 域名 `testdeck.gleaftex.com` 走 Cloudflare 橙云 → 源站 80 → nginx → 应用，已验证健康检查、登录、401/403 行为。
+- 升级前把服务器原文件备份为 `docker-compose.yml.bak-20260916-204637` 与 `.env.bak-20260916-204637`，并让服务器上的 compose 与本仓库 `deploy/server/docker-compose.yml` 保持一致。
+
+升级后的实测结果（全部在真实域名上跑通）：
+
+| 检查 | 结果 |
+| --- | --- |
+| `docker compose ps` | api（healthy）、db（healthy）、worker、web 全部是 `ghcr.io/wanglz111/qa-board-*:v0.1.2` |
+| 一次性 `migrate` | 退出码 0，日志显示 `0008 -> 0009_lark_targets -> 0010_reconcile_marks` |
+| `GET /health/ready` | 200 `{"ok":true}` |
+| 匿名 `GET /api/groups` | 401 |
+| `GET /api/lark/resolve`（0.1.2 才有的 POST 路由） | 405 |
+| 带会话 `GET /api/groups/…/reconcile` | 401（路由存在，要求登录） |
+| 管理员登录 + `/api/auth/me` | 200，账号在升级后未被重置 |
+| multipart 导入预览（2 条用例的 CSV + CSRF） | 200，正确解析 `B-001` / `B-002` |
+| 同一请求去掉 CSRF | 403 `Invalid CSRF token` |
+| `GET /` | 200，返回 SPA |
