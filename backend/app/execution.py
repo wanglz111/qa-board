@@ -57,6 +57,7 @@ def _attempt_payload(attempt: Attempt) -> dict[str, Any]:
         "result": attempt.result,
         "note": attempt.note,
         "console_text": attempt.console_text,
+        "source": attempt.source,
         "created_at": attempt.created_at,
     }
 

@@ -53,6 +53,7 @@ export type Attempt = {
   result: AttemptResult | null;
   note: string | null;
   console_text: string | null;
+  source: "execution" | "reconcile";
   created_at: string;
 };
 

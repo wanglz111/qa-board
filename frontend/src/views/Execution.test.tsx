@@ -43,6 +43,7 @@ function committed(id: string, label: string, result: Attempt["result"], note: s
     result,
     note,
     console_text: null,
+    source: "execution",
     created_at: "2026-09-16T09:00:00Z"
   };
 }
@@ -145,6 +146,7 @@ it("reserves a retest label before committing it", async () => {
     result: null,
     note: null,
     console_text: null,
+    source: "execution",
     created_at: "2026-09-16T10:00:00Z"
   };
   const reserveRetest = vi.fn().mockResolvedValue(reserved);
@@ -179,4 +181,20 @@ it("keeps the saved result when a screenshot upload fails and offers a retry", a
 
   expect(await screen.findByText(/结果已保存到本地，但截图上传失败/)).toBeVisible();
   expect(screen.getByRole("button", { name: /重试上传截图/ })).toBeVisible();
+});
+
+it("marks a history row adopted from the table as table-sourced", async () => {
+  renderExecution({
+    initialGroupId: "0918-id",
+    loadAttempts: async () => [
+      committed("attempt-1", "B-001", "不通过", "本地执行"),
+      { ...committed("attempt-2", "B-001-R0918-01", "通过", null), source: "reconcile" }
+    ]
+  });
+
+  await screen.findByText(/本地执行/);
+  const badge = screen.getByText("来自表内对账");
+  expect(badge).toBeVisible();
+  expect(badge.closest("li")).toHaveTextContent("B-001-R0918-01");
+  expect(screen.getAllByText("来自表内对账")).toHaveLength(1);
 });

@@ -319,3 +319,60 @@ def test_a_racing_apply_is_told_the_record_is_already_reconciled(
         len(db_session.scalars(select(Attempt).where(Attempt.source == "reconcile")).all())
         == 1
     )
+
+
+def test_a_table_sourced_attempt_is_never_queued_for_sync(
+    lark_fake, authenticated_client, confirmed_group, failed_attempt, db_session
+):
+    from app.models import SyncJob
+
+    lark_fake.records = [
+        {"record_id": "r1", "fields": {"用例": "B-001 管理员登录", "结果": "通过"}}
+    ]
+    authenticated_client.post(
+        f"/api/groups/{confirmed_group.id}/reconcile/apply",
+        json={"decisions": [{"key": "B-001", "action": "use_remote"}]},
+    )
+    body = authenticated_client.post(f"/api/groups/{confirmed_group.id}/sync/enqueue").json()
+
+    assert body["queued"] == 1
+    labels = db_session.scalars(
+        select(Attempt.label).join(SyncJob, SyncJob.attempt_id == Attempt.id)
+    ).all()
+    assert labels == ["B-001"]
+
+
+def test_sync_status_does_not_count_table_sourced_attempts(
+    lark_fake, authenticated_client, confirmed_group, failed_attempt
+):
+    lark_fake.records = [
+        {"record_id": "r1", "fields": {"用例": "B-001 管理员登录", "结果": "通过"}}
+    ]
+    authenticated_client.post(
+        f"/api/groups/{confirmed_group.id}/reconcile/apply",
+        json={"decisions": [{"key": "B-001", "action": "use_remote"}]},
+    )
+    assert authenticated_client.get(f"/api/groups/{confirmed_group.id}/sync").json()[
+        "pending_attempts"
+    ] == 1
+
+
+def test_attempt_payload_and_report_expose_the_source(
+    lark_fake, authenticated_client, confirmed_group, failed_attempt
+):
+    lark_fake.records = [
+        {"record_id": "r1", "fields": {"用例": "B-001 管理员登录", "结果": "通过"}}
+    ]
+    authenticated_client.post(
+        f"/api/groups/{confirmed_group.id}/reconcile/apply",
+        json={"decisions": [{"key": "B-001", "action": "use_remote"}]},
+    )
+    attempts = authenticated_client.get(
+        f"/api/groups/{confirmed_group.id}/cases/B-001/attempts"
+    ).json()
+    assert [attempt["source"] for attempt in attempts] == ["execution", "reconcile"]
+
+    report = authenticated_client.get(f"/api/groups/{confirmed_group.id}/reports.csv").text
+    header, *lines = report.splitlines()
+    assert header.split(",")[-1] == "source"
+    assert lines[0].endswith("reconcile")

@@ -28,6 +28,9 @@ export function History({ attempts }: Props) {
                 <span className={`result-badge ${RESULT_CLASS[attempt.result ?? ""] ?? ""}`}>
                   {attempt.result ?? "未提交"}
                 </span>
+                {attempt.source === "reconcile" ? (
+                  <span className="attempt-source">来自表内对账</span>
+                ) : null}
                 <time dateTime={attempt.created_at}>
                   {new Date(attempt.created_at).toLocaleString()}
                 </time>

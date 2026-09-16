@@ -61,6 +61,7 @@ const ATTEMPTS: Attempt[] = [
     result: "不通过",
     note: "本组失败说明",
     console_text: null,
+    source: "execution",
     created_at: "2026-09-16T11:00:00Z"
   }
 ];

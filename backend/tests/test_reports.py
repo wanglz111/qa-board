@@ -61,6 +61,9 @@ def test_csv_contains_source_metadata_latest_attempt_and_counts(
     assert first_row["history_count"] == "2"
     assert first_row["screenshot_count"] == "1"
     assert first_row["executed_at"]
+    # Provenance closes the row, and a locally executed attempt says so.
+    assert list(first_row)[-1] == "source"
+    assert first_row["source"] == "execution"
     assert rows[1]["title"] == "'+SUM(1,1)"
     assert rows[1]["result"] == ""
     assert rows[1]["history_count"] == "0"
@@ -83,6 +86,7 @@ def test_xlsx_keeps_malicious_text_literal(
     sheet = workbook.active
     headers = [cell.value for cell in sheet[1]]
     assert headers[headers.index("title")] == "title"
+    assert headers[-1] == "source"
     titles = [sheet.cell(row=index, column=headers.index("title") + 1).value for index in (3, 4)]
     assert titles == ["'=HYPERLINK(\"https://unsafe.test\")", "'@SUM(A1)"]
     assert sheet.cell(row=2, column=headers.index("source file") + 1).value == "0918.csv"

@@ -57,7 +57,13 @@ def enqueue_attempt_job(db: Session, attempt: Attempt) -> SyncJob | None:
 
     group_id = attempt.group_case.group_id
     target = target_for(db, group_id)
-    if attempt.state != "committed" or target is None or target.confirmed_at is None:
+    # A row adopted from the table already exists there, so it is never queued.
+    if (
+        attempt.state != "committed"
+        or attempt.source != "execution"
+        or target is None
+        or target.confirmed_at is None
+    ):
         return None
     job = SyncJob(
         attempt_id=attempt.id,
@@ -82,7 +88,11 @@ def enqueue_group_attempts(db: Session, group_id: UUID) -> int:
     attempt_ids = db.scalars(
         select(Attempt.id)
         .join(GroupCase, Attempt.group_case_id == GroupCase.id)
-        .where(GroupCase.group_id == group_id, Attempt.state == "committed")
+        .where(
+            GroupCase.group_id == group_id,
+            Attempt.state == "committed",
+            Attempt.source == "execution",
+        )
     ).all()
     if not attempt_ids:
         return 0
@@ -304,7 +314,11 @@ def read_sync(group_id: UUID, db: Annotated[Session, Depends(get_db)]) -> dict[s
         select(func.count())
         .select_from(Attempt)
         .join(GroupCase, Attempt.group_case_id == GroupCase.id)
-        .where(GroupCase.group_id == group_id, Attempt.state == "committed")
+        .where(
+            GroupCase.group_id == group_id,
+            Attempt.state == "committed",
+            Attempt.source == "execution",
+        )
     )
     counts = sync_counts(db, group_id)
     return {
