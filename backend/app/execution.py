@@ -93,27 +93,41 @@ def _locked_case_or_404(db: Session, group_id: UUID, code: str) -> GroupCase:
     return group_case
 
 
-def _reserve_attempt(db: Session, group_case: GroupCase) -> Attempt:
+def allocate_attempt(
+    db: Session, group_case: GroupCase, *, label: str | None = None
+) -> Attempt:
+    """Reserve the next append-only slot for one case.
+
+    ``sequence`` is always the highest for the case, so the newest committed row
+    is the one progress and reports read. ``label`` may be supplied to name an
+    adopted row after the record it mirrors, and falls back to the group's own
+    retest rule when the name is already taken.
+    """
+
     last_sequence = db.scalar(
         select(func.max(Attempt.sequence)).where(
             Attempt.group_case_id == group_case.id
         )
     )
     sequence = (last_sequence or 0) + 1
-    label = (
+    resolved = label or (
         group_case.code
         if sequence == 1
         else f"{group_case.code}-R{group_case.group.short_code}-{sequence - 1:02}"
     )
     attempt = Attempt(
         group_case=group_case,
-        label=label,
+        label=resolved,
         sequence=sequence,
         state="started",
     )
     db.add(attempt)
     db.flush()
     return attempt
+
+
+def _reserve_attempt(db: Session, group_case: GroupCase) -> Attempt:
+    return allocate_attempt(db, group_case)
 
 
 def _commit_attempt(attempt: Attempt, payload: AttemptCreate) -> None:

@@ -23,6 +23,7 @@ EXPECTED_TABLES = {
     "lark_history_refs",
     "lark_target_revisions",
     "lark_targets",
+    "reconcile_marks",
     "screenshots",
     "sync_jobs",
 }
@@ -32,10 +33,17 @@ def test_empty_test_schema_upgrades_to_head_twice(migrated_database):
     with migrated_database.connect() as connection:
         assert set(inspect(connection).get_table_names()) == EXPECTED_TABLES
         assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-            "0009_lark_targets"
+            "0010_reconcile_marks"
         )
         assert "target_fingerprint" in {
             column["name"] for column in inspect(connection).get_columns("sync_jobs")
+        }
+        assert "source" in {
+            column["name"] for column in inspect(connection).get_columns("attempts")
+        }
+        assert "ck_attempts_source" in {
+            constraint["name"]
+            for constraint in inspect(connection).get_check_constraints("attempts")
         }
 
 
@@ -151,7 +159,7 @@ def test_short_code_backfill_keeps_existing_groups_addressable(database_at_0004)
 
     with database_at_0004.connect() as connection:
         assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-            "0009_lark_targets"
+            "0010_reconcile_marks"
         )
         assert connection.scalar(
             text("SELECT short_code FROM groups WHERE id = :id"), {"id": group_id}

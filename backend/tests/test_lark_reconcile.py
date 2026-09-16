@@ -65,3 +65,64 @@ def test_an_empty_remote_result_is_a_conflict_not_a_failure():
         local=[], remote=[_remote("B-001 管理员登录", "")], known_codes={"B-001"}
     )
     assert rows[0]["remote"]["result"] == "未执行"
+
+
+def test_live_read_compares_the_bound_table_with_the_local_database(
+    lark_fake, authenticated_client, confirmed_group, failed_attempt
+):
+    lark_fake.records = [
+        {"record_id": "r1", "fields": {"用例": "B-001 管理员登录", "结果": "通过"}},
+        {"record_id": "r2", "fields": {"用例": "B-009 只存在于表里", "结果": "不通过"}},
+    ]
+    body = authenticated_client.get(
+        f"/api/groups/{confirmed_group.id}/reconcile?source=live"
+    ).json()
+
+    assert body["source"] == "live"
+    assert body["source_table_name"] == "执行记录"
+    by_key = {row["key"]: row for row in body["rows"]}
+    assert by_key["B-001"]["status"] == "conflict"
+    assert by_key["B-009"]["status"] == "unmatched"
+    assert by_key["B-009"]["case_code"] == "B-009"
+    assert body["counts"]["conflict"] == 1
+    assert body["unresolved"] == 2
+
+
+def test_stored_read_uses_persisted_snapshots(
+    authenticated_client, confirmed_group, failed_attempt, history_ref
+):
+    body = authenticated_client.get(
+        f"/api/groups/{confirmed_group.id}/reconcile?source=stored"
+    ).json()
+    assert body["source"] == "stored"
+    assert body["rows"][0]["remote"]["record_id"] == "old1"
+
+
+def test_reconcile_needs_a_selected_table(authenticated_client, imported_group):
+    body = authenticated_client.get(
+        f"/api/groups/{imported_group.id}/reconcile?source=live"
+    ).json()
+    assert body["read_errors"] == ["该组尚未选择 Lark 表"]
+    assert body["rows"] == []
+
+
+def test_the_diff_ignores_attempts_that_came_from_the_table(
+    lark_fake, authenticated_client, confirmed_group, failed_attempt, db_session
+):
+    from app.execution import allocate_attempt
+
+    case = failed_attempt.group_case
+    adopted = allocate_attempt(db_session, case, label="B-001-R0918-01")
+    adopted.state = "committed"
+    adopted.result = "通过"
+    adopted.source = "reconcile"
+    db_session.commit()
+    lark_fake.records = []
+
+    body = authenticated_client.get(
+        f"/api/groups/{confirmed_group.id}/reconcile?source=live"
+    ).json()
+    # The adopted copy mirrors the table, so it must not become a "local" row
+    # that then looks like it is missing from Lark.
+    assert [row["key"] for row in body["rows"]] == ["B-001"]
+    assert body["rows"][0]["status"] == "local_only"

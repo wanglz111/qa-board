@@ -118,6 +118,9 @@ class Attempt(Base):
             "(state = 'committed' AND result IN ('通过', '不通过', '未执行'))",
             name="ck_attempts_state_result",
         ),
+        CheckConstraint(
+            "source IN ('execution', 'reconcile')", name="ck_attempts_source"
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
@@ -131,6 +134,9 @@ class Attempt(Base):
     note: Mapped[str | None] = mapped_column(Text)
     console_text: Mapped[str | None] = mapped_column(Text)
     idempotency_key: Mapped[str | None] = mapped_column(String, unique=True)
+    source: Mapped[str] = mapped_column(
+        String, nullable=False, server_default="execution", default="execution"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -283,5 +289,28 @@ class SyncJob(Base):
     target_fingerprint: Mapped[str | None] = mapped_column(String)
     error_kind: Mapped[str | None] = mapped_column(String)
     created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class ReconcileMark(Base):
+    """One administrator decision about one record key, so it stops resurfacing."""
+
+    __tablename__ = "reconcile_marks"
+    __table_args__ = (
+        UniqueConstraint("group_id", "record_key", name="uq_reconcile_key"),
+        CheckConstraint(
+            "decision IN ('use_remote', 'use_local')", name="ck_reconcile_decision"
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    group_id: Mapped[UUID] = mapped_column(
+        ForeignKey("groups.id", ondelete="CASCADE"), nullable=False
+    )
+    record_key: Mapped[str] = mapped_column(String, nullable=False)
+    decision: Mapped[str] = mapped_column(String, nullable=False)
+    remote_record_id: Mapped[str | None] = mapped_column(String)
+    decided_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
