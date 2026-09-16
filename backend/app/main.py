@@ -2,6 +2,7 @@ from fastapi import Depends, FastAPI, Response, status
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.auth import require_csrf_for_mutation, router as auth_router
+from app.case_assets import router as case_assets_router
 from app.db import database_is_ready
 from app.execution import router as execution_router
 from app.groups import router as groups_router
@@ -16,6 +17,7 @@ from app.screenshots import router as screenshots_router
 
 app = FastAPI(title="TestDeck", dependencies=[Depends(require_csrf_for_mutation)])
 app.include_router(auth_router)
+app.include_router(case_assets_router)
 app.include_router(groups_router)
 app.include_router(execution_router)
 app.include_router(screenshots_router)

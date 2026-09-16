@@ -10,10 +10,10 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from pydantic import BaseModel, Field, StringConstraints
 from sqlalchemy import func, select, update
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.auth import require_admin
-from app.case_assets import new_storage_key, reference_path
+from app.case_assets import link_payload, new_storage_key, reference_path
 from app.db import get_db
 from app.importers.casebook import (
     BundleFocus,
@@ -194,6 +194,11 @@ def list_group_cases(
     cases = db.scalars(
         select(GroupCase)
         .where(GroupCase.group_id == group_id)
+        .options(
+            selectinload(GroupCase.reference_links).selectinload(
+                CaseReferenceLink.asset
+            )
+        )
         .order_by(GroupCase.position)
     ).all()
     return [
@@ -209,6 +214,10 @@ def list_group_cases(
             "test_data": case.test_data,
             "steps": case.steps,
             "expected": case.expected,
+            "expect_absent": case.expect_absent,
+            "visual_check": case.visual_check,
+            "prototype_note": case.prototype_note,
+            "reference_assets": [link_payload(link) for link in case.reference_links],
         }
         for case in cases
     ]
