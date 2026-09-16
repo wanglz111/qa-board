@@ -13,9 +13,22 @@ from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from app.auth import require_admin
+from app.case_assets import new_storage_key, reference_path
 from app.db import get_db
+from app.importers.casebook import (
+    BundleFocus,
+    CasebookDocument,
+    MAX_BUNDLE_BYTES,
+    parse_casebook,
+)
 from app.importers.schema import ImportErrorDetail, MAX_FILE_SIZE, ParsedCase, parse_file
-from app.models import Group, GroupCase, ImportTicket
+from app.models import (
+    CaseReferenceAsset,
+    CaseReferenceLink,
+    Group,
+    GroupCase,
+    ImportTicket,
+)
 
 
 TICKET_TTL = timedelta(minutes=30)
@@ -36,8 +49,25 @@ async def preview_import(
     db: Annotated[Session, Depends(get_db)],
 ) -> dict[str, Any]:
     filename = file.filename or "upload"
-    content = await file.read(MAX_FILE_SIZE + 1)
-    cases = _parse_or_422(filename, content)
+    is_casebook = Path(filename).suffix.lower() == ".zip"
+    limit = MAX_BUNDLE_BYTES if is_casebook else MAX_FILE_SIZE
+    content = await file.read(limit + 1)
+    if is_casebook:
+        document = _parse_casebook_or_422(content)
+        parsed = _casebook_ticket_payload(filename, document)
+        preview = _casebook_preview_payload(document)
+    else:
+        text_cases = _parse_or_422(filename, content)
+        parsed = {
+            "source_name": filename,
+            "cases": [asdict(case) for case in text_cases],
+        }
+        preview = {
+            "count": len(text_cases),
+            "cases": [_case_payload(case) for case in text_cases[:10]],
+            "fields": sorted({str(key) for case in text_cases for key in case.raw}),
+        }
+
     now = datetime.now(timezone.utc)
     file_sha256 = hashlib.sha256(content).hexdigest()
     duplicate = db.scalar(
@@ -52,25 +82,19 @@ async def preview_import(
     ticket = ImportTicket(
         file_sha256=file_sha256,
         original_file=content,
-        parsed={
-            "source_name": filename,
-            "cases": [asdict(case) for case in cases],
-        },
+        parsed=parsed,
         expires_at=now + TICKET_TTL,
     )
     db.add(ticket)
     db.commit()
     db.refresh(ticket)
 
-    fields = sorted({str(key) for case in cases for key in case.raw})
     return {
         "ticket_id": ticket.id,
         "detected_format": Path(filename).suffix.lower().lstrip("."),
-        "count": len(cases),
-        "cases": [_case_payload(case) for case in cases[:10]],
-        "fields": fields,
         "errors": [],
         "warnings": ["This file was imported before"] if duplicate else [],
+        **preview,
     }
 
 
@@ -96,8 +120,21 @@ def confirm_import(
         raise HTTPException(status_code=410, detail="Import ticket expired")
 
     source_name = str(ticket.parsed["source_name"])
-    cases = _parse_or_422(source_name, ticket.original_file, payload.mapping or None)
     group_id = uuid4()
+    written: list[Path] = []
+    if ticket.parsed.get("casebook"):
+        document = _parse_casebook_or_422(ticket.original_file)
+        group_cases, written = _casebook_group_cases(document, group_id)
+        asset_count = len(document.assets)
+        link_count = sum(len(case.references) for case in document.cases)
+    else:
+        parsed_cases = _parse_or_422(
+            source_name, ticket.original_file, payload.mapping or None
+        )
+        group_cases = [_group_case(case) for case in parsed_cases]
+        asset_count = 0
+        link_count = 0
+
     group = Group(
         id=group_id,
         short_code=_group_short_code(payload.name, group_id),
@@ -106,14 +143,25 @@ def confirm_import(
         source_sha256=ticket.file_sha256,
         source_format=Path(source_name).suffix.lower().lstrip("."),
         source_version=ticket.file_sha256[:12],
-        cases=[_group_case(case) for case in cases],
+        cases=group_cases,
     )
     ticket.consumed_at = now
     ticket.original_file = b""
     db.add(group)
-    db.commit()
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        for path in written:
+            path.unlink(missing_ok=True)
+        raise
     db.refresh(group)
-    return {"id": group.id, "count": len(cases)}
+    return {
+        "id": group.id,
+        "count": len(group_cases),
+        "reference_asset_count": asset_count,
+        "reference_link_count": link_count,
+    }
 
 
 @router.get("/groups")
@@ -175,6 +223,182 @@ def _parse_or_422(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
+def _parse_casebook_or_422(content: bytes) -> CasebookDocument:
+    try:
+        return parse_casebook(content)
+    except ImportErrorDetail as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+def _focus_payload(focus: BundleFocus) -> dict[str, Any]:
+    return {
+        "label": focus.label,
+        "note": focus.note,
+        "box": list(focus.box) if focus.box is not None else None,
+    }
+
+
+def _casebook_ticket_payload(
+    filename: str, document: CasebookDocument
+) -> dict[str, Any]:
+    """Store metadata only; the image bytes stay inside original_file."""
+
+    return {
+        "source_name": filename,
+        "casebook": True,
+        "title": document.title,
+        "prototype_version": document.prototype_version,
+        "assets": [
+            {
+                "asset_key": asset.asset_key,
+                "name": asset.name,
+                "asset_type": asset.asset_type,
+                "screen": asset.screen,
+                "state": asset.state,
+                "source_path": asset.source_path,
+                "mime": asset.mime,
+                "size_bytes": len(asset.content),
+                "width": asset.width,
+                "height": asset.height,
+            }
+            for asset in document.assets.values()
+        ],
+        "cases": [
+            {
+                "code": case.code,
+                "position": case.position,
+                "title": case.title,
+                "module": case.module,
+                "layer": case.layer,
+                "priority": case.priority,
+                "preconditions": case.preconditions,
+                "test_data": case.test_data,
+                "steps": case.steps,
+                "expected": case.expected,
+                "expect_absent": list(case.expect_absent),
+                "visual_check": case.visual_check,
+                "prototype_note": case.prototype_note,
+                "raw": case.raw,
+                "references": [
+                    {
+                        "asset_key": reference.asset_key,
+                        "role": reference.role,
+                        "caption": reference.caption,
+                        "focus": [_focus_payload(item) for item in reference.focus],
+                    }
+                    for reference in case.references
+                ],
+            }
+            for case in document.cases
+        ],
+    }
+
+
+def _casebook_preview_payload(document: CasebookDocument) -> dict[str, Any]:
+    return {
+        "count": len(document.cases),
+        "title": document.title,
+        "prototype_version": document.prototype_version,
+        "reference_asset_count": len(document.assets),
+        "reference_link_count": sum(len(case.references) for case in document.cases),
+        "fields": [
+            "code",
+            "title",
+            "position",
+            "module",
+            "priority",
+            "preconditions",
+            "steps",
+            "expected",
+            "expect_absent",
+            "visual_check",
+        ],
+        "cases": [
+            {
+                "code": case.code,
+                "position": case.position,
+                "title": case.title,
+                "module": case.module,
+                "layer": case.layer,
+                "priority": case.priority,
+                "preconditions": case.preconditions,
+                "test_data": case.test_data,
+                "steps": case.steps,
+                "expected": case.expected,
+                "expect_absent": list(case.expect_absent),
+                "visual_check": case.visual_check,
+                "reference_asset_count": len(case.references),
+            }
+            for case in document.cases[:10]
+        ],
+    }
+
+
+def _casebook_group_cases(
+    document: CasebookDocument, group_id: UUID
+) -> tuple[list[GroupCase], list[Path]]:
+    written: list[Path] = []
+    assets: dict[str, CaseReferenceAsset] = {}
+    try:
+        for key, asset in document.assets.items():
+            storage_key = new_storage_key(asset.suffix)
+            target = reference_path(storage_key)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(asset.content)
+            written.append(target)
+            assets[key] = CaseReferenceAsset(
+                group_id=group_id,
+                asset_key=key,
+                name=asset.name,
+                storage_key=storage_key,
+                mime=asset.mime,
+                size_bytes=len(asset.content),
+                width=asset.width,
+                height=asset.height,
+                asset_type=asset.asset_type,
+                screen=asset.screen,
+                state=asset.state,
+                source_path=asset.source_path,
+                prototype_version=asset.prototype_version,
+            )
+        group_cases = [
+            GroupCase(
+                code=case.code,
+                position=case.position,
+                title=case.title,
+                module=case.module,
+                layer=case.layer,
+                priority=case.priority,
+                preconditions=case.preconditions,
+                test_data=case.test_data,
+                steps=case.steps,
+                expected=case.expected,
+                expect_absent=list(case.expect_absent),
+                visual_check=case.visual_check,
+                prototype_note=case.prototype_note,
+                raw=case.raw,
+                reference_links=[
+                    CaseReferenceLink(
+                        asset=assets[reference.asset_key],
+                        role=reference.role,
+                        caption=reference.caption,
+                        focus=[_focus_payload(item) for item in reference.focus],
+                        sort_order=index,
+                    )
+                    for index, reference in enumerate(case.references)
+                ],
+            )
+            for case in document.cases
+        ]
+    except OSError as exc:
+        for path in written:
+            path.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=500, detail="Could not store the reference image"
+        ) from exc
+    return group_cases, written
+
+
 def _case_payload(case: ParsedCase) -> dict[str, Any]:
     payload = asdict(case)
     payload.pop("raw")
@@ -182,7 +406,11 @@ def _case_payload(case: ParsedCase) -> dict[str, Any]:
 
 
 def _group_case(case: ParsedCase) -> GroupCase:
-    return GroupCase(**asdict(case))
+    return GroupCase(
+        **asdict(case),
+        expect_absent=[],
+        visual_check="text_and_visual",
+    )
 
 
 def _group_short_code(name: str, group_id: UUID) -> str:

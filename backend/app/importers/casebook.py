@@ -433,8 +433,6 @@ def _read_entries(content: bytes) -> dict[str, bytes]:
                 raise ImportErrorDetail(
                     f"The bundle member {name} is damaged, truncated or encrypted"
                 ) from exc
-    if not entries:
-        raise ImportErrorDetail("The bundle contains no files")
     return entries
 
 

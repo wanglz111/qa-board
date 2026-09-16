@@ -31,7 +31,7 @@ os.environ.setdefault("CSRF_SECRET", "test-only-csrf-secret-32-characters")
 
 from app.db import get_db
 from app.main import app
-from app import screenshots
+from app import case_assets, screenshots
 from app.config import settings
 from app.lark import client as lark_client_module
 from app.lark.client import LarkClient, get_lark_client
@@ -665,9 +665,9 @@ def valid_png() -> bytes:
 def upload_dir(tmp_path, monkeypatch) -> Path:
     directory = tmp_path / "uploads"
     directory.mkdir()
-    monkeypatch.setattr(
-        screenshots, "settings", replace(settings, upload_dir=str(directory))
-    )
+    patched = replace(settings, upload_dir=str(directory))
+    monkeypatch.setattr(screenshots, "settings", patched)
+    monkeypatch.setattr(case_assets, "settings", patched)
     return directory
 
 
