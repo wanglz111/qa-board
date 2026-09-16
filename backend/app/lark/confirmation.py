@@ -158,28 +158,3 @@ def confirm_group_target(
     db.commit()
     db.refresh(confirmation)
     return _serialize(confirmation, valid=True) or {}
-
-
-@router.get("/groups/{group_id}/sync")
-def read_sync(
-    group_id: UUID,
-    db: Annotated[Session, Depends(get_db)],
-) -> dict[str, Any]:
-    _group_or_404(db, group_id)
-    confirmation = _confirmation_or_none(db, group_id)
-    pending_attempts = db.scalar(
-        select(func.count())
-        .select_from(Attempt)
-        .join(GroupCase, Attempt.group_case_id == GroupCase.id)
-        .where(GroupCase.group_id == group_id, Attempt.state == "committed")
-    )
-    return {
-        "confirmed": confirmation is not None,
-        "queued": 0,
-        "pending_attempts": int(pending_attempts or 0),
-        "detail": (
-            "目标表已确认，可显式排入同步"
-            if confirmation is not None
-            else "尚未确认目标表，本地结果不会写入 Lark"
-        ),
-    }

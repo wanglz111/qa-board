@@ -144,3 +144,58 @@ it("marks an earlier confirmation invalid when the target changed", async () => 
   expect(await screen.findByText(/此前的确认已失效/)).toBeVisible();
   expect(screen.getByRole("button", { name: /确认本组写入目标/ })).toBeDisabled();
 });
+
+it("queues previously saved local attempts only after confirmation", async () => {
+  const enqueueSync = vi.fn().mockResolvedValue({ queued: 2 });
+  const loadSync = vi
+    .fn()
+    .mockResolvedValueOnce({
+      confirmed: true,
+      queued: 0,
+      synced: 1,
+      failed: 0,
+      uncertain: 0,
+      last_error_kind: null,
+      pending_attempts: 2,
+      detail: "目标表已确认，可显式排入同步"
+    })
+    .mockResolvedValueOnce({
+      confirmed: true,
+      queued: 2,
+      synced: 1,
+      failed: 0,
+      uncertain: 0,
+      last_error_kind: null,
+      pending_attempts: 2,
+      detail: "目标表已确认，可显式排入同步"
+    });
+  renderCheck({
+    loadConfirmation: async () => ({
+      ...unconfirmed(),
+      confirmed: true,
+      confirmation: {
+        group_id: GROUP.id,
+        base_token: "app-token",
+        execution_table_id: "tbl-runs",
+        bug_table_id: "tbl-defects",
+        base_name: "旧版测试管理",
+        execution_table_name: "执行记录",
+        bug_table_name: "缺陷记录",
+        schema_fingerprint: "schema-1",
+        target_fingerprint: "target-1",
+        confirmed_at: "2026-09-16T10:00:00Z",
+        valid: true
+      }
+    }),
+    loadSync,
+    enqueueSync
+  });
+
+  expect(await screen.findByText(/已同步 1/)).toBeVisible();
+  const queueButton = screen.getByRole("button", { name: /把已保存的本地结果排入同步/ });
+  await userEvent.click(queueButton);
+
+  expect(enqueueSync).toHaveBeenCalledWith("0918-id");
+  expect(await screen.findByText(/已排入 2 条本地结果/)).toBeVisible();
+  expect(await screen.findByText(/待同步 2/)).toBeVisible();
+});

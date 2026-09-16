@@ -23,6 +23,7 @@ EXPECTED_TABLES = {
     "import_tickets",
     "lark_history_refs",
     "screenshots",
+    "sync_jobs",
 }
 
 
@@ -30,7 +31,7 @@ def test_empty_test_schema_upgrades_to_head_twice(migrated_database):
     with migrated_database.connect() as connection:
         assert set(inspect(connection).get_table_names()) == EXPECTED_TABLES
         assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-            "0007_group_confirmation"
+            "0008_sync_jobs"
         )
 
 
@@ -146,7 +147,7 @@ def test_short_code_backfill_keeps_existing_groups_addressable(database_at_0004)
 
     with database_at_0004.connect() as connection:
         assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-            "0007_group_confirmation"
+            "0008_sync_jobs"
         )
         assert connection.scalar(
             text("SELECT short_code FROM groups WHERE id = :id"), {"id": group_id}

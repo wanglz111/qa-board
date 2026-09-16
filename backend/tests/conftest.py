@@ -1,4 +1,5 @@
 import os
+import json
 from dataclasses import replace
 from io import BytesIO
 from pathlib import Path
@@ -35,7 +36,15 @@ from app.lark import client as lark_client_module
 from app.lark.client import LarkClient, get_lark_client
 from app.lark.fields import REQUIRED_BUG_FIELD_TYPES, REQUIRED_RUN_FIELD_TYPES
 from app.lark.history import history_for
-from app.models import Admin, Attempt, Group, GroupCase, LarkHistoryRef
+from app.lark.write import HttpLarkWriteGateway
+from app.models import (
+    Admin,
+    Attempt,
+    Group,
+    GroupCase,
+    GroupLarkConfirmation,
+    LarkHistoryRef,
+)
 
 
 @pytest.fixture(scope="session")
@@ -231,11 +240,28 @@ class FakeLark:
         self.defects_table_name = "缺陷记录"
         self.media: dict[str, tuple[bytes, str]] = {}
         self.requests: list[dict[str, str]] = []
+        self.created_records: list[dict[str, Any]] = []
+        self.created_execution = 0
+        self.created_bug = 0
+        self.put_calls: list[str] = []
+        self.delete_calls: list[str] = []
+        self.old_bug_status = "待修复"
+        self.timeout_after_create = False
+        self.create_error = False
+        self.fail_bug_create = False
+        self.hide_created_records = False
         self.client = LarkClient(
             base_url="https://open.feishu.test",
             app_id="test-app-id",
             app_secret="test-app-secret",
             transport=httpx.MockTransport(self.handle),
+        )
+        self._gateway = HttpLarkWriteGateway(
+            self.client,
+            run_app_token="app-token",
+            run_table_id="tbl-runs",
+            bug_app_token="app-token",
+            bug_table_id="tbl-defects",
         )
 
     @property
@@ -249,9 +275,25 @@ class FakeLark:
     def history_for(self, code: str):
         return history_for(self.records, code)
 
+    # The worker only needs this create-only surface, so the double speaks it.
+    def create_execution(self, fields: dict[str, Any]) -> str:
+        return self._gateway.create_execution(fields)
+
+    def create_bug(self, fields: dict[str, Any]) -> str:
+        return self._gateway.create_bug(fields)
+
+    def find_execution_ids(self, label: str) -> list[str]:
+        return self._gateway.find_execution_ids(label)
+
     def handle(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
         self.requests.append({"method": request.method, "path": path})
+        if request.method in ("PUT", "PATCH", "DELETE"):
+            if request.method == "DELETE":
+                self.delete_calls.append(path)
+            else:
+                self.put_calls.append(path)
+            return httpx.Response(405, json={"code": 1, "msg": "legacy rows are read-only"})
         if path == "/open-apis/auth/v3/tenant_access_token/internal":
             return httpx.Response(200, json={"code": 0, "data": {"tenant_access_token": "fake-token"}})
         if "/medias/" in path and path.endswith("/download"):
@@ -260,6 +302,30 @@ class FakeLark:
                 return httpx.Response(404, json={"code": 1, "msg": "not found"})
             content, mime = self.media[token]
             return httpx.Response(200, content=content, headers={"content-type": mime})
+        if path.endswith("/records") and request.method == "POST":
+            body = json.loads(request.content or b"{}")
+            is_bug = "tbl-defects" in path
+            if (is_bug and self.fail_bug_create) or (not is_bug and self.create_error):
+                if is_bug:
+                    self.fail_bug_create = False
+                else:
+                    self.create_error = False
+                return httpx.Response(500, json={"code": 1, "msg": "create failed"})
+            record = {
+                "record_id": f"new-{len(self.created_records) + 1}",
+                "fields": body.get("fields", {}),
+            }
+            self.created_records.append(record)
+            if is_bug:
+                self.created_bug += 1
+            else:
+                self.created_execution += 1
+                if not self.hide_created_records:
+                    self.records.append(record)
+            if self.timeout_after_create:
+                self.timeout_after_create = False
+                raise httpx.ReadTimeout("create timed out")
+            return httpx.Response(200, json={"code": 0, "data": {"record": record}})
         if path.endswith("/fields"):
             fields = self.bug_fields if "tbl-defects" in path else self.fields
             return httpx.Response(200, json={"code": 0, "data": {"items": fields, "has_more": False}})
@@ -319,6 +385,13 @@ def lark_fake(monkeypatch) -> FakeLark:
 
 
 @pytest.fixture
+def fake_lark(lark_fake) -> FakeLark:
+    """Alias used by the outbox tests for the same recording Lark double."""
+
+    return lark_fake
+
+
+@pytest.fixture
 def history_ref(db_session, imported_group) -> LarkHistoryRef:
     group_case = db_session.scalar(
         select(GroupCase).where(GroupCase.group_id == imported_group.id)
@@ -351,6 +424,70 @@ def known_table_names() -> dict[str, str]:
         "execution_table_id": "tbl-runs",
         "bug_table_id": "tbl-defects",
     }
+
+
+@pytest.fixture
+def confirmed_group(db_session, imported_group) -> Group:
+    db_session.add(
+        GroupLarkConfirmation(
+            group_id=imported_group.id,
+            base_token="app-token",
+            execution_table_id="tbl-runs",
+            bug_table_id="tbl-defects",
+            base_name="旧版测试管理",
+            execution_table_name="执行记录",
+            bug_table_name="缺陷记录",
+            schema_fingerprint="schema-fixture",
+            target_fingerprint="target-fixture",
+        )
+    )
+    db_session.commit()
+    return imported_group
+
+
+@pytest.fixture
+def unconfirmed_group(db_session) -> Group:
+    group_id = uuid4()
+    group = Group(
+        id=group_id,
+        short_code=f"0922-{group_id.hex[:6]}",
+        name="Sprint 0922",
+        source_name="0922.csv",
+        source_sha256="2" * 64,
+        source_format="csv",
+        source_version="2",
+    )
+    db_session.add(
+        GroupCase(
+            group=group,
+            code="B-001",
+            position=1,
+            title="钱包绑定",
+            raw={"code": "B-001"},
+        )
+    )
+    db_session.commit()
+    return group
+
+
+@pytest.fixture
+def failed_attempt(db_session, confirmed_group) -> Attempt:
+    group_case = db_session.scalar(
+        select(GroupCase).where(GroupCase.group_id == confirmed_group.id)
+    )
+    attempt = Attempt(
+        group_case=group_case,
+        label="B-001",
+        sequence=1,
+        state="committed",
+        result="不通过",
+        note="绑定未触发",
+        console_text="wallet.bind timeout",
+        idempotency_key="fixture-failed-1",
+    )
+    db_session.add(attempt)
+    db_session.commit()
+    return attempt
 
 
 @pytest.fixture

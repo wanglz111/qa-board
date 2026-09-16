@@ -20,6 +20,10 @@ class LarkError(RuntimeError):
     """A Lark read failed; the message never contains credentials or tokens."""
 
 
+class LarkTimeout(LarkError):
+    """The write may or may not have reached Lark: never retried blindly."""
+
+
 @dataclass(frozen=True)
 class LarkCall:
     method: str
@@ -169,3 +173,31 @@ class LarkClient:
         except httpx.HTTPError as error:
             raise LarkError(f"Lark attachment download failed: {type(error).__name__}") from None
         return response.content, response.headers.get("content-type", "application/octet-stream")
+
+    def create_record(
+        self, app_token: str, table_id: str, fields: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Create one brand-new record; no legacy record is ever touched."""
+
+        path = f"/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records"
+        headers = {"Authorization": f"Bearer {self._token_value()}"}
+        self.calls.append(LarkCall(method="POST", path=path))
+        try:
+            response = self._client.post(path, json={"fields": fields}, headers=headers)
+            response.raise_for_status()
+        except httpx.TimeoutException as error:
+            raise LarkTimeout(f"Lark create timed out: {type(error).__name__}") from None
+        except httpx.HTTPError as error:
+            raise LarkError(f"Lark create failed: {type(error).__name__}") from None
+        try:
+            body = response.json()
+        except ValueError:
+            raise LarkError("Lark returned a non-JSON response") from None
+        code = body.get("code")
+        if code not in (0, None):
+            raise LarkError(f"Lark rejected the create (code {code})")
+        data = body.get("data")
+        record = (data or {}).get("record") if isinstance(data, dict) else None
+        if not isinstance(record, dict) or not record.get("record_id"):
+            raise LarkError("Lark create returned no record id")
+        return record

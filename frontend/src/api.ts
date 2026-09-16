@@ -120,6 +120,10 @@ export type LarkConfirmationState = {
 export type SyncStatus = {
   confirmed: boolean;
   queued: number;
+  synced: number;
+  failed: number;
+  uncertain: number;
+  last_error_kind: string | null;
   pending_attempts: number;
   detail: string;
 };
@@ -239,5 +243,7 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload)
     }),
-  syncStatus: (groupId: string) => request<SyncStatus>(`/api/groups/${groupId}/sync`)
+  syncStatus: (groupId: string) => request<SyncStatus>(`/api/groups/${groupId}/sync`),
+  enqueueSync: (groupId: string) =>
+    mutation<{ queued: number }>(`/api/groups/${groupId}/sync/enqueue`, { method: "POST" })
 };

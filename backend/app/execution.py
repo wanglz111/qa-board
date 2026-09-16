@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.auth import require_admin
 from app.db import get_db
+from app.lark.outbox import enqueue_attempt_job
 from app.models import Attempt, Group, GroupCase
 
 
@@ -158,6 +159,9 @@ def create_attempt(
             return _attempt_payload(existing)
         attempt = _reserve_attempt(db, group_case)
         _commit_attempt(attempt, payload)
+        # A confirmed group queues the outbound create in the same transaction
+        # as the local attempt, so the two can never disagree.
+        enqueue_attempt_job(db, attempt)
         db.commit()
         db.refresh(attempt)
         return _attempt_payload(attempt)
@@ -203,6 +207,7 @@ def submit_attempt(
     if attempt.state != "started":
         raise HTTPException(status_code=409, detail="Attempt is already committed")
     _commit_attempt(attempt, payload)
+    enqueue_attempt_job(db, attempt)
     db.commit()
     db.refresh(attempt)
     return _attempt_payload(attempt)

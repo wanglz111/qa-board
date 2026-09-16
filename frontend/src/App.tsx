@@ -68,6 +68,8 @@ export default function App() {
             loadCheck={api.larkCheck}
             loadConfirmation={api.larkConfirmation}
             confirm={api.confirmLark}
+            loadSync={api.syncStatus}
+            enqueueSync={api.enqueueSync}
           />
         ) : (
           <ImportView preview={api.preview} confirm={api.confirm} onImported={() => setRefreshKey((key) => key + 1)} />

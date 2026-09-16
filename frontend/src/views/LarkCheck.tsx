@@ -1,12 +1,13 @@
 import { useEffect, useState } from "react";
-import { LoaderCircle, ShieldCheck, ShieldOff } from "lucide-react";
+import { LoaderCircle, ShieldCheck, ShieldOff, Upload } from "lucide-react";
 
 import type {
   Group,
   LarkCheck,
   LarkConfirmPayload,
   LarkConfirmation,
-  LarkConfirmationState
+  LarkConfirmationState,
+  SyncStatus
 } from "../api";
 
 type Props = {
@@ -14,6 +15,8 @@ type Props = {
   loadCheck: () => Promise<LarkCheck>;
   loadConfirmation: (groupId: string) => Promise<LarkConfirmationState>;
   confirm: (groupId: string, payload: LarkConfirmPayload) => Promise<LarkConfirmation>;
+  loadSync?: (groupId: string) => Promise<SyncStatus>;
+  enqueueSync?: (groupId: string) => Promise<{ queued: number }>;
   initialGroupId?: string;
 };
 
@@ -22,6 +25,8 @@ export function LarkCheckView({
   loadCheck,
   loadConfirmation,
   confirm,
+  loadSync,
+  enqueueSync,
   initialGroupId
 }: Props) {
   const [groups, setGroups] = useState<Group[]>([]);
@@ -32,6 +37,8 @@ export function LarkCheckView({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [sync, setSync] = useState<SyncStatus | null>(null);
+  const [queueing, setQueueing] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -59,6 +66,9 @@ export function LarkCheckView({
     loadConfirmation(groupId)
       .then((result) => !cancelled && setState(result))
       .catch((reason) => !cancelled && setError(reason instanceof Error ? reason.message : "读取确认状态失败"));
+    loadSync?.(groupId)
+      .then((result) => !cancelled && setSync(result))
+      .catch(() => !cancelled && setSync(null));
     return () => {
       cancelled = true;
     };
@@ -114,6 +124,22 @@ export function LarkCheckView({
       setError(reason instanceof Error ? reason.message : "确认失败");
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function queueSavedAttempts() {
+    if (!enqueueSync) return;
+    setQueueing(true);
+    setError("");
+    try {
+      const result = await enqueueSync(groupId);
+      setNotice(`已排入 ${result.queued} 条本地结果，仅新增记录`);
+      const refreshed = await loadSync?.(groupId);
+      if (refreshed) setSync(refreshed);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "排入同步失败");
+    } finally {
+      setQueueing(false);
     }
   }
 
@@ -197,6 +223,26 @@ export function LarkCheckView({
           {busy ? <LoaderCircle className="spin" size={16} /> : <ShieldCheck size={16} />}
           确认本组写入目标
         </button>
+        {confirmed ? (
+          <div className="lark-queue">
+            <p className="inline-status">
+              待同步 {sync?.queued ?? 0} · 已同步 {sync?.synced ?? 0} · 失败 {sync?.failed ?? 0} · 待人工确认 {sync?.uncertain ?? 0}
+              {sync?.last_error_kind ? ` · 最近错误 ${sync.last_error_kind}` : ""}
+            </p>
+            {enqueueSync ? (
+              <button
+                type="button"
+                className="ghost-button"
+                disabled={queueing || (sync?.pending_attempts ?? 0) === 0}
+                onClick={() => void queueSavedAttempts()}
+              >
+                {queueing ? <LoaderCircle className="spin" size={16} /> : <Upload size={16} />}
+                把已保存的本地结果排入同步
+              </button>
+            ) : null}
+            <p className="attachment-hint">同步只新增执行记录；不通过时会新增缺陷，旧记录与旧缺陷不会被修改。</p>
+          </div>
+        ) : null}
         {notice ? <p className="inline-status saved" role="status">{notice}</p> : null}
         {error ? <p className="inline-status error" role="alert">{error}</p> : null}
       </div>

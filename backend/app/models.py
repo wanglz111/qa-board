@@ -225,3 +225,30 @@ class GroupLarkConfirmation(Base):
     confirmed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+
+class SyncJob(Base):
+    """One outbound Lark create per local attempt, claimed under a lease."""
+
+    __tablename__ = "sync_jobs"
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('pending', 'running', 'synced', 'failed', 'uncertain')",
+            name="ck_sync_jobs_state",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    attempt_id: Mapped[UUID] = mapped_column(
+        ForeignKey("attempts.id", ondelete="CASCADE"), nullable=False, unique=True
+    )
+    state: Mapped[str] = mapped_column(String, nullable=False, default="pending")
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    new_exec_record_id: Mapped[str | None] = mapped_column(String)
+    new_bug_record_id: Mapped[str | None] = mapped_column(String)
+    error_kind: Mapped[str | None] = mapped_column(String)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
