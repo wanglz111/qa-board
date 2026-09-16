@@ -1,0 +1,91 @@
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Any
+from uuid import UUID, uuid4
+
+from sqlalchemy import (
+    DateTime,
+    ForeignKey,
+    Integer,
+    LargeBinary,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+class Admin(Base):
+    __tablename__ = "admins"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    email: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    password_hash: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class Group(Base):
+    __tablename__ = "groups"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    source_name: Mapped[str] = mapped_column(String, nullable=False)
+    source_sha256: Mapped[str] = mapped_column(String, nullable=False)
+    source_format: Mapped[str] = mapped_column(String, nullable=False)
+    source_version: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    cases: Mapped[list[GroupCase]] = relationship(
+        back_populates="group", cascade="all, delete-orphan", passive_deletes=True
+    )
+
+
+class GroupCase(Base):
+    __tablename__ = "group_cases"
+    __table_args__ = (
+        UniqueConstraint("group_id", "code", name="uq_group_case_code"),
+        UniqueConstraint("group_id", "position", name="uq_group_case_position"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    group_id: Mapped[UUID] = mapped_column(
+        ForeignKey("groups.id", ondelete="CASCADE"), nullable=False
+    )
+    code: Mapped[str] = mapped_column(String, nullable=False)
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    title: Mapped[str] = mapped_column(String, nullable=False)
+    module: Mapped[str | None] = mapped_column(String)
+    layer: Mapped[str | None] = mapped_column(String)
+    priority: Mapped[str | None] = mapped_column(String)
+    preconditions: Mapped[str | None] = mapped_column(Text)
+    test_data: Mapped[str | None] = mapped_column(Text)
+    steps: Mapped[str | None] = mapped_column(Text)
+    expected: Mapped[str | None] = mapped_column(Text)
+    raw: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+
+    group: Mapped[Group] = relationship(back_populates="cases")
+
+
+class ImportTicket(Base):
+    __tablename__ = "import_tickets"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    file_sha256: Mapped[str] = mapped_column(String, nullable=False)
+    original_file: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    parsed: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
