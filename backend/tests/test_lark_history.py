@@ -277,6 +277,32 @@ def test_case_history_endpoint_reports_a_target_that_cannot_be_read(
     assert not [request for request in lark_fake.requests if "/records" in request["path"]]
 
 
+def test_case_history_reads_the_groups_own_stored_target(
+    authenticated_client, lark_fake, confirmed_group
+):
+    """The audit of the read path: the stored bases, not a hardcoded one."""
+
+    lark_fake.records = [
+        {"record_id": "old1", "fields": {"用例": "B-001 Login", "结果": "不通过"}}
+    ]
+    lark_fake.bug_records = [
+        {"record_id": "bug1", "fields": {"问题描述": "B-001 绑定未触发"}}
+    ]
+
+    body = authenticated_client.get(
+        f"/api/groups/{confirmed_group.id}/cases/B-001/lark-history"
+    ).json()
+
+    assert body["available"] is True
+    assert [
+        request["path"] for request in lark_fake.requests if "/records" in request["path"]
+    ] == [
+        "/open-apis/bitable/v1/apps/app-exec/tables/tbl-runs/records",
+        "/open-apis/bitable/v1/apps/app-bug/tables/tbl-defects/records",
+    ]
+    assert [request["method"] for request in lark_fake.record_requests] == ["GET", "GET"]
+
+
 def test_case_history_endpoint_says_when_no_target_is_chosen(
     authenticated_client, imported_group
 ):

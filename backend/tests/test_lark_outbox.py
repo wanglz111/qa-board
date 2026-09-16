@@ -2,12 +2,71 @@ from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 from uuid import UUID
 
+import pytest
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from app.lark.outbox import claim_next_job, retry_failed_jobs, run_job
+from app.lark.outbox import (
+    claim_next_job,
+    enqueue_attempt_job,
+    retry_failed_jobs,
+    run_job,
+)
+from app.lark.target import target_for
 from app.models import Attempt, GroupCase, LarkTarget, SyncJob
-from app.worker import process_one_job
+from app.worker import build_gateway, process_one_job, run_once
+
+
+def _stored_target(db_session, group_id) -> LarkTarget:
+    db_session.expire_all()
+    return db_session.scalar(select(LarkTarget).where(LarkTarget.group_id == group_id))
+
+
+def _second_group(db_session, make_group_case, *, suffix: str, table_id: str) -> Attempt:
+    """Another group with its own confirmed target and a committed attempt."""
+
+    group_case = make_group_case(db_session, group_name=suffix, code="B-001")
+    db_session.flush()
+    db_session.add(
+        LarkTarget(
+            group_id=group_case.group_id,
+            source_url=f"https://tenant.larksuite.com/wiki/{suffix}",
+            execution_base_token="app-exec",
+            execution_base_name="执行库",
+            execution_table_id=table_id,
+            execution_table_name="执行记录",
+            bug_base_token="app-bug",
+            bug_base_name="缺陷库",
+            bug_table_id="tbl-defects",
+            bug_table_name="缺陷记录",
+            target_fingerprint=f"app-exec|{table_id}|app-bug|tbl-defects",
+            confirmed_at=datetime.now(timezone.utc),
+        )
+    )
+    attempt = Attempt(
+        group_case=group_case,
+        label="B-001",
+        sequence=1,
+        state="committed",
+        result="通过",
+        idempotency_key=f"{suffix}-attempt-1",
+    )
+    db_session.add(attempt)
+    db_session.commit()
+    return attempt
+
+
+class _RecordingGateway:
+    """The narrow write surface, so a run_once test needs no HTTP double."""
+
+    def create_execution(self, fields) -> str:
+        return "rec-1"
+
+    def create_bug(self, fields) -> str:
+        return "rec-bug-1"
+
+    def find_execution_ids(self, label) -> list[str]:
+        return []
 
 
 def _job(db_session, attempt) -> SyncJob:
@@ -147,6 +206,135 @@ def test_partial_bug_failure_keeps_the_execution_record(
 
     assert retry_failed_jobs(db_session) == 1
     assert process_one_job(fake_lark, failed_attempt) == "synced"
+
+
+def test_repointing_never_touches_another_groups_parked_jobs(
+    fake_lark,
+    authenticated_client,
+    confirmed_group,
+    failed_attempt,
+    db_session,
+    make_group_case,
+):
+    """The operator re-points one group; other groups keep waiting."""
+
+    db_session.add(
+        SyncJob(
+            attempt_id=failed_attempt.id,
+            state="pending",
+            next_retry_at=datetime.now(timezone.utc),
+            target_fingerprint="stale",
+        )
+    )
+    db_session.commit()
+    assert process_one_job(fake_lark, failed_attempt) == "pending"
+
+    other_attempt = _second_group(
+        db_session, make_group_case, suffix="repoint-other", table_id="tbl-runs"
+    )
+    db_session.add(
+        SyncJob(
+            attempt_id=other_attempt.id,
+            state="pending",
+            error_kind="target_changed",
+            next_retry_at=datetime.now(timezone.utc),
+            target_fingerprint="stale-other",
+        )
+    )
+    db_session.commit()
+
+    body = authenticated_client.post(
+        f"/api/groups/{confirmed_group.id}/sync/retry"
+    ).json()
+
+    assert body["repointed"] == 1
+    db_session.expire_all()
+    assert (
+        _job(db_session, failed_attempt).target_fingerprint
+        == _stored_target(db_session, confirmed_group.id).target_fingerprint
+    )
+    untouched = db_session.scalar(
+        select(SyncJob).where(SyncJob.attempt_id == other_attempt.id)
+    )
+    assert untouched.state == "pending"
+    assert untouched.error_kind == "target_changed"
+    assert untouched.target_fingerprint == "stale-other"
+
+
+def test_a_reconfirmed_table_still_parks_queued_jobs_until_repointed(
+    fake_lark, authenticated_client, confirmed_group, failed_attempt, db_session
+):
+    """Switch, re-confirm, park, re-point, then sync into the new table."""
+
+    # A second run-schema table, so the administrator can really confirm a
+    # switch away from tbl-runs.
+    fake_lark.bases["app-exec"] = (
+        "执行库",
+        [("tbl-runs", "执行记录"), ("tbl-bugs", "缺陷记录"), ("tbl-new", "新执行记录")],
+    )
+    fake_lark.field_roles[("app-exec", "tbl-new")] = "run"
+
+    assert (
+        authenticated_client.post(
+            f"/api/groups/{confirmed_group.id}/sync/enqueue"
+        ).json()["queued"]
+        == 1
+    )
+    old_fingerprint = _stored_target(db_session, confirmed_group.id).target_fingerprint
+    assert _job(db_session, failed_attempt).target_fingerprint == old_fingerprint
+
+    switched = authenticated_client.put(
+        f"/api/groups/{confirmed_group.id}/lark/target",
+        json={
+            "source_url": "https://tenant.larksuite.com/wiki/node-1?table=tbl-new",
+            "execution_base_token": "app-exec",
+            "execution_table_id": "tbl-new",
+            "execution_view_id": None,
+            "bug_base_token": "app-bug",
+            "bug_table_id": "tbl-defects",
+            "expected_previous_fingerprint": old_fingerprint,
+            "acknowledge_change": True,
+        },
+    )
+    assert switched.status_code == 200, switched.text
+    new_fingerprint = switched.json()["target"]["target_fingerprint"]
+    assert switched.json()["target"]["confirmed"] is False
+
+    confirmed = authenticated_client.post(
+        f"/api/groups/{confirmed_group.id}/lark/target/confirm",
+        json={"allow_writes": True, "target_fingerprint": new_fingerprint},
+    )
+    assert confirmed.status_code == 200, confirmed.text
+    assert confirmed.json()["confirmed"] is True
+
+    # The new destination is approved, so the job is not parked for a lost
+    # approval: its own pin names the table nobody approved for it any more.
+    new_target = _stored_target(db_session, confirmed_group.id)
+    assert new_target.execution_table_id == "tbl-new"
+    gateway = build_gateway(new_target, fake_lark.client)
+    assert process_one_job(gateway, failed_attempt) == "pending"
+    parked = _job(db_session, failed_attempt)
+    assert parked.error_kind == "target_changed"
+    assert parked.target_fingerprint == old_fingerprint
+    assert fake_lark.created_execution == 0
+
+    body = authenticated_client.post(
+        f"/api/groups/{confirmed_group.id}/sync/retry"
+    ).json()
+    assert body["repointed"] == 1
+    db_session.expire_all()
+    assert _job(db_session, failed_attempt).target_fingerprint == new_fingerprint
+
+    assert process_one_job(
+        build_gateway(_stored_target(db_session, confirmed_group.id), fake_lark.client),
+        failed_attempt,
+    ) == "synced"
+    assert [
+        request["path"] for request in fake_lark.requests if "/records" in request["path"]
+    ] == [
+        "/open-apis/bitable/v1/apps/app-exec/tables/tbl-new/records",
+        "/open-apis/bitable/v1/apps/app-bug/tables/tbl-defects/records",
+    ]
     assert fake_lark.created_execution == 1
     assert fake_lark.created_bug == 1
     assert not fake_lark.put_calls and not fake_lark.delete_calls
@@ -229,7 +417,12 @@ def test_two_concurrent_workers_do_not_claim_the_same_job(
 
 
 def test_enqueue_only_works_for_confirmed_groups(
-    lark_fake, authenticated_client, unconfirmed_group, confirmed_group, failed_attempt
+    lark_fake,
+    authenticated_client,
+    unconfirmed_group,
+    confirmed_group,
+    failed_attempt,
+    db_session,
 ):
     assert (
         authenticated_client.post(
@@ -243,6 +436,12 @@ def test_enqueue_only_works_for_confirmed_groups(
     )
     assert first.status_code == 200
     assert first.json()["queued"] == 1
+    # A queued job carries the fingerprint of the target it was approved for;
+    # without it the worker can never prove the destination is still the same.
+    assert (
+        _job(db_session, failed_attempt).target_fingerprint
+        == _stored_target(db_session, confirmed_group.id).target_fingerprint
+    )
 
     # Already-queued attempts are not queued twice.
     assert authenticated_client.post(
@@ -271,6 +470,10 @@ def test_new_attempt_queues_only_inside_a_confirmed_group(
         select(SyncJob).where(SyncJob.attempt_id == UUID(confirmed.json()["id"]))
     ).all()
     assert len(queued) == 1
+    assert (
+        queued[0].target_fingerprint
+        == _stored_target(db_session, confirmed_id).target_fingerprint
+    )
     unconfirmed_jobs = db_session.scalars(
         select(SyncJob)
         .join(Attempt, SyncJob.attempt_id == Attempt.id)
@@ -278,6 +481,39 @@ def test_new_attempt_queues_only_inside_a_confirmed_group(
         .where(GroupCase.group_id == unconfirmed_id)
     ).all()
     assert unconfirmed_jobs == []
+
+
+def test_a_queued_job_writes_only_into_the_target_it_was_pinned_to(
+    fake_lark, authenticated_client, confirmed_group, failed_attempt, db_session
+):
+    """enqueue → claim → run, with the destination asserted on the wire."""
+
+    target = _stored_target(db_session, confirmed_group.id)
+
+    queued = authenticated_client.post(f"/api/groups/{confirmed_group.id}/sync/enqueue")
+    assert queued.status_code == 200
+    assert queued.json()["queued"] == 1
+
+    job = claim_next_job(db_session)
+    assert job is not None
+    assert job.attempt_id == failed_attempt.id
+    assert job.target_fingerprint == target.target_fingerprint
+
+    run_job(
+        db_session,
+        job,
+        build_gateway(target, fake_lark.client),
+        failed_attempt,
+        reporter="qa@example.test",
+    )
+
+    assert job.state == "synced"
+    assert [
+        request["path"] for request in fake_lark.requests if "/records" in request["path"]
+    ] == [
+        "/open-apis/bitable/v1/apps/app-exec/tables/tbl-runs/records",
+        "/open-apis/bitable/v1/apps/app-bug/tables/tbl-defects/records",
+    ]
 
 
 def test_sync_summary_reports_failed_and_uncertain_without_payloads(
@@ -294,6 +530,75 @@ def test_sync_summary_reports_failed_and_uncertain_without_payloads(
     assert body["queued"] == 0
     assert body["last_error_kind"] == "create_bug_failed"
     assert "new-1" not in str(body["last_error_kind"])
+
+
+def test_sync_summary_surfaces_jobs_parked_for_a_repoint(
+    fake_lark, authenticated_client, confirmed_group, failed_attempt, db_session
+):
+    """An upgraded deployment shows parked jobs instead of a silent queue."""
+
+    assert (
+        authenticated_client.post(
+            f"/api/groups/{confirmed_group.id}/sync/enqueue"
+        ).json()["queued"]
+        == 1
+    )
+    # A job queued before this upgrade carries no pin at all.
+    job = _job(db_session, failed_attempt)
+    job.target_fingerprint = None
+    db_session.commit()
+    assert process_one_job(fake_lark, failed_attempt) == "pending"
+
+    body = authenticated_client.get(f"/api/groups/{confirmed_group.id}/sync").json()
+
+    assert body["parked"] == 1
+    assert body["queued"] == 1
+    assert body["failed"] == 0
+    assert body["uncertain"] == 0
+    assert body["last_error_kind"] == "target_changed"
+    assert body["confirmed"] is True
+
+    # Releasing the parked job clears the counter again.
+    assert (
+        authenticated_client.post(f"/api/groups/{confirmed_group.id}/sync/retry").json()[
+            "repointed"
+        ]
+        == 1
+    )
+    assert (
+        authenticated_client.get(f"/api/groups/{confirmed_group.id}/sync").json()["parked"]
+        == 0
+    )
+
+
+def test_repointing_clears_a_stale_lease_left_by_a_crashed_worker(
+    authenticated_client, confirmed_group, failed_attempt, db_session
+):
+    """A re-pointed job must be claimable now, not after the old lease expires."""
+
+    now = datetime.now(timezone.utc)
+    db_session.add(
+        SyncJob(
+            attempt_id=failed_attempt.id,
+            state="pending",
+            error_kind="target_changed",
+            target_fingerprint=None,
+            next_retry_at=now,
+            lease_until=now + timedelta(seconds=90),
+        )
+    )
+    db_session.commit()
+
+    body = authenticated_client.post(
+        f"/api/groups/{confirmed_group.id}/sync/retry"
+    ).json()
+
+    assert body["repointed"] == 1
+    db_session.expire_all()
+    stored = _job(db_session, failed_attempt)
+    assert stored.lease_until is None
+    assert stored.state == "pending"
+    assert claim_next_job(db_session) is not None
 
 
 def test_withdrawn_approval_stops_counting_as_confirmed(
@@ -460,3 +765,95 @@ def test_sync_retry_requires_a_session_and_a_known_group(
     assert (
         authenticated_client.post(f"/api/groups/{uuid4()}/sync/retry").status_code == 404
     )
+
+
+def test_run_once_gives_each_claimed_job_its_own_target(
+    confirmed_group,
+    failed_attempt,
+    db_session,
+    make_group_case,
+    monkeypatch,
+):
+    """run_once is the production wiring: the gateway must follow the job."""
+
+    import app.worker as worker_module
+
+    other_attempt = _second_group(
+        db_session, make_group_case, suffix="run-once-other", table_id="tbl-other"
+    )
+    enqueue_attempt_job(db_session, failed_attempt)
+    enqueue_attempt_job(db_session, other_attempt)
+    db_session.commit()
+    first = _job(db_session, failed_attempt)
+    second = _job(db_session, other_attempt)
+    first.created_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    second.created_at = datetime(2026, 1, 2, tzinfo=timezone.utc)
+    db_session.commit()
+
+    # Without an injected factory the worker would build a real Lark client;
+    # that must not happen on the injected branch.
+    monkeypatch.setattr(
+        worker_module,
+        "build_lark_client",
+        lambda: pytest.fail("the injected factory must not build a client"),
+    )
+    targets: list[LarkTarget] = []
+
+    def factory(target):
+        targets.append(target)
+        return _RecordingGateway()
+
+    assert run_once(db_session, factory) == "synced"
+    assert run_once(db_session, factory) == "synced"
+    assert run_once(db_session, factory) is None
+
+    assert [target.execution_table_id for target in targets] == [
+        "tbl-runs",
+        "tbl-other",
+    ]
+    assert {target.group_id for target in targets} == {
+        confirmed_group.id,
+        other_attempt.group_case.group_id,
+    }
+
+
+def test_run_once_parks_a_claimed_job_whose_target_cannot_be_resolved(
+    unconfirmed_group, db_session
+):
+    """A job with no destination waits visibly instead of bleeding leases."""
+
+    case = db_session.scalar(
+        select(GroupCase).where(GroupCase.group_id == unconfirmed_group.id)
+    )
+    attempt = Attempt(
+        group_case=case,
+        label="B-001",
+        sequence=1,
+        state="committed",
+        result="通过",
+        idempotency_key="no-target-1",
+    )
+    db_session.add(attempt)
+    db_session.commit()
+    db_session.add(
+        SyncJob(
+            attempt_id=attempt.id,
+            state="pending",
+            next_retry_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+        )
+    )
+    db_session.commit()
+
+    def factory(target):
+        pytest.fail("a group without a target has no gateway to build")
+
+    assert run_once(db_session, factory) == "pending"
+
+    db_session.expire_all()
+    job = db_session.scalar(select(SyncJob).where(SyncJob.attempt_id == attempt.id))
+    assert job.state == "pending"
+    assert job.error_kind == "target_changed"
+    assert job.lease_until is None
+    assert job.retry_count == 0
+    # Parked means parked: no claim, lease expiry, claim cycle.
+    assert claim_next_job(db_session) is None

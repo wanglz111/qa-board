@@ -1,4 +1,5 @@
 from dataclasses import replace
+from datetime import datetime, timezone
 
 import pytest
 from sqlalchemy import select, text
@@ -194,6 +195,28 @@ def _move_target_during_the_live_read(monkeypatch, db_session, group_id, *, tabl
     monkeypatch.setattr(lark_target, "read_draft_state", read_then_move)
 
 
+def _move_and_approve_target_during_the_live_read(
+    monkeypatch, db_session, group_id, *, table_id
+):
+    """Another tab saves *and confirms* the destination while we are reading."""
+
+    real_read = lark_target.read_draft_state
+
+    def read_then_approve(client, draft):
+        state = real_read(client, draft)
+        _move_stored_target(db_session, group_id, table_id=table_id)
+        db_session.execute(
+            text(
+                "UPDATE lark_targets SET confirmed_at = :now"
+                " WHERE group_id = :group_id"
+            ),
+            {"now": datetime.now(timezone.utc), "group_id": group_id},
+        )
+        return state
+
+    monkeypatch.setattr(lark_target, "read_draft_state", read_then_approve)
+
+
 def test_changing_a_table_needs_an_acknowledged_diff(
     lark_fake, authenticated_client, imported_group
 ):
@@ -351,6 +374,35 @@ def test_changing_a_confirmed_table_clears_the_stored_approval(
     assert stored.confirmed_at is None
 
 
+def test_a_stale_save_does_not_drop_a_fresh_approval(
+    lark_fake, authenticated_client, confirmed_group, db_session, monkeypatch
+):
+    """A row that already equals the draft is not a change, so it stays approved."""
+
+    stale_page = _fresh_target(db_session, confirmed_group.id)
+    _move_and_approve_target_during_the_live_read(
+        monkeypatch, db_session, confirmed_group.id, table_id="tbl-bugs"
+    )
+
+    response = authenticated_client.put(
+        f"/api/groups/{confirmed_group.id}/lark/target",
+        json=_payload(
+            "tbl-bugs",
+            expected_previous_fingerprint=stale_page.target_fingerprint,
+            acknowledge=True,
+        ),
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["diff"]["changed"] is False
+    assert body["confirmation_cleared"] is False
+    assert body["target"]["confirmed"] is True
+    stored = _fresh_target(db_session, confirmed_group.id)
+    assert stored.execution_table_id == "tbl-bugs"
+    assert stored.confirmed_at is not None
+
+
 def test_confirming_a_saved_target_marks_it_approved(
     lark_fake, authenticated_client, imported_group
 ):
@@ -493,6 +545,8 @@ def test_read_target_returns_the_stored_target_and_its_live_state(
     lark_fake, authenticated_client, imported_group
 ):
     saved = _save(authenticated_client, imported_group.id, table_id="tbl-runs")
+    # Only the GET request's own reads are audited below.
+    lark_fake.requests.clear()
 
     body = authenticated_client.get(
         f"/api/groups/{imported_group.id}/lark/target"
@@ -504,6 +558,16 @@ def test_read_target_returns_the_stored_target_and_its_live_state(
     assert body["live"]["execution_table_name"] == "执行记录"
     assert body["live"]["bug_table_name"] == "缺陷记录"
     assert body["live"]["schema_fingerprint"] == saved["target"]["schema_fingerprint"]
+    # The live read follows the stored target's own bases and tables.
+    assert [
+        request["path"]
+        for request in lark_fake.requests
+        if request["path"].endswith("/fields")
+    ] == [
+        "/open-apis/bitable/v1/apps/app-exec/tables/tbl-runs/fields",
+        "/open-apis/bitable/v1/apps/app-bug/tables/tbl-defects/fields",
+    ]
+    assert [request["path"] for request in lark_fake.requests if "/records" in request["path"]] == []
 
 
 def test_a_table_must_exist_in_the_base_the_payload_names(

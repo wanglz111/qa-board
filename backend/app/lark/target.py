@@ -468,7 +468,16 @@ def save_target(
             },
         )
 
-    confirmation_cleared = bool(previous and diff["changed"] and previous.confirmed_at)
+    # Everything that is reported or cleared is decided against the row the lock
+    # just returned, not against the pre-lock snapshot: a row that already equals
+    # the submitted target is not a change, and an approval another tab took on
+    # it while this request was reading is a consent for exactly this target, so
+    # it must survive. A destination that really does differ still cannot inherit
+    # an earlier approval.
+    locked_diff = target_diff(locked, draft)
+    confirmation_cleared = bool(
+        locked is not None and locked_diff["changed"] and locked.confirmed_at
+    )
     target = locked if locked is not None else LarkTarget(group_id=group_id)
     target.source_url = payload.source_url
     target.execution_base_token = draft.execution_base_token
@@ -483,7 +492,7 @@ def save_target(
     target.schema_fingerprint = state["schema_fingerprint"]
     target.target_fingerprint = draft.fingerprint
     target.selected_at = datetime.now(timezone.utc)
-    if diff["changed"]:
+    if locked_diff["changed"]:
         # A changed destination can never inherit the previous write approval.
         target.confirmed_at = None
     db.add(target)
@@ -493,7 +502,7 @@ def save_target(
     return {
         "target": serialize_target(target),
         "live": state,
-        "diff": diff,
+        "diff": locked_diff,
         "confirmation_cleared": confirmation_cleared,
     }
 

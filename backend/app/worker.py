@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session, object_session
 from app.config import settings
 from app.db import engine
 from app.lark.client import LarkClient, build_lark_client
-from app.lark.outbox import claim_next_job, run_job
+from app.lark.outbox import claim_next_job, park_job_for_target_change, run_job
 from app.lark.target import target_for
 from app.lark.write import HttpLarkWriteGateway, LarkWriteGateway
 from app.models import Attempt, LarkTarget, SyncJob
@@ -93,11 +93,19 @@ def run_once(
         return None
     attempt = db.get(Attempt, job.attempt_id)
     target = target_for(db, attempt.group_case.group_id) if attempt else None
-    db.commit()
     if attempt is None or target is None:
-        return None
-    shared_client = client or build_lark_client()
-    build = gateway_factory or (lambda resolved: build_gateway(resolved, shared_client))
+        # There is nothing to aim this write at. Park the claim the same way a
+        # stale target does: a job left running would only come back when its
+        # lease expires, with no error kind and nothing for the operator to see.
+        park_job_for_target_change(db, job)
+        db.commit()
+        return job.state
+    db.commit()
+    if gateway_factory is None:
+        shared_client = client or build_lark_client()
+        build = lambda resolved: build_gateway(resolved, shared_client)
+    else:
+        build = gateway_factory
     return process_one_job(build(target), attempt, db=db, reporter=reporter)
 
 

@@ -153,6 +153,24 @@ def _mark_uncertain(db: Session, job: SyncJob, error_kind: str) -> None:
     db.flush()
 
 
+def park_job_for_target_change(
+    db: Session, job: SyncJob, *, now: datetime | None = None
+) -> None:
+    """Hold a claimed job whose destination is not the approved one.
+
+    The job stays pending with a visible ``target_changed`` error kind, but its
+    lease is released so the worker does not re-claim it into another doomed
+    attempt; only an administrator re-points it at a target.
+    """
+
+    moment = now or _now()
+    job.state = "pending"
+    job.error_kind = "target_changed"
+    job.lease_until = None
+    job.next_retry_at = moment + timedelta(seconds=STALE_CONFIRMATION_SECONDS)
+    db.flush()
+
+
 def run_job(
     db: Session,
     job: SyncJob,
@@ -183,10 +201,7 @@ def run_job(
     ):
         # Never post into a destination the administrator has not approved for
         # this group; a swapped table parks the job until a human re-points it.
-        job.state = "pending"
-        job.error_kind = "target_changed"
-        job.lease_until = None
-        job.next_retry_at = moment + timedelta(seconds=STALE_CONFIRMATION_SECONDS)
+        park_job_for_target_change(db, job, now=moment)
         db.commit()
         return job
 
@@ -258,11 +273,24 @@ def sync_counts(db: Session, group_id: UUID) -> dict[str, Any]:
         .order_by(SyncJob.created_at.desc())
         .limit(1)
     )
+    # A parked job stays pending, so without its own counter an operator only
+    # sees queued work and never learns that it is waiting for a re-point.
+    parked = db.scalar(
+        select(func.count(SyncJob.id))
+        .join(Attempt, SyncJob.attempt_id == Attempt.id)
+        .join(GroupCase, Attempt.group_case_id == GroupCase.id)
+        .where(
+            GroupCase.group_id == group_id,
+            SyncJob.state == "pending",
+            SyncJob.error_kind == "target_changed",
+        )
+    )
     return {
         "queued": counts.get("pending", 0) + counts.get("running", 0),
         "synced": counts.get("synced", 0),
         "failed": counts.get("failed", 0),
         "uncertain": counts.get("uncertain", 0),
+        "parked": int(parked or 0),
         "last_error_kind": last_error,
     }
 
@@ -368,6 +396,7 @@ def repoint_parked_jobs(db: Session, group_id: UUID) -> int:
             state="pending",
             error_kind=None,
             retry_count=0,
+            lease_until=None,
             next_retry_at=_now(),
             target_fingerprint=target.target_fingerprint,
         )
