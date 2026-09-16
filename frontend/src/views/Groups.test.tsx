@@ -26,9 +26,9 @@ it("keeps cases aligned with the most recently selected group", async () => {
   await userEvent.click(await screen.findByRole("button", { name: /Group A/ }));
   expect(screen.getByText(/a\.csv · v1/)).toBeVisible();
   await userEvent.click(screen.getByRole("button", { name: /Group B/ }));
-  second.resolve([{ id: "b1", code: "B-1", position: 1, title: "Second group case", module: null, layer: null, priority: null, preconditions: null, test_data: null, steps: null, expected: null }]);
+  second.resolve([{ id: "b1", code: "B-1", position: 1, title: "Second group case", module: null, layer: null, priority: null, preconditions: null, test_data: null, steps: null, expected: null, expect_absent: [], visual_check: "text_and_visual", prototype_note: null, reference_assets: [] }]);
   expect(await screen.findByText("Second group case")).toBeVisible();
-  first.resolve([{ id: "a1", code: "A-1", position: 1, title: "Stale first case", module: null, layer: null, priority: null, preconditions: null, test_data: null, steps: null, expected: null }]);
+  first.resolve([{ id: "a1", code: "A-1", position: 1, title: "Stale first case", module: null, layer: null, priority: null, preconditions: null, test_data: null, steps: null, expected: null, expect_absent: [], visual_check: "text_and_visual", prototype_note: null, reference_assets: [] }]);
 
   expect(screen.queryByText("Stale first case")).not.toBeInTheDocument();
 });

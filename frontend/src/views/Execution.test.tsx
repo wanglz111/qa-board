@@ -30,7 +30,11 @@ function testCase(id: string, title: string, expected: string | null = null): Gr
     preconditions: null,
     test_data: null,
     steps: "打开登录页并提交凭据",
-    expected
+    expected,
+    expect_absent: [],
+    visual_check: "text_and_visual",
+    prototype_note: null,
+    reference_assets: []
   };
 }
 

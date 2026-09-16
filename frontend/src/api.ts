@@ -6,6 +6,9 @@ export type PreviewCase = {
   title: string;
   module: string | null;
   priority: string | null;
+  expect_absent?: string[];
+  visual_check?: string;
+  reference_asset_count?: number;
 };
 
 export type ImportPreview = {
@@ -16,6 +19,33 @@ export type ImportPreview = {
   fields: string[];
   errors: string[];
   warnings: string[];
+  title?: string | null;
+  reference_asset_count?: number;
+  reference_link_count?: number;
+  prototype_version?: string | null;
+};
+
+export type ReferenceFocus = {
+  label: string;
+  note: string | null;
+  box: [number, number, number, number] | null;
+};
+
+export type ReferenceAsset = {
+  id: string;
+  link_id: string;
+  asset_key: string;
+  name: string;
+  mime: string;
+  width: number;
+  height: number;
+  asset_type: string;
+  screen: string | null;
+  state: string | null;
+  prototype_version: string | null;
+  role: "expected" | "locator";
+  caption: string | null;
+  focus: ReferenceFocus[];
 };
 
 export type Group = {
@@ -34,6 +64,10 @@ export type GroupCase = PreviewCase & {
   test_data: string | null;
   steps: string | null;
   expected: string | null;
+  expect_absent: string[];
+  visual_check: string;
+  prototype_note: string | null;
+  reference_assets: ReferenceAsset[];
 };
 
 export type GroupProgress = {
@@ -384,6 +418,7 @@ export const api = {
     });
   },
   screenshotUrl: (screenshotId: string) => `/api/screenshots/${screenshotId}`,
+  referenceAssetUrl: (assetId: string) => `/api/case-reference-assets/${assetId}`,
   reportUrl: (groupId: string, format: "csv" | "xlsx") =>
     `/api/groups/${groupId}/reports.${format}`,
   resolveLark: (url: string) =>

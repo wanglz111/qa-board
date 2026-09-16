@@ -34,7 +34,7 @@ export function ImportView({ preview, confirm, onImported }: Props) {
     const additions = files.map((file): UploadItem => ({
       key: crypto.randomUUID(),
       file,
-      name: file.name.replace(/\.(md|markdown|csv|json)$/i, ""),
+      name: file.name.replace(/\.(md|markdown|csv|json|zip)$/i, ""),
       state: "previewing",
       mapping: {}
     }));
@@ -80,12 +80,12 @@ export function ImportView({ preview, confirm, onImported }: Props) {
       <div className="section-heading">
         <div><p className="eyebrow">IMPORT</p><h2 id="import-title">导入测试组</h2></div>
         <button className="primary" type="button" onClick={() => inputRef.current?.click()}><Upload size={17} />选择文件</button>
-        <input ref={inputRef} className="visually-hidden" aria-label="选择用例文件" type="file" multiple accept=".md,.markdown,.csv,.json" onChange={chooseFiles} />
+        <input ref={inputRef} className="visually-hidden" aria-label="选择用例文件" type="file" multiple accept=".md,.markdown,.csv,.json,.zip" onChange={chooseFiles} />
       </div>
 
       {items.length === 0 ? (
         <button className="empty-import" type="button" onClick={() => inputRef.current?.click()}>
-          <Upload size={24} /><span>选择用例文件</span><small>MD / CSV / JSON</small>
+          <Upload size={24} /><span>选择用例文件</span><small>MD / CSV / JSON / 带图用例包 ZIP</small>
         </button>
       ) : (
         <div className="upload-list">
@@ -100,7 +100,22 @@ export function ImportView({ preview, confirm, onImported }: Props) {
               {item.error && <p className="inline-status error" role="alert"><AlertCircle size={16} />{item.error}</p>}
               {item.preview && (
                 <div className="preview-body">
-                  <div className="preview-summary"><span>{item.preview.detected_format.toUpperCase()}</span><strong>{item.preview.count}</strong><span>条用例</span></div>
+                  <div className="preview-summary">
+                    <span>{item.preview.detected_format.toUpperCase()}</span>
+                    <strong>{item.preview.count}</strong>
+                    <span>条用例</span>
+                    {item.preview.reference_asset_count ? (
+                      <span className="preview-casebook">
+                        {` · 原型图 ${item.preview.reference_asset_count} 张`}
+                        {item.preview.reference_link_count
+                          ? ` · 引用 ${item.preview.reference_link_count} 处`
+                          : ""}
+                        {item.preview.prototype_version
+                          ? ` · 原型版本 ${item.preview.prototype_version}`
+                          : ""}
+                      </span>
+                    ) : null}
+                  </div>
                   {item.preview.warnings.map((warning) => <p className="inline-status warning" key={warning}><AlertCircle size={16} />{warning}</p>)}
                   <label>组名<input value={item.name} disabled={item.state === "imported"} onChange={(e) => patch(item.key, { name: e.target.value })} /></label>
                   <details>
@@ -117,8 +132,8 @@ export function ImportView({ preview, confirm, onImported }: Props) {
                     </div>
                   </details>
                   <div className="preview-table-wrap">
-                    <table><thead><tr><th>编号</th><th>标题</th><th>模块</th></tr></thead>
-                      <tbody>{item.preview.cases.slice(0, 4).map((testCase) => <tr key={testCase.code}><td>{testCase.code}</td><td>{testCase.title}</td><td>{testCase.module ?? "-"}</td></tr>)}</tbody>
+                    <table><thead><tr><th>编号</th><th>标题</th><th>模块</th><th>原型</th></tr></thead>
+                      <tbody>{item.preview.cases.slice(0, 4).map((testCase) => <tr key={testCase.code}><td>{testCase.code}</td><td>{testCase.title}</td><td>{testCase.module ?? "-"}</td><td>{testCase.reference_asset_count ? `原型图 ${testCase.reference_asset_count} 张` : "-"}</td></tr>)}</tbody>
                     </table>
                   </div>
                   <button className={item.state === "imported" ? "success wide" : "primary wide"} disabled={!item.name.trim() || item.state === "importing" || item.state === "imported"} onClick={() => importItem(item)}>
