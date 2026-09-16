@@ -28,7 +28,10 @@ def _environment_flag(name: str, default: bool = False) -> bool:
 
 
 _ttl = int(os.environ.get("SESSION_TTL_SECONDS", "28800"))
-if _ttl <= 0: raise RuntimeError("SESSION_TTL_SECONDS must be positive")
+if _ttl <= 0:
+    raise RuntimeError("SESSION_TTL_SECONDS must be positive")
+
+
 settings = Settings(
     database_url=_required_environment("DATABASE_URL"),
     admin_email=_required_environment("ADMIN_EMAIL"),

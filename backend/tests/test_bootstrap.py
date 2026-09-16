@@ -1,10 +1,10 @@
-import pytest
-from sqlalchemy.exc import IntegrityError
 import os
 import subprocess
 
+import pytest
 from argon2 import PasswordHasher
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 
 from app.bootstrap import bootstrap
 from app.config import Settings
@@ -67,5 +67,6 @@ def test_bootstrap_module_uses_configured_database_and_exits_zero(migrated_datab
 
 def test_admin_has_singleton_constraint(db_session):
     first = bootstrap(db_session, config())
-    db_session.add(Admin(email='other@example.test', password_hash='x'))
-    with pytest.raises(IntegrityError): db_session.commit()
+    db_session.add(Admin(email="other@example.test", password_hash="x"))
+    with pytest.raises(IntegrityError):
+        db_session.commit()
