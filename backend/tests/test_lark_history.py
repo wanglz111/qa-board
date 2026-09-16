@@ -174,6 +174,24 @@ def test_check_requires_real_table_configuration(lark_fake, authenticated_client
     assert not [request for request in lark_fake.requests if "/records" in request["path"]]
 
 
+def test_check_reports_a_table_id_that_the_base_does_not_list(
+    lark_fake, authenticated_client, monkeypatch
+):
+    """A stale table id has to be visible instead of silently confirming a target."""
+
+    # Base the stale config on the fixture's working config so only the table
+    # id under test is wrong.
+    stale = replace(lark_history.settings, lark_table_runs="tbl-missing")
+    monkeypatch.setattr(lark_history, "settings", stale)
+
+    body = authenticated_client.get("/api/lark/check").json()
+
+    assert body["execution_table_name"] is None
+    assert body["target_fingerprint"] is None
+    assert "tbl-missing" in " ".join(body["read_errors"])
+    assert not [request for request in lark_fake.requests if "/records" in request["path"]]
+
+
 def test_read_audit_is_get_only(lark_fake):
     lark_fake.records = [{"record_id": "old1", "fields": {"用例": "B-001"}}]
     lark_fake.media["secret-file-token"] = (b"png-bytes", "image/png")

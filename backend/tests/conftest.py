@@ -354,10 +354,24 @@ class FakeLark:
                     },
                 },
             )
+        if path.endswith("/tables"):
+            # The real tenant answers a bare 404 for the single-table metadata
+            # route, so names are resolved from this listing instead.
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {
+                        "items": [
+                            {"table_id": "tbl-runs", "name": self.runs_table_name},
+                            {"table_id": "tbl-defects", "name": self.defects_table_name},
+                        ],
+                        "has_more": False,
+                    },
+                },
+            )
         if "/tables/" in path:
-            table_id = path.rsplit("/", 1)[-1]
-            name = self.defects_table_name if table_id == "tbl-defects" else self.runs_table_name
-            return httpx.Response(200, json={"code": 0, "data": {"table": {"table_id": table_id, "name": name}}})
+            return httpx.Response(404, text="404 page not found")
         if "/apps/" in path:
             return httpx.Response(200, json={"code": 0, "data": {"app": {"name": self.base_name}}})
         return httpx.Response(404, json={"code": 1, "msg": "unsupported path"})

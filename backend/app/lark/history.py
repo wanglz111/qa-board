@@ -378,6 +378,16 @@ def case_lark_history(
     }
 
 
+def _table_name(tables: list[dict[str, Any]], table_id: str) -> str | None:
+    """Resolve a table name from the base listing, never from a guess."""
+
+    for table in tables:
+        if str(table.get("table_id")) == table_id:
+            name = table.get("name")
+            return str(name) if name else None
+    return None
+
+
 def read_lark_state(client: LarkClient) -> dict[str, Any]:
     """Read the real Lark names and field types, never secrets."""
 
@@ -416,16 +426,25 @@ def read_lark_state(client: LarkClient) -> dict[str, Any]:
 
     try:
         base = client.app_metadata(settings.lark_app_token)
-        run_table = client.table_metadata(settings.lark_app_token, settings.lark_table_runs)
-        bug_table = client.table_metadata(
-            settings.lark_bug_app_token, settings.lark_table_defects
-        )
+        run_tables = client.list_tables(settings.lark_app_token)
+        bug_tables = client.list_tables(settings.lark_bug_app_token)
         run_fields = client.list_fields(settings.lark_app_token, settings.lark_table_runs)
         bug_fields = client.list_fields(
             settings.lark_bug_app_token, settings.lark_table_defects
         )
     except LarkError as error:
         payload["read_errors"].append(str(error))
+        return payload
+
+    execution_table_name = _table_name(run_tables, settings.lark_table_runs)
+    bug_table_name = _table_name(bug_tables, settings.lark_table_defects)
+    if execution_table_name is None:
+        payload["read_errors"].append(
+            f"Lark 中找不到执行记录表 {settings.lark_table_runs}"
+        )
+    if bug_table_name is None:
+        payload["read_errors"].append(f"Lark 中找不到缺陷表 {settings.lark_table_defects}")
+    if payload["read_errors"]:
         return payload
 
     schema_errors = missing_required_fields(run_fields, REQUIRED_RUN_FIELD_TYPES)
@@ -436,8 +455,6 @@ def read_lark_state(client: LarkClient) -> dict[str, Any]:
         else f"{schema_fingerprint(run_fields)}||{schema_fingerprint(bug_fields)}"
     )
     base_name = (base.get("app") or {}).get("name")
-    execution_table_name = (run_table.get("table") or {}).get("name")
-    bug_table_name = (bug_table.get("table") or {}).get("name")
     payload.update(
         {
             "base_name": base_name,

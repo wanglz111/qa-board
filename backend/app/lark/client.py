@@ -133,10 +133,14 @@ class LarkClient:
     def app_metadata(self, app_token: str) -> dict[str, Any]:
         return self._send("GET", f"/open-apis/bitable/v1/apps/{app_token}")
 
-    def table_metadata(self, app_token: str, table_id: str) -> dict[str, Any]:
-        return self._send(
-            "GET", f"/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}"
-        )
+    def list_tables(self, app_token: str) -> list[dict[str, Any]]:
+        """List a base's tables.
+
+        The single-table metadata route does not exist for every tenant: it
+        answers a bare 404, so the table name is resolved from this listing.
+        """
+
+        return self._paginate(f"/open-apis/bitable/v1/apps/{app_token}/tables")
 
     def _paginate(self, path: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
