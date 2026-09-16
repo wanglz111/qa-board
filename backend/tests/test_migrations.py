@@ -4,6 +4,7 @@ from sqlalchemy import inspect, text
 
 
 EXPECTED_TABLES = {
+    "admin_sessions",
     "admins",
     "alembic_version",
     "group_cases",
@@ -16,7 +17,7 @@ def test_empty_test_schema_upgrades_to_head_twice(migrated_database):
     with migrated_database.connect() as connection:
         assert set(inspect(connection).get_table_names()) == EXPECTED_TABLES
         assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-            "0001_groups"
+            "0002_admin_sessions"
         )
 
 

@@ -1,10 +1,12 @@
 from fastapi import FastAPI, Response, status
 from sqlalchemy.exc import SQLAlchemyError
 
+from app.auth import router as auth_router
 from app.db import database_is_ready
 
 
 app = FastAPI(title="TestDeck")
+app.include_router(auth_router)
 
 
 @app.get("/health/live")

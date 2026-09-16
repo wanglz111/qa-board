@@ -32,6 +32,27 @@ class Admin(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
+    sessions: Mapped[list[AdminSession]] = relationship(
+        back_populates="admin", cascade="all, delete-orphan", passive_deletes=True
+    )
+
+
+class AdminSession(Base):
+    __tablename__ = "admin_sessions"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    admin_id: Mapped[UUID] = mapped_column(
+        ForeignKey("admins.id", ondelete="CASCADE"), nullable=False
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    csrf_token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    admin: Mapped[Admin] = relationship(back_populates="sessions")
+
 
 class Group(Base):
     __tablename__ = "groups"

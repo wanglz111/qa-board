@@ -16,6 +16,15 @@ class Settings:
     admin_password: str
     session_secret: str
     csrf_secret: str
+    session_cookie_secure: bool = False
+    session_ttl_seconds: int = 28_800
+
+
+def _environment_flag(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.lower() in {"1", "true", "yes", "on"}
 
 
 settings = Settings(
@@ -24,4 +33,6 @@ settings = Settings(
     admin_password=_required_environment("ADMIN_PASSWORD"),
     session_secret=_required_environment("SESSION_SECRET"),
     csrf_secret=_required_environment("CSRF_SECRET"),
+    session_cookie_secure=_environment_flag("SESSION_COOKIE_SECURE"),
+    session_ttl_seconds=int(os.environ.get("SESSION_TTL_SECONDS", "28800")),
 )
