@@ -147,8 +147,9 @@ export type SyncStatus = {
   synced: number;
   failed: number;
   uncertain: number;
-  // Jobs parked by a table switch: they wait for an administrator to re-point
-  // them, which is a different decision from retrying a failure.
+  // Pending jobs whose last run could not prove the destination was still
+  // approved: they wait for an administrator, which is a different decision
+  // from retrying an ordinary failure.
   parked?: number;
   last_error_kind: string | null;
   pending_attempts: number;

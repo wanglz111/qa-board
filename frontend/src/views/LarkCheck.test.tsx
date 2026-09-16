@@ -619,11 +619,116 @@ it("lets a parked-only group re-point its jobs and says how many moved", async (
   });
 
   expect(await screen.findByText(/待同步 0/)).toBeVisible();
-  expect(screen.getByText(/待重新指向 2/)).toBeVisible();
-  expect(screen.getByText(/因目标表更换而暂停/)).toBeVisible();
+  expect(screen.getByText(/待管理员处理 2/)).toBeVisible();
+  expect(screen.getByText(/条记录正在等待管理员处理/)).toBeVisible();
+  expect(screen.queryByText(/因目标表更换而暂停/)).not.toBeInTheDocument();
 
-  await userEvent.click(screen.getByRole("button", { name: /重新指向新表/ }));
+  await userEvent.click(screen.getByRole("button", { name: /重新指向当前目标表/ }));
 
   expect(retrySync).toHaveBeenCalledWith("0918-id", false);
-  expect(await screen.findByText(/2 条任务已重新指向新表/)).toBeVisible();
+  expect(await screen.findByText(/2 条任务已重新指向当前目标表/)).toBeVisible();
+});
+
+it("says a parked group is still unconfirmed instead of blaming a table change", async () => {
+  const retrySync = vi.fn().mockResolvedValueOnce({ requeued: 0, released: 0, repointed: 2 });
+  const loadSync = vi.fn().mockResolvedValue(syncStatus({ confirmed: false, parked: 2 }));
+  renderCheck({
+    loadTarget: async () => stateWith(TARGET),
+    loadSync,
+    retrySync
+  });
+
+  const hint = await screen.findByText(/条记录正在等待管理员处理/);
+  expect(hint).toHaveTextContent("本组目前尚未确认写入目标");
+  expect(screen.queryByText(/因目标表更换而暂停/)).not.toBeInTheDocument();
+
+  // The approval can be withdrawn without a table change, so re-pointing alone
+  // cannot be promised to fix it; the copy says what else is missing and the
+  // re-point action stays reachable for a genuine switch.
+  await userEvent.click(screen.getByRole("button", { name: /重新指向当前目标表/ }));
+  expect(retrySync).toHaveBeenCalledWith("0918-id", false);
+});
+
+it("uses the execution base for the defect role once the link box is cleared", async () => {
+  const resolve = vi.fn().mockResolvedValueOnce(RESOLVED).mockResolvedValueOnce(BUG_RESOLVED);
+  const saveTarget = vi.fn().mockResolvedValue({ target: TARGET, live: null, confirmation_cleared: false });
+  renderCheck({ resolve, saveTarget, loadTarget: async () => emptyTargetState() });
+
+  await readExecutionLink();
+  const box = screen.getByLabelText(/缺陷库链接/);
+  await userEvent.type(box, BUG_RESOLVED.source_url);
+  await userEvent.click(screen.getByRole("button", { name: "读取缺陷表" }));
+  expect(await screen.findByLabelText("缺陷记录表")).toHaveValue("tbl-online");
+
+  // The label promises the execution base when no separate link is given, and
+  // clearing the box is exactly that: the old read must stop driving the role.
+  await userEvent.clear(box);
+  expect(screen.getByLabelText("缺陷记录表")).toHaveValue("tbl-bugs");
+
+  await userEvent.click(screen.getByRole("button", { name: "保存选择" }));
+
+  expect(saveTarget).toHaveBeenCalledTimes(1);
+  expect(saveTarget.mock.calls[0][1]).toMatchObject({
+    execution_base_token: "app-exec",
+    bug_base_token: "app-exec",
+    bug_table_id: "tbl-bugs"
+  });
+});
+
+it("never sends the base of a defect link the administrator replaced", async () => {
+  const resolve = vi.fn().mockResolvedValueOnce(RESOLVED).mockResolvedValueOnce(BUG_RESOLVED);
+  const saveTarget = vi.fn().mockResolvedValue({ target: TARGET, live: null, confirmation_cleared: false });
+  renderCheck({ resolve, saveTarget, loadTarget: async () => emptyTargetState() });
+
+  await readExecutionLink();
+  const box = screen.getByLabelText(/缺陷库链接/);
+  await userEvent.type(box, BUG_RESOLVED.source_url);
+  await userEvent.click(screen.getByRole("button", { name: "读取缺陷表" }));
+  expect(await screen.findByLabelText("缺陷记录表")).toHaveValue("tbl-online");
+
+  // Typing a replacement without pressing 读取缺陷表 must not leave the read
+  // base (app-bugs) in the payload for a URL that is no longer in the box.
+  await userEvent.clear(box);
+  await userEvent.type(box, "https://tenant.larksuite.com/wiki/node-9?table=tbl-other");
+  expect(await screen.findByText(/尚未读取/)).toBeVisible();
+  expect(screen.getByLabelText("缺陷记录表")).toHaveValue("tbl-bugs");
+
+  await userEvent.click(screen.getByRole("button", { name: "保存选择" }));
+
+  expect(saveTarget).toHaveBeenCalledTimes(1);
+  expect(saveTarget.mock.calls[0][1]).toMatchObject({
+    execution_base_token: "app-exec",
+    bug_base_token: "app-exec",
+    bug_table_id: "tbl-bugs"
+  });
+});
+
+it("keeps the box and the payload in agreement when a read defect link is edited", async () => {
+  const resolve = vi.fn().mockResolvedValueOnce(RESOLVED).mockResolvedValueOnce(BUG_RESOLVED);
+  const saveTarget = vi.fn().mockResolvedValue({ target: TARGET, live: null, confirmation_cleared: false });
+  renderCheck({ resolve, saveTarget, loadTarget: async () => emptyTargetState() });
+
+  await readExecutionLink();
+  const box = screen.getByLabelText(/缺陷库链接/);
+  await userEvent.type(box, BUG_RESOLVED.source_url);
+  await userEvent.click(screen.getByRole("button", { name: "读取缺陷表" }));
+  await userEvent.selectOptions(await screen.findByLabelText("缺陷记录表"), "tbl-past");
+
+  // The administrator replaces the link. What they picked in the first base
+  // must not survive on the wire: the box now holds an unread link, so the
+  // defect role falls back to the execution base and the page says the link
+  // still has to be read.
+  await userEvent.clear(box);
+  await userEvent.type(box, "https://tenant.larksuite.com/wiki/node-9?table=tbl-other");
+  expect(await screen.findByText(/尚未读取/)).toBeVisible();
+  const select = screen.getByLabelText("缺陷记录表");
+  expect(select).toHaveValue("tbl-bugs");
+
+  await userEvent.click(screen.getByRole("button", { name: "保存选择" }));
+
+  expect(saveTarget).toHaveBeenCalledTimes(1);
+  const payload = saveTarget.mock.calls[0][1];
+  expect(payload).toMatchObject({ bug_base_token: "app-exec", bug_table_id: "tbl-bugs" });
+  // The table the administrator sees and the table on the wire are the same.
+  expect(payload.bug_table_id).toBe((select as HTMLSelectElement).value);
 });

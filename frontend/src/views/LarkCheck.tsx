@@ -98,6 +98,9 @@ export function LarkCheckView({
   const [resolved, setResolved] = useState<LarkResolved | null>(null);
   const [bugLink, setBugLink] = useState("");
   const [bugResolved, setBugResolved] = useState<LarkResolved | null>(null);
+  // The link text that actually produced bugResolved. Without it the box could
+  // show one base while the payload kept sending the base of an older read.
+  const [bugReadUrl, setBugReadUrl] = useState("");
   const [executionTableId, setExecutionTableId] = useState("");
   const [bugTableId, setBugTableId] = useState("");
   const [allowWrites, setAllowWrites] = useState(false);
@@ -137,6 +140,7 @@ export function LarkCheckView({
     setPendingChange(null);
     setResolved(null);
     setBugResolved(null);
+    setBugReadUrl("");
     setExecutionTableId("");
     setBugTableId("");
     // The header names another group now: neither its stored target (and its
@@ -170,10 +174,27 @@ export function LarkCheckView({
   const syncParked = sync?.parked ?? 0;
 
   const executionTables = resolved?.tables ?? [];
-  const bugBase = bugResolved ?? resolved;
+  // The box is the source of truth for the defect base, and it only selects
+  // another base while it still holds the link that was actually read. An empty
+  // box — and any text the administrator has not read — means the execution
+  // base, which is what the field's label promises.
+  const trimmedBugLink = bugLink.trim();
+  const bugReadApplies =
+    bugResolved !== null && trimmedBugLink !== "" && trimmedBugLink === bugReadUrl;
+  const bugBase = bugReadApplies ? bugResolved : resolved;
   const bugTables = bugBase?.tables ?? [];
+  const bugLinkUnread = trimmedBugLink !== "" && !bugReadApplies;
   const executionBaseToken = resolved?.base_token ?? "";
   const bugBaseToken = bugBase?.base_token ?? "";
+  // A table id read from another base — or from a link the box no longer holds
+  // — is not a choice this base offers; fall back to the suggestion so the
+  // select and the payload can never name different tables.
+  const bugTableIdChosen = bugTables.some((table) => table.table_id === bugTableId);
+  const effectiveBugTableId = bugTableIdChosen
+    ? bugTableId
+    : bugBase
+      ? suggestBugTable(bugBase, executionTableId, target)
+      : "";
   // A view id only describes the table the link pointed at; re-pointing the role
   // drops it rather than storing a view of a table that is no longer selected.
   const executionViewId =
@@ -185,8 +206,8 @@ export function LarkCheckView({
     return {
       execution_table_name: nameOf(executionTables, executionTableId),
       execution_table_id: executionTableId,
-      bug_table_name: nameOf(bugTables, bugTableId),
-      bug_table_id: bugTableId
+      bug_table_name: nameOf(bugTables, effectiveBugTableId),
+      bug_table_id: effectiveBugTableId
     };
   }
 
@@ -197,7 +218,7 @@ export function LarkCheckView({
       execution_table_id: executionTableId,
       execution_view_id: executionViewId,
       bug_base_token: bugBaseToken,
-      bug_table_id: bugTableId,
+      bug_table_id: effectiveBugTableId,
       expected_previous_fingerprint: target?.target_fingerprint ?? null,
       acknowledge_change: acknowledge
     };
@@ -226,8 +247,10 @@ export function LarkCheckView({
       setResolved(result);
       setExecutionTableId(selected);
       // A defect table read from its own link stays where it is: the form, the
-      // payload and the suggestion all keep describing the base it came from.
-      setBugTableId(suggestBugTable(bugResolved ?? result, selected, target));
+      // payload and the suggestion all keep describing the base it came from —
+      // but only while the box still holds that link.
+      const defectBase = bugReadApplies && bugResolved ? bugResolved : result;
+      setBugTableId(suggestBugTable(defectBase, selected, target));
     } catch (reason) {
       setError(messageOf(reason, "读取 Lark 表格失败"));
     } finally {
@@ -244,6 +267,7 @@ export function LarkCheckView({
     try {
       const result = await resolve(url);
       setBugResolved(result);
+      setBugReadUrl(url);
       setBugTableId(suggestBugTable(result, executionTableId, target));
     } catch (reason) {
       setError(messageOf(reason, "读取缺陷表失败"));
@@ -268,7 +292,7 @@ export function LarkCheckView({
       target.execution_base_token !== executionBaseToken ||
       target.execution_table_id !== executionTableId ||
       target.bug_base_token !== bugBaseToken ||
-      target.bug_table_id !== bugTableId
+      target.bug_table_id !== effectiveBugTableId
     );
   }
 
@@ -333,7 +357,7 @@ export function LarkCheckView({
   }
 
   async function saveSelection() {
-    if (!resolved || !executionTableId || !bugTableId) return;
+    if (!resolved || !executionTableId || !effectiveBugTableId) return;
     setError("");
     setNotice("");
     if (identityChanged()) {
@@ -395,7 +419,7 @@ export function LarkCheckView({
       if (result.requeued > 0) moved.push(`已重新排队 ${result.requeued} 条失败结果`);
       if (result.released > 0) moved.push(`释放 ${result.released} 条待人工确认`);
       if ((result.repointed ?? 0) > 0) {
-        moved.push(`${result.repointed} 条任务已重新指向新表`);
+        moved.push(`${result.repointed} 条任务已重新指向当前目标表`);
       }
       setNotice(moved.join("，") || "没有需要重试的同步任务");
       const refreshed = await loadSync?.(groupId);
@@ -538,7 +562,13 @@ export function LarkCheckView({
           读取缺陷表
         </button>
 
-        {(bugResolved?.read_errors ?? []).map((item) => (
+        {bugLinkUnread ? (
+          <p className="inline-status" role="status">
+            这段缺陷库链接尚未读取：缺陷表暂时使用执行表所在的多维表格，请按「读取缺陷表」使用它。
+          </p>
+        ) : null}
+
+        {(bugReadApplies ? bugResolved?.read_errors ?? [] : []).map((item) => (
           <p key={item} className="inline-status error" role="alert">
             {item}
           </p>
@@ -549,7 +579,7 @@ export function LarkCheckView({
             缺陷记录表
             <select
               aria-label="缺陷记录表"
-              value={bugTableId}
+              value={effectiveBugTableId}
               onChange={(event) => setBugTableId(event.target.value)}
             >
               {bugTables.map((table) => (
@@ -564,7 +594,7 @@ export function LarkCheckView({
         <button
           type="button"
           className="primary"
-          disabled={!resolved || !executionTableId || !bugTableId || busy}
+          disabled={!resolved || !executionTableId || !effectiveBugTableId || busy}
           onClick={() => void saveSelection()}
         >
           {busy ? <LoaderCircle className="spin" size={16} /> : null}
@@ -605,13 +635,13 @@ export function LarkCheckView({
           {busy ? <LoaderCircle className="spin" size={16} /> : <ShieldCheck size={16} />}
           确认本组写入目标
         </button>
-        {confirmed ? (
+        {confirmed || syncParked > 0 ? (
           <div className="lark-queue">
             <p className="inline-status">
-              待同步 {sync?.queued ?? 0} · 已同步 {sync?.synced ?? 0} · 失败 {syncFailed} · 待人工确认 {sync?.uncertain ?? 0} · 待重新指向 {syncParked}
+              待同步 {sync?.queued ?? 0} · 已同步 {sync?.synced ?? 0} · 失败 {syncFailed} · 待人工确认 {sync?.uncertain ?? 0} · 待管理员处理 {syncParked}
               {sync?.last_error_kind ? ` · 最近错误 ${sync.last_error_kind}` : ""}
             </p>
-            {enqueueSync ? (
+            {confirmed && enqueueSync ? (
               <button
                 type="button"
                 className="ghost-button"
@@ -622,7 +652,7 @@ export function LarkCheckView({
                 把已保存的本地结果排入同步
               </button>
             ) : null}
-            {retrySync && (syncFailed > 0 || syncParked > 0) ? (
+            {confirmed && retrySync && syncFailed > 0 ? (
               <button
                 type="button"
                 className="ghost-button"
@@ -630,12 +660,21 @@ export function LarkCheckView({
                 onClick={() => void retryQueuedJobs(false)}
               >
                 {retryingSync ? <LoaderCircle className="spin" size={16} /> : null}
-                {syncFailed > 0
-                  ? `重试失败的同步（${syncFailed} 条）`
-                  : `把暂停的同步重新指向新表（${syncParked} 条）`}
+                重试失败的同步（{syncFailed} 条）
               </button>
             ) : null}
-            {retrySync && (sync?.uncertain ?? 0) > 0 ? (
+            {retrySync && syncParked > 0 ? (
+              <button
+                type="button"
+                className="ghost-button"
+                disabled={retryingSync}
+                onClick={() => void retryQueuedJobs(false)}
+              >
+                {retryingSync ? <LoaderCircle className="spin" size={16} /> : null}
+                重新指向当前目标表（{syncParked} 条）
+              </button>
+            ) : null}
+            {confirmed && retrySync && (sync?.uncertain ?? 0) > 0 ? (
               <button
                 type="button"
                 className="ghost-button"
@@ -646,17 +685,20 @@ export function LarkCheckView({
                 已核对远端，释放待人工确认（{sync?.uncertain} 条）
               </button>
             ) : null}
-            {(sync?.uncertain ?? 0) > 0 ? (
+            {confirmed && (sync?.uncertain ?? 0) > 0 ? (
               <p className="attachment-hint">
                 释放待人工确认前，请先在旧表搜索该复测标签：若远端其实已写入，释放后会再新增一条记录。
               </p>
             ) : null}
             {syncParked > 0 ? (
               <p className="attachment-hint">
-                {syncParked} 条记录因目标表更换而暂停，需要管理员确认它们属于新表后才会重新同步。
+                {syncParked} 条记录正在等待管理员处理，不会自行同步：只有管理员确认它们应写入当前目标表后才会继续。若目标表确实更换过，请按「重新指向当前目标表」；若本组的写入确认已被撤销，需要先重新确认。
+                {confirmed ? null : "本组目前尚未确认写入目标，这些记录不会同步。"}
               </p>
             ) : null}
-            <p className="attachment-hint">同步只新增执行记录；不通过时会新增缺陷，旧记录与旧缺陷不会被修改。</p>
+            {confirmed ? (
+              <p className="attachment-hint">同步只新增执行记录；不通过时会新增缺陷，旧记录与旧缺陷不会被修改。</p>
+            ) : null}
           </div>
         ) : null}
         {notice ? <p className="inline-status saved" role="status">{notice}</p> : null}
