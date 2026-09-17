@@ -31,7 +31,8 @@ const PIP_COUNTS = { passed: 0, failed: 0, skipped: 0, untested: 0 };
 for (const item of PIP_CASES) PIP_COUNTS[toneOf(item.latest_result)] += 1;
 const PIP_PROGRESS =
   `${PIP_COUNTS.passed + PIP_COUNTS.failed + PIP_COUNTS.skipped}/${PIP_CASES.length}` +
-  ` · ✓${PIP_COUNTS.passed} ✗${PIP_COUNTS.failed} ○${PIP_COUNTS.untested}`;
+  ` · 通过${PIP_COUNTS.passed} 不通过${PIP_COUNTS.failed}` +
+  ` 跳过${PIP_COUNTS.skipped} 未测${PIP_COUNTS.untested}`;
 
 async function mockApi(page: Page) {
   await page.route("**/api/**", async (route: Route) => {
@@ -208,6 +209,27 @@ test("picture-in-picture opens when supported and degrades visibly when not", as
   expect(
     await pipPage.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)
   ).toBe(true);
+  // The desk clips its own overflow in the small window, so a document-level
+  // scrollWidth check cannot see a progress line wider than the surface — the
+  // clipped half just disappears. Measure the line against the desk's padding
+  // box, which is exactly the region `.pip-surface .execution-desk` lets the
+  // reader see: this is what makes "still fits at 420px" an assertion rather
+  // than a hope about how the words happen to wrap.
+  const progressFits = await pipPage.locator(".desk-progress").evaluate((line) => {
+    const desk = line.closest(".execution-desk");
+    // Deliberately no `instanceof HTMLElement`: the desk node is created in the
+    // opener's document and then adopted into the PiP one, so its prototype still
+    // belongs to the opener's realm and that check is false inside this window.
+    if (!desk) return { width: 0, room: -1, fits: false };
+    const box = line.getBoundingClientRect();
+    const clip = desk.getBoundingClientRect();
+    const style = getComputedStyle(desk);
+    const left = clip.left + parseFloat(style.borderLeftWidth);
+    const right = clip.right - parseFloat(style.borderRightWidth);
+    return { width: box.width, room: right - left, fits: box.left >= left && box.right <= right };
+  });
+  expect(progressFits.fits).toBe(true);
+  expect(progressFits.width).toBeLessThanOrEqual(progressFits.room);
   await pipPage.getByRole("button", { name: "通过", exact: true }).click();
   await expect(pipPage.getByRole("button", { name: "通过", exact: true })).toHaveAttribute(
     "aria-pressed",

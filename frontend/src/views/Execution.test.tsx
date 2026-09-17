@@ -1188,9 +1188,10 @@ function gridCases() {
     testCase("c1", "第一条", null, "B-001", "通过"),
     testCase("c2", "第二条", null, "B-002", null),
     testCase("c3", "第三条", null, "B-003", "未执行"),
-    // 不通过 is here so no term of `{done}/{total} · ✓{passed} ✗{failed} ○{untested}`
-    // can be replaced by a constant and still render this line: without a failed
-    // row, ✗ is pinned by nothing at all.
+    // 不通过 is here so every term of
+    // `{done}/{total} · 通过{p} 不通过{f} 跳过{s} 未测{u}` renders a count of its
+    // own: dropping a term or freezing one at a constant changes this line, which
+    // a fixture without a failed row could not catch.
     testCase("c4", "第四条", null, "B-004", "不通过")
   ];
 }
@@ -1218,7 +1219,7 @@ it("shows one square per case with its own colour", async () => {
   // Both renderings of the one array: the sidebar legend and the desk line the
   // PiP window carries.
   expect(screen.getByText("通过 1 · 不通过 1 · 跳过 1 · 未测 1")).toBeVisible();
-  expect(screen.getByText("3/4 · ✓1 ✗1 ○1")).toBeVisible();
+  expect(screen.getByText("3/4 · 通过1 不通过1 跳过1 未测1")).toBeVisible();
 });
 
 it("jumps to a case by clicking its square", async () => {
@@ -1237,11 +1238,11 @@ it("shows the running counts in the desk so the PiP window carries them", async 
     loadCases: async () => [
       testCase("c1", "第一条", null, "B-001", "通过"),
       // The fixture needs a 「未执行」 row: it is the one shape where counting
-      // `done` from ✓/✗ alone still renders a plausible line, so without it the
-      // rule this test exists for would go unpinned.
+      // `done` from 通过/不通过 alone still renders a plausible line, so without
+      // it the rule this test exists for would go unpinned.
       testCase("c2", "第二条", null, "B-002", "未执行"),
       testCase("c3", "第三条", null, "B-003", null),
-      // And a 不通过 row, or `✗{failed}` can be a constant and still pass.
+      // And a 不通过 row, or `不通过{failed}` can be a constant and still pass.
       testCase("c4", "第四条", null, "B-004", "不通过")
     ]
   });
@@ -1249,13 +1250,13 @@ it("shows the running counts in the desk so the PiP window carries them", async 
   // 未执行 is a decision, so it is done: 3/4, with one row left untested and one
   // failure among the finished rows.
   await screen.findByText("第三条");
-  const line = screen.getByText("3/4 · ✓1 ✗1 ○1");
+  const line = screen.getByText("3/4 · 通过1 不通过1 跳过1 未测1");
   const desk = document.querySelector(".execution-desk");
   // The text alone would also be satisfied by the sidebar, which `usePiP` leaves
   // in the main window — only this node travels into the small window.
   expect(desk).not.toBeNull();
   expect(desk?.contains(line)).toBe(true);
-  expect(desk?.textContent).toContain("3/4 · ✓1 ✗1 ○1");
+  expect(desk?.textContent).toContain("3/4 · 通过1 不通过1 跳过1 未测1");
   expect(line).toHaveAttribute("title", "通过 1 · 不通过 1 · 跳过 1 · 未测 1");
   expect(line).toHaveAttribute("aria-label", "已测 3 / 4：通过 1，不通过 1，跳过 1，未测 1");
   // The sidebar legend is the other rendering of the same numbers.

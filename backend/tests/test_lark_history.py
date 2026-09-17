@@ -208,6 +208,52 @@ def test_a_labelled_remark_decides_the_row():
     assert match_bugs([row], "B-002") == []
 
 
+def test_a_label_buried_in_pasted_console_text_does_not_hide_the_description_match():
+    """Only the remark's first line carries this tool's identity label.
+
+    The old writer's remark is "由用例 … 提交（结果：…）" followed by whatever the
+    operator pasted, and pasted console output can itself contain a 用例： label
+    naming some other case. That one is a quotation, not a filing decision, so
+    the row stays with the case its 问题描述 was filed under.
+    """
+
+    rows = [
+        {
+            "record_id": "legacy-console",
+            "fields": {
+                "问题描述": "B-001 绑定未触发",
+                "备注": "由用例 B-001 提交（结果：不通过）\n控制台：用例：B-002 也复现了",
+            },
+        }
+    ]
+
+    matches = match_bugs(rows, "B-001")
+
+    assert [match["record_id"] for match in matches] == ["legacy-console"]
+    assert matches[0]["matched_by"] == "问题描述"
+
+
+def test_a_label_buried_in_pasted_console_text_does_not_claim_the_row_either():
+    """The mirror: decoration must not attract a row it does not own.
+
+    The same row's description names B-001, so the row is B-001's history. The
+    B-002 that the pasted console text happens to mention is somebody else's
+    case — a buried label is neither an identity nor evidence for one.
+    """
+
+    rows = [
+        {
+            "record_id": "legacy-console",
+            "fields": {
+                "问题描述": "B-001 绑定未触发",
+                "备注": "由用例 B-001 提交（结果：不通过）\n控制台：用例：B-002 也复现了",
+            },
+        }
+    ]
+
+    assert match_bugs(rows, "B-002") == []
+
+
 def test_the_writer_output_round_trips_through_the_matcher(failed_attempt):
     """The row the writer ships today must be findable by the reader today.
 

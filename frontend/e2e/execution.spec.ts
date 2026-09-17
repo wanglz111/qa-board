@@ -37,7 +37,8 @@ const DEFAULT_CASES: GroupCase[] = [
 ];
 
 // Pairwise-distinct counts — 1 通过, 2 不通过, 1 未执行, 1 未测 — because equal
-// counts would let a swapped ✓/✗ mapping (label and all) render the same string.
+// counts would let a swapped 通过/不通过 mapping (label and all) render the same
+// string.
 const MIXED_CASES: GroupCase[] = [
   seedCase({ code: "B-001", title: "登录后绑定钱包", latest_result: "通过" }, 1),
   seedCase({ code: "B-002", title: "登录后解绑钱包", latest_result: "不通过" }, 2),
@@ -205,10 +206,11 @@ test("the desk advances to the next unrun case and the grid colours every result
   await mockApi(page, MIXED_CASES);
   await page.goto("/");
 
-  // 未执行 counts as done but as neither ✓ nor ✗, so this is 4/5. The counts are
-  // pairwise distinct on purpose: `4/5 · ✓1 ✗2 ○1` is the only mapping of the
-  // three marks onto these numbers, so a swapped ✓/✗ cannot render it.
-  await expect(page.locator(".desk-progress")).toHaveText("4/5 · ✓1 ✗2 ○1");
+  // 未执行 counts as done but as neither 通过 nor 不通过, so this is 4/5. 不通过 is
+  // the one count no other word carries, so a swapped 通过/不通过 cannot render
+  // this line — and naming all four words is what makes the skipped row visible
+  // at all, which the old marks did not.
+  await expect(page.locator(".desk-progress")).toHaveText("4/5 · 通过1 不通过2 跳过1 未测1");
 
   const squares = page.locator(".case-square");
   await expect(squares).toHaveCount(5);
@@ -255,7 +257,7 @@ test("the desk advances to the next unrun case and the grid colours every result
   await page.getByRole("button", { name: "保存结果" }).click();
   await expect(page.getByText("本组已全部测过")).toBeVisible();
   await expect(page.getByRole("heading", { name: "登录后更换钱包", exact: true })).toBeVisible();
-  await expect(page.locator(".desk-progress")).toHaveText("5/5 · ✓2 ✗2 ○0");
+  await expect(page.locator(".desk-progress")).toHaveText("5/5 · 通过2 不通过2 跳过1 未测0");
 });
 
 test("a save moves the desk on and the confirmation names the case it is about", async ({ page }) => {
@@ -266,7 +268,7 @@ test("a save moves the desk on and the confirmation names the case it is about",
   const first = page.getByRole("heading", { name: "登录后绑定钱包", exact: true });
   const second = page.getByRole("heading", { name: "登录后解绑钱包", exact: true });
   await expect(first).toBeVisible();
-  await expect(page.locator(".desk-progress")).toHaveText("0/2 · ✓0 ✗0 ○2");
+  await expect(page.locator(".desk-progress")).toHaveText("0/2 · 通过0 不通过0 跳过0 未测2");
 
   await page.getByRole("button", { name: "通过", exact: true }).click();
   await page.getByRole("button", { name: "保存结果" }).click();

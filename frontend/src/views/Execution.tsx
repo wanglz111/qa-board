@@ -508,7 +508,7 @@ export function ExecutionView({
   for (const item of cases) counts[toneOf(item.latest_result)] += 1;
   const { passed, failed, skipped, untested } = counts;
   // 「未执行」 is a decision — the operator looked and said so — hence `done`, but
-  // it is neither ✓ nor ✗.
+  // it is neither 通过 nor 不通过.
   const done = passed + failed + skipped;
 
   return (
@@ -550,15 +550,17 @@ export function ExecutionView({
             <Keyboard size={15} />
             Enter 通过 · Backspace 不通过 · Ctrl+B 未执行 · ←/→ 切换
           </span>
-          {/* The sidebar grid is left behind when the desk moves into the PiP
-              window, so the counts travel with the desk instead. */}
+          {/* The sidebar grid — and the legend that names all four counts with
+              it — is left behind when the desk moves into the PiP window, so the
+              line spells every count out instead of using marks: `✓1 ✗0 ○1` read
+              as if nothing had been skipped. */}
           {cases.length > 0 ? (
             <span
               className="desk-progress"
               title={`通过 ${passed} · 不通过 ${failed} · 跳过 ${skipped} · 未测 ${untested}`}
               aria-label={`已测 ${done} / ${cases.length}：通过 ${passed}，不通过 ${failed}，跳过 ${skipped}，未测 ${untested}`}
             >
-              {done}/{cases.length} · ✓{passed} ✗{failed} ○{untested}
+              {done}/{cases.length} · 通过{passed} 不通过{failed} 跳过{skipped} 未测{untested}
             </span>
           ) : null}
           <button

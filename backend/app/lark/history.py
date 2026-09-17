@@ -110,6 +110,8 @@ CASE_LABEL = re.compile(r"用例\s*[:：]\s*")
 
 
 def parse_remark_case_reference(text: str | None) -> CaseReference | None:
+    """The case a 用例： label names, sought anywhere in the text."""
+
     if not text:
         return None
     match = CASE_LABEL.search(text)
@@ -118,12 +120,42 @@ def parse_remark_case_reference(text: str | None) -> CaseReference | None:
     return parse_case_reference(text[match.end() :])
 
 
-def labelled_remark(fields: dict[str, Any]) -> tuple[str, CaseReference] | None:
-    """The remark carrying a 用例： label, with the case that label names.
+def parse_remark_first_line_reference(text: str | None) -> CaseReference | None:
+    """The same parse, restricted to the first line of the remark.
 
-    The label is a statement — this tool files it, and a person types it to say
-    which case the row belongs to — so the row it appears on is decided by it.
-    A remark without the label is only prose and says nothing here.
+    This tool writes ``用例：{code} {title}`` as line 1 and puts nothing before
+    it, so a label found there is the row's own statement of which case it
+    belongs to. A label further down sits inside words somebody else supplied —
+    pasted console output, a hand-edited tail — and only says that *that* text
+    mentions a case. Identity comes from line 1, or not at all.
+    """
+
+    if not text:
+        return None
+    return parse_remark_case_reference(text.split("\n", 1)[0])
+
+
+def first_line_remark_label(fields: dict[str, Any]) -> tuple[str, CaseReference] | None:
+    """The remark whose first line is a 用例： label, with the case it names.
+
+    This is the authoritative reading: the label is a filing decision, so the
+    row it leads is decided by it — matching the code matches, naming another
+    case means this row is not this case's history.
+    """
+
+    for name in REMARK_FIELDS:
+        reference = parse_remark_first_line_reference(str(fields.get(name) or ""))
+        if reference is not None:
+            return name, reference
+    return None
+
+
+def remark_label_anywhere(fields: dict[str, Any]) -> tuple[str, CaseReference] | None:
+    """The remark carrying a 用例： label anywhere, the loose last resort.
+
+    Used only once nothing else has spoken: a hand-edited row may lead its
+    remark with prose and put the label below it. It can never *outrank* a
+    description, because pasted console text frequently contains the label too.
     """
 
     for name in REMARK_FIELDS:
@@ -219,6 +251,28 @@ def history_for(records: list[dict[str, Any]], code: str) -> CaseHistory:
     return history
 
 
+def _description_match(fields: dict[str, Any], code: str) -> tuple[str | None, bool]:
+    """The description field naming ``code``, and whether any field named a case.
+
+    The second element is what stops a row from being re-attributed: once a
+    description reads as a case code, that column has spoken for the row, even
+    when the code it named is a different case. A ``B-002 也复现了`` in 问题描述
+    is the operator's prose and must not be read as this row being B-002's
+    history — but a leading code in that same column is still how every legacy
+    row was filed, so the column is read before any buryable label is.
+    """
+
+    named = False
+    for name in DESCRIPTION_FIELDS:
+        reference = parse_labelled_case_reference(str(fields.get(name) or ""))
+        if reference is None:
+            continue
+        named = True
+        if reference.code == code:
+            return name, True
+    return None, named
+
+
 def match_bugs(bug_records: list[dict[str, Any]], code: str) -> list[dict[str, Any]]:
     matches: list[dict[str, Any]] = []
     for record in bug_records:
@@ -229,25 +283,30 @@ def match_bugs(bug_records: list[dict[str, Any]], code: str) -> list[dict[str, A
                 matched_by = f"字段「{name}」"
                 break
         if matched_by is None:
-            # A 用例： label is a statement of which case the row belongs to, while
-            # a leading code-shaped token in 问题描述 is only a coincidence: that
-            # column holds the operator's own prose now, so "B-002 也复现了" must
-            # not read as this row being B-002's history. A labelled remark
-            # therefore decides the row outright — matching it matches, naming
-            # another case means this row is not this case's — and the
-            # description is read as the last resort only when no label exists at
-            # all, which is how the legacy rows keep matching.
-            labelled = labelled_remark(fields)
-            if labelled is None:
-                for name in DESCRIPTION_FIELDS:
-                    reference = parse_labelled_case_reference(str(fields.get(name) or ""))
-                    if reference is not None and reference.code == code:
-                        matched_by = name
-                        break
-            else:
+            # Only a label on the remark's first line is this tool's own filing
+            # decision (it writes `用例：{code} {title}` as line 1); it decides
+            # the row outright, and the description is not consulted.
+            labelled = first_line_remark_label(fields)
+            if labelled is not None:
                 name, reference = labelled
                 if reference.code == code:
                     matched_by = name
+            else:
+                # Everything else is prose. The description is read first
+                # because that is where the legacy rows — including the old
+                # writer's "由用例 … 提交" remarks followed by pasted console
+                # text — carry their code, and because a code-shaped token that
+                # column reads is a filing decision, not a coincidence to be
+                # overridden by a label buried in the console output below it.
+                matched_by, description_named = _description_match(fields, code)
+                if matched_by is None and not description_named:
+                    # Nothing above named a case, so a hand-edited remark with
+                    # the label below its first line is still readable.
+                    loose = remark_label_anywhere(fields)
+                    if loose is not None:
+                        name, reference = loose
+                        if reference.code == code:
+                            matched_by = name
         if matched_by is None:
             continue
         matches.append(
