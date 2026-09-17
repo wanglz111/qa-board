@@ -45,8 +45,17 @@ function isDone(item: GroupCase): boolean {
   return (item.latest_result ?? null) !== null;
 }
 
-export function startIndexFor(cases: GroupCase[], rememberedCode: string | null): number {
+// A cursor only speaks for the group it was written in: case codes repeat
+// between groups, so a code remembered in one group would open an unrelated
+// case in another. The rule lives here rather than at the call site so it can
+// be tested on its own — a guard that exists only inside a component cannot be.
+export function startIndexFor(
+  cases: GroupCase[],
+  cursor: Cursor | null,
+  groupId: string
+): number {
   if (cases.length === 0) return 0;
+  const rememberedCode = cursor && cursor.groupId === groupId ? cursor.code : null;
   if (rememberedCode) {
     const remembered = cases.findIndex((item) => item.code === rememberedCode);
     if (remembered >= 0) return remembered;

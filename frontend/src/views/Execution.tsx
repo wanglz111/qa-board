@@ -191,8 +191,9 @@ export function ExecutionView({
       // Resume where the operator left off, else at the first case nobody has
       // run. This is the whole point of the page: coming back after a break
       // must not mean re-reading the first row of the group.
-      const remembered = readCursor();
-      const start = startIndexFor(result, remembered?.groupId === groupId ? remembered.code : null);
+      // The cursor's own rule — it only speaks for the group it was written in
+      // — lives inside startIndexFor, so it is unit-tested instead of trusted.
+      const start = startIndexFor(result, readCursor(), groupId);
       setCaseIndex(start);
       const current = result[start];
       if (current) {
