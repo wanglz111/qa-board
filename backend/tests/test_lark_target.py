@@ -619,8 +619,10 @@ def test_reading_a_target_in_one_base_reads_that_base_once(
     response = authenticated_client.get(f"/api/groups/{confirmed_group.id}/lark/target")
 
     assert response.status_code == 200, response.text
-    # A duplicate call avoided is not enough: the bug side has to describe the
-    # base and table the target points at, not the execution side's listing.
+    # A duplicate call avoided is not enough: the bug side has to name the table
+    # the target points at, not the execution side's. This pins the table; a
+    # role swapped at the *base* level can only be caught where the two roles
+    # sit in different bases, which the fixture below in this file covers.
     live = response.json()["live"]
     assert live["bug_base_name"] == "执行库"
     assert live["bug_table_name"] == "缺陷记录"
