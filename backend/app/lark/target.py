@@ -22,7 +22,7 @@ from app.lark.fields import (
     schema_fingerprint,
 )
 from app.lark.link import SOURCE_ID, TABLE_ID, VIEW_ID, LarkLinkError, parse_lark_link
-from app.lark.names import read_bases
+from app.lark.names import base_name, read_bases, table_name
 from app.models import Group, LarkTarget, LarkTargetRevision
 
 
@@ -51,14 +51,6 @@ class TargetDraft:
     @property
     def fingerprint(self) -> str:
         return "|".join(getattr(self, key) for key in IDENTITY_KEYS)
-
-
-def _table_name(tables: list[dict[str, Any]], table_id: str) -> str | None:
-    for table in tables:
-        if str(table.get("table_id")) == table_id:
-            name = table.get("name")
-            return str(name) if name else None
-    return None
 
 
 def _missing_credential() -> str | None:
@@ -118,7 +110,7 @@ def resolve_link(client: LarkClient, url: str) -> dict[str, Any]:
     if not tables:
         read_errors.append("该多维表格中没有数据表，请先在 Lark 中新建数据表")
 
-    selected = link.table_id if _table_name(tables, link.table_id or "") else None
+    selected = link.table_id if table_name(tables, link.table_id or "") else None
     selected = selected or (str(tables[0].get("table_id")) if tables else None)
     try:
         fields = client.list_fields(base_token, selected) if selected else []
@@ -141,7 +133,7 @@ def resolve_link(client: LarkClient, url: str) -> dict[str, Any]:
         ],
         "selected": {
             "table_id": selected,
-            "table_name": _table_name(tables, selected or ""),
+            "table_name": table_name(tables, selected or ""),
             "view_id": link.view_id,
             "view_name": None,
         },
@@ -165,8 +157,8 @@ def read_draft_state(client: LarkClient, draft: TargetDraft) -> dict[str, Any]:
     )
     bug_fields = client.list_fields(draft.bug_base_token, draft.bug_table_id)
 
-    execution_table_name = _table_name(execution_tables, draft.execution_table_id)
-    bug_table_name = _table_name(bug_tables, draft.bug_table_id)
+    execution_table_name = table_name(execution_tables, draft.execution_table_id)
+    bug_table_name = table_name(bug_tables, draft.bug_table_id)
     read_errors: list[str] = []
     if execution_table_name is None:
         read_errors.append(f"Lark 中找不到执行记录表 {draft.execution_table_id}")
@@ -176,9 +168,9 @@ def read_draft_state(client: LarkClient, draft: TargetDraft) -> dict[str, Any]:
     schema_errors = missing_required_fields(execution_fields, REQUIRED_RUN_FIELD_TYPES)
     schema_errors += missing_required_fields(bug_fields, REQUIRED_BUG_FIELD_TYPES)
     return {
-        "execution_base_name": str((execution_base.get("app") or {}).get("name") or ""),
+        "execution_base_name": base_name(execution_base),
         "execution_table_name": execution_table_name,
-        "bug_base_name": str((bug_base.get("app") or {}).get("name") or ""),
+        "bug_base_name": base_name(bug_base),
         "bug_table_name": bug_table_name,
         "execution_fields": describe_fields(execution_fields),
         "bug_fields": describe_fields(bug_fields),

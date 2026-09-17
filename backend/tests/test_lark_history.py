@@ -363,11 +363,46 @@ def test_opening_one_case_reads_each_table_once_and_no_fields(
     paths = [
         request["path"] for request in lark_fake.requests if request["method"] == "GET"
     ]
-    assert [path for path in paths if path.endswith("/fields")] == []
-    assert [path for path in paths if path.endswith("/records")] == [
+    assert paths == [
+        "/open-apis/bitable/v1/apps/app-exec",
+        "/open-apis/bitable/v1/apps/app-exec/tables",
+        "/open-apis/bitable/v1/apps/app-bug",
+        "/open-apis/bitable/v1/apps/app-bug/tables",
         "/open-apis/bitable/v1/apps/app-exec/tables/tbl-runs/records",
         "/open-apis/bitable/v1/apps/app-bug/tables/tbl-defects/records",
     ]
     body = response.json()
     assert body["source_table_name"] == "执行记录"
     assert body["bug_table_name"] == "缺陷记录"
+
+
+def test_case_history_reports_a_target_whose_records_cannot_be_read(
+    authenticated_client, lark_fake, confirmed_group
+):
+    """A readable target whose rows are refused keeps the unreadable state."""
+
+    lark_fake.records_error = True
+
+    body = authenticated_client.get(
+        f"/api/groups/{confirmed_group.id}/cases/B-001/lark-history"
+    ).json()
+
+    assert body["available"] is False
+    assert body["read_errors"]
+    assert body["original"] == []
+
+
+def test_case_history_reports_a_stored_table_missing_from_the_listing(
+    authenticated_client, lark_fake, confirmed_group
+):
+    """A readable base whose listing no longer carries the stored table."""
+
+    lark_fake.bases["app-exec"] = ("执行库", [("tbl-gone", "已删除的表")])
+
+    body = authenticated_client.get(
+        f"/api/groups/{confirmed_group.id}/cases/B-001/lark-history"
+    ).json()
+
+    assert body["available"] is False
+    assert body["read_errors"] == ["Lark 中找不到执行记录表 tbl-runs"]
+    assert not lark_fake.record_requests

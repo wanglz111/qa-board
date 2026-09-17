@@ -35,6 +35,10 @@ def table_name(tables: list[dict[str, Any]], table_id: str) -> str | None:
     return None
 
 
+def base_name(metadata: dict[str, Any]) -> str:
+    return str((metadata.get("app") or {}).get("name") or "")
+
+
 def read_target_names(client: LarkClient, target: Any) -> dict[str, Any]:
     """The live names of a target's two tables, never its schema."""
 
@@ -52,11 +56,8 @@ def read_target_names(client: LarkClient, target: Any) -> dict[str, Any]:
     execution_base, execution_tables = reads[target.execution_base_token]
     bug_base, bug_tables = reads[target.bug_base_token]
 
-    def _base_name(metadata: dict[str, Any]) -> str:
-        return str((metadata.get("app") or {}).get("name") or "")
-
-    execution_base_name = _base_name(execution_base)
-    bug_base_name = _base_name(bug_base)
+    execution_base_name = base_name(execution_base)
+    bug_base_name = base_name(bug_base)
     execution_table_name = table_name(execution_tables, target.execution_table_id)
     bug_table_name = table_name(bug_tables, target.bug_table_id)
     read_errors: list[str] = []

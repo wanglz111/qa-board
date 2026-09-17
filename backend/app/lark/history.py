@@ -342,23 +342,31 @@ def case_lark_history(
     if state["read_errors"]:
         return _unavailable_history(code, state["read_errors"], "Lark 目标表不可读")
 
-    records = client.list_records(target.execution_base_token, target.execution_table_id)
-    history = history_for(records, code)
-    case_history = history.original + history.retests
-    references = {
-        str(record.get("record_id")): _upsert_reference(
-            db,
-            group_case,
-            record,
-            table_id=target.execution_table_id,
-            certainty=history.certainty,
+    # The name read above can succeed while the rows themselves are refused
+    # (the app lost advanced permissions, or Lark throttled the read), so this
+    # stays the page's unreadable-target state instead of escaping as a 500.
+    try:
+        records = client.list_records(
+            target.execution_base_token, target.execution_table_id
         )
-        for record in case_history
-    }
-    bugs = match_bugs(
-        client.list_records(target.bug_base_token, target.bug_table_id),
-        code,
-    )
+        history = history_for(records, code)
+        case_history = history.original + history.retests
+        references = {
+            str(record.get("record_id")): _upsert_reference(
+                db,
+                group_case,
+                record,
+                table_id=target.execution_table_id,
+                certainty=history.certainty,
+            )
+            for record in case_history
+        }
+        bugs = match_bugs(
+            client.list_records(target.bug_base_token, target.bug_table_id),
+            code,
+        )
+    except LarkError as error:
+        return _unavailable_history(code, [str(error)], "Lark 目标表不可读")
     db.commit()
 
     def serialize(record: dict[str, Any]) -> dict[str, Any]:

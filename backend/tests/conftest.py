@@ -320,6 +320,9 @@ class FakeLark:
         # A base the app cannot read at all: metadata and the table listing
         # both refuse, which is what an unreadable target looks like.
         self.bases_error = False
+        # The base reads fine but its rows refuse: dropped advanced permissions
+        # or a throttled read, which the panel must still report as unreadable.
+        self.records_error = False
         self.field_create_error = False
         self.client = LarkClient(
             base_url="https://open.feishu.test",
@@ -615,6 +618,8 @@ class FakeLark:
             fields = self.bug_fields if role == "bug" else self.fields
             return httpx.Response(200, json={"code": 0, "data": {"items": fields, "has_more": False}})
         if path.endswith("/records"):
+            if self.records_error:
+                return httpx.Response(500, json={"code": 1, "msg": "records unavailable"})
             records = self.bug_records if "tbl-defects" in path else self.records
             offset = int(request.url.params.get("page_token") or 0)
             page = records[offset : offset + self.page_size]
