@@ -47,6 +47,25 @@ def _attachment_value(file_tokens: list[str]) -> list[dict[str, str]]:
     return [{"file_token": token} for token in file_tokens]
 
 
+def _person_field_value(
+    name: str, *, text: str, person_fields: set[str], open_id: str | None = None
+) -> Any | None:
+    """One value for a column that may be person-typed; ``None`` omits the field.
+
+    A person column accepts a list of ids and nothing else — a display name, or
+    this deployment's ``待指派`` placeholder, is refused by Lark and takes the
+    whole record down with it. So a person column only ever receives an id the
+    deployment really configured, and one nobody can fill stays out of the
+    request: leaving an optional column empty still writes the row, while a
+    wrong-typed value cannot. A text column keeps receiving the display name it
+    always has, which is what the reference table's own columns hold.
+    """
+
+    if name in person_fields:
+        return [{"id": open_id}] if open_id else None
+    return text
+
+
 def execution_fields(
     attempt: Attempt,
     case: GroupCase,
@@ -54,22 +73,33 @@ def execution_fields(
     owner: str,
     reporter: str,
     attachments: list[str] | None = None,
+    person_fields: set[str] | None = None,
+    reporter_id: str | None = None,
 ) -> dict[str, Any]:
-    return {
+    people = person_fields or set()
+    fields: dict[str, Any] = {
         "用例": f"{case.code} {case.title}",
         "结果": attempt.result or "",
         "优先级": _priority(case.priority, RUN_PRIORITY_OPTIONS),
         # 负责人 and 报告人 are two separate plain-text columns: the hand-run
         # rows file the case under the deployment's owner (待指派) and name the
-        # reporter, rather than repeating one address in both.
-        "负责人": owner,
-        "报告人": reporter,
+        # reporter, rather than repeating one address in both. Either column is
+        # a person column in a table this tool did not build, and then only a
+        # configured open id may fill it — 负责人, which is a placeholder, is
+        # left empty there instead of failing the create.
+        "负责人": _person_field_value("负责人", text=owner, person_fields=people),
+        "报告人": _person_field_value(
+            "报告人", text=reporter, person_fields=people, open_id=reporter_id
+        ),
         "日期": _milliseconds(attempt.created_at),
         # A run with no screenshot writes an empty attachment list: the column
         # is attachment-typed in every table this tool builds.
         "截图": _attachment_value(attachments or []),
         "控制台": attempt.console_text or "",
     }
+    # An omitted key, not a null one, is how a column the writer cannot fill
+    # stays out of the request.
+    return {name: value for name, value in fields.items() if value is not None}
 
 
 def bug_fields(
@@ -79,6 +109,7 @@ def bug_fields(
     reporter: str,
     attachments: list[str] | None = None,
     reporter_id: str | None = None,
+    person_fields: set[str] | None = None,
 ) -> dict[str, Any]:
     note = (attempt.note or "").strip()
     description = f"{case.code} {case.title}"
@@ -99,13 +130,21 @@ def bug_fields(
         "备注": remark,
         "截图": _attachment_value(attachments or []),
     }
-    # 反馈人 is a person column in the verified schema, and a person column only
-    # accepts an open_id. Without one configured the field stays out of the
-    # request, so a text-typed legacy column keeps the reporter it always had.
-    if reporter_id:
-        fields["反馈人"] = [{"id": reporter_id}]
-    else:
-        fields["反馈人"] = reporter
+    # 反馈人 is a person column in the verified schema and in every table this
+    # tool generates, and a text column in the legacy tables it inherited. The
+    # destination's own types decide — and when the caller has none to give, a
+    # configured open id is the deployment's word that this column is a person
+    # column, which is what the writer assumed before it could read them.
+    people = (
+        person_fields
+        if person_fields is not None
+        else ({"反馈人"} if reporter_id else set())
+    )
+    value = _person_field_value(
+        "反馈人", text=reporter, open_id=reporter_id, person_fields=people
+    )
+    if value is not None:
+        fields["反馈人"] = value
     return fields
 
 

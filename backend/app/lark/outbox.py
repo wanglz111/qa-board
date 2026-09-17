@@ -16,6 +16,7 @@ from app.config import settings
 from app.db import get_db
 from app.lark import cache as lark_cache
 from app.lark.client import LarkError, LarkTimeout
+from app.lark.fields import person_field_names
 from app.lark.target import target_for
 from app.lark.write import (
     LarkWriteGateway,
@@ -60,6 +61,21 @@ SNAPSHOT_LIMIT = 10
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+# The reason a job carries is Lark's own words plus the remediation the client
+# already worded; none of it is secret. The bound is only so a pathological
+# response body cannot turn one panel line into a wall of text.
+ERROR_TEXT_LIMIT = 600
+
+
+def _reason(error: BaseException | str | None) -> str | None:
+    """The human-readable half of a failure, ready to store beside its kind."""
+
+    if error is None:
+        return None
+    text = str(error).strip()
+    return text[:ERROR_TEXT_LIMIT] if text else None
 
 
 def _stored_screenshots(attempt: Attempt) -> list[tuple[str, bytes, str]]:
@@ -213,9 +229,19 @@ def claim_next_job(db: Session, *, now: datetime | None = None) -> SyncJob | Non
     return job
 
 
-def _schedule_retry(db: Session, job: SyncJob, error_kind: str, *, now: datetime) -> None:
+def _schedule_retry(
+    db: Session,
+    job: SyncJob,
+    error_kind: str,
+    *,
+    now: datetime,
+    reason: BaseException | str | None = None,
+) -> None:
     job.retry_count += 1
     job.error_kind = error_kind
+    # The category alone left an operator with "create_execution_failed" and no
+    # way to learn what Lark refused; the reason travels with it from here on.
+    job.last_error = _reason(reason)
     if job.retry_count > MAX_RETRIES:
         job.state = "failed"
         job.lease_until = None
@@ -228,9 +254,16 @@ def _schedule_retry(db: Session, job: SyncJob, error_kind: str, *, now: datetime
     db.flush()
 
 
-def _mark_uncertain(db: Session, job: SyncJob, error_kind: str) -> None:
+def _mark_uncertain(
+    db: Session,
+    job: SyncJob,
+    error_kind: str,
+    *,
+    reason: BaseException | str | None = None,
+) -> None:
     job.state = "uncertain"
     job.error_kind = error_kind
+    job.last_error = _reason(reason)
     job.lease_until = None
     job.next_retry_at = None
     db.flush()
@@ -249,6 +282,7 @@ def park_job_for_target_change(
     moment = now or _now()
     job.state = "pending"
     job.error_kind = "target_changed"
+    job.last_error = "该行排队时确认的目标表与当前目标表不一致（目标表更换过），等待重新指向当前目标表"
     job.lease_until = None
     job.next_retry_at = moment + timedelta(seconds=STALE_CONFIRMATION_SECONDS)
     db.flush()
@@ -290,33 +324,58 @@ def run_job(
         db.commit()
         return job
 
+    # Which columns are person columns is decided by the types read when this
+    # target was confirmed, not by a guess: a person column only accepts an open
+    # id, and sending a display name to one is refused by Lark — the create
+    # fails, retries cannot fix it, and every row of the group is stuck. A
+    # target confirmed before the fingerprint existed stores none, and there a
+    # configured open id still means 反馈人 is a person column, exactly as this
+    # writer assumed before it could read the destination's types.
+    run_people = person_field_names(target.schema_fingerprint, "execution")
+    bug_people = person_field_names(target.schema_fingerprint, "bug")
+    if target.schema_fingerprint is None and reporter_id:
+        bug_people = {"反馈人"}
+
     if job.new_exec_record_id is None:
         try:
             # The evidence travels with the row: a failure nobody can look at is
             # not a defect report. A file that cannot be uploaded keeps the job
             # queued instead of dropping the screenshot.
             attachments = _upload_screenshots(gateway, attempt, role="execution")
-        except LarkError:
-            _schedule_retry(db, job, "upload_screenshot_failed", now=moment)
+        except LarkError as error:
+            _schedule_retry(db, job, "upload_screenshot_failed", now=moment, reason=error)
             db.commit()
             return job
         fields = execution_fields(
-            attempt, case, owner=owner or reporter, reporter=reporter, attachments=attachments
+            attempt,
+            case,
+            owner=owner or reporter,
+            reporter=reporter,
+            attachments=attachments,
+            person_fields=run_people,
+            reporter_id=reporter_id,
         )
         try:
             job.new_exec_record_id = gateway.create_execution(fields)
-        except LarkTimeout:
+        except LarkTimeout as error:
             # The create may have landed; only a single provable match may be
             # adopted, otherwise a human has to look before anything retries.
             matches = gateway.find_execution_ids(fields)
             if len(matches) == 1:
                 job.new_exec_record_id = matches[0]
             else:
-                _mark_uncertain(db, job, "timeout_unreconciled")
+                _mark_uncertain(
+                    db,
+                    job,
+                    "timeout_unreconciled",
+                    reason=f"{error}（远端未找到唯一匹配，可能已写入，需人工核对）",
+                )
                 db.commit()
                 return job
-        except LarkError:
-            _schedule_retry(db, job, "create_execution_failed", now=moment)
+        except LarkError as error:
+            _schedule_retry(
+                db, job, "create_execution_failed", now=moment, reason=error
+            )
             db.commit()
             return job
         # Persist the new record id before touching the bug table so a crash
@@ -328,10 +387,10 @@ def run_job(
             # A bug table may live in another base, where the execution record's
             # tokens are not valid; the bug row gets its own uploads.
             bug_attachments = _upload_screenshots(gateway, attempt, role="bug")
-        except LarkError:
+        except LarkError as error:
             # An upload is not a record write: nothing ambiguous happened, so a
             # bounded retry is safe and the screenshot is not dropped.
-            _schedule_retry(db, job, "upload_screenshot_failed", now=moment)
+            _schedule_retry(db, job, "upload_screenshot_failed", now=moment, reason=error)
             db.commit()
             return job
         try:
@@ -342,22 +401,30 @@ def run_job(
                     reporter=reporter,
                     attachments=bug_attachments,
                     reporter_id=reporter_id,
+                    person_fields=bug_people,
                 )
             )
-        except LarkTimeout:
-            _mark_uncertain(db, job, "timeout_after_exec_create")
+        except LarkTimeout as error:
+            _mark_uncertain(
+                db,
+                job,
+                "timeout_after_exec_create",
+                reason=f"{error}（执行记录已写入，缺陷可能也已写入，需人工核对后再释放）",
+            )
             db.commit()
             return job
-        except LarkError:
+        except LarkError as error:
             # The execution record stays; an administrator retries just the bug.
             job.state = "failed"
             job.error_kind = "create_bug_failed"
+            job.last_error = _reason(error)
             job.lease_until = None
             db.commit()
             return job
 
     job.state = "synced"
     job.error_kind = None
+    job.last_error = None
     job.lease_until = None
     job.next_retry_at = None
     db.commit()
@@ -373,8 +440,10 @@ def sync_counts(db: Session, group_id: UUID) -> dict[str, Any]:
         .group_by(SyncJob.state)
     ).all()
     counts = {state: int(count) for state, count in rows}
-    last_error = db.scalar(
-        select(SyncJob.error_kind)
+    # The kind and the words behind it come from one row, so the panel can never
+    # print a message that belongs to a different job than the kind beside it.
+    latest = db.execute(
+        select(SyncJob.error_kind, SyncJob.last_error)
         .join(Attempt, SyncJob.attempt_id == Attempt.id)
         .join(GroupCase, Attempt.group_case_id == GroupCase.id)
         .where(
@@ -383,7 +452,8 @@ def sync_counts(db: Session, group_id: UUID) -> dict[str, Any]:
         )
         .order_by(SyncJob.created_at.desc())
         .limit(1)
-    )
+    ).first()
+    last_error_kind, last_error = (latest[0], latest[1]) if latest else (None, None)
     # A parked job stays pending, so without its own counter an operator only
     # sees queued work and never learns that it is waiting for a re-point.
     parked = db.scalar(
@@ -402,7 +472,10 @@ def sync_counts(db: Session, group_id: UUID) -> dict[str, Any]:
         "failed": counts.get("failed", 0),
         "uncertain": counts.get("uncertain", 0),
         "parked": int(parked or 0),
-        "last_error_kind": last_error,
+        "last_error_kind": last_error_kind,
+        # Why, not just which category: an operator reading
+        # "create_execution_failed" alone has nothing to act on.
+        "last_error": last_error,
     }
 
 
@@ -448,9 +521,29 @@ def read_sync(group_id: UUID, db: Annotated[Session, Depends(get_db)]) -> dict[s
 def enqueue_sync(
     group_id: UUID, db: Annotated[Session, Depends(get_db)]
 ) -> dict[str, int]:
+    """The one "put my saved local results into sync" action.
+
+    Queueing alone is not enough: a row that already has a job is never inserted
+    again, so three rows parked on a stale fingerprint and one left failed by a
+    refused create answered ``queued: 0`` — the page said "已排入 0 条" while the
+    rows the operator was looking at stayed exactly where they were. The button
+    they reach for first could not move them, which reads as "同步不了".
+
+    Re-pointing a parked row and requeueing a failed one are the decisions
+    ``/sync/retry`` offers, and an administrator who has confirmed this target
+    and pressed "排入同步" is making that same decision, so it is taken here too
+    and reported per count. A row parked after an *unprovable* write is never
+    released from here: posting it again can append a second remote record, so it
+    stays behind its own button and its own acknowledgement.
+    """
+
     if db.get(Group, group_id) is None:
         raise HTTPException(status_code=404, detail="Group not found")
-    return {"queued": enqueue_group_attempts(db, group_id)}
+    # Refuses an unconfirmed target before anything is re-armed.
+    queued = enqueue_group_attempts(db, group_id)
+    repointed = repoint_parked_jobs(db, group_id)
+    requeued = retry_failed_jobs(db, group_id)
+    return {"queued": queued, "repointed": repointed, "requeued": requeued}
 
 
 def retry_failed_jobs(db: Session, group_id: UUID | None = None) -> int:
@@ -459,7 +552,13 @@ def retry_failed_jobs(db: Session, group_id: UUID | None = None) -> int:
     statement = (
         update(SyncJob)
         .where(SyncJob.state == "failed")
-        .values(state="pending", retry_count=0, next_retry_at=_now(), error_kind=None)
+        .values(
+            state="pending",
+            retry_count=0,
+            next_retry_at=_now(),
+            error_kind=None,
+            last_error=None,
+        )
     )
     if group_id is not None:
         statement = statement.where(
@@ -490,7 +589,13 @@ def release_uncertain_jobs(db: Session, group_id: UUID) -> int:
     statement = (
         update(SyncJob)
         .where(SyncJob.state == "uncertain", SyncJob.attempt_id.in_(attempt_ids))
-        .values(state="pending", retry_count=0, next_retry_at=_now(), error_kind=None)
+        .values(
+            state="pending",
+            retry_count=0,
+            next_retry_at=_now(),
+            error_kind=None,
+            last_error=None,
+        )
     )
     result = db.execute(statement)
     db.commit()
@@ -520,6 +625,7 @@ def repoint_parked_jobs(db: Session, group_id: UUID) -> int:
         .values(
             state="pending",
             error_kind=None,
+            last_error=None,
             retry_count=0,
             lease_until=None,
             next_retry_at=_now(),
@@ -572,6 +678,7 @@ def reset_jobs_for_rebuilt_table(
         "retry_count": 0,
         "next_retry_at": _now(),
         "error_kind": None,
+        "last_error": None,
         "target_fingerprint": fingerprint,
     }
     values["new_exec_record_id" if role == "execution" else "new_bug_record_id"] = None

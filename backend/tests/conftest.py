@@ -767,6 +767,18 @@ def history_ref(db_session, imported_group) -> LarkHistoryRef:
     return reference
 
 
+# The destination's types exactly as ``read_draft_state`` stores them: the
+# execution table's schema fingerprint, the role separator, the defect table's.
+# 反馈人 is a person column here because it is one in the reference table the
+# team fills by hand, and the writer has to treat it as one. The entry order
+# carries no meaning to the reader — ``schema_fingerprint`` sorts by name.
+FIXTURE_SCHEMA_FINGERPRINT = (
+    "优先级:3|报告人:1|日期:5|结果:3|用例:1|截图:17|控制台:1|负责人:1"
+    "||"
+    "优先级:3|反馈人:11|反馈时间:5|备注:1|截图:17|跟进人:11|进展状态:3|问题描述:1"
+)
+
+
 @pytest.fixture
 def confirmed_group(db_session, imported_group) -> Group:
     draft = TargetDraft("app-exec", "tbl-runs", None, "app-bug", "tbl-defects")
@@ -782,7 +794,7 @@ def confirmed_group(db_session, imported_group) -> Group:
             bug_base_name="缺陷库",
             bug_table_id="tbl-defects",
             bug_table_name="缺陷记录",
-            schema_fingerprint="schema-fixture",
+            schema_fingerprint=FIXTURE_SCHEMA_FINGERPRINT,
             target_fingerprint=draft.fingerprint,
             confirmed_at=datetime.now(timezone.utc),
         )

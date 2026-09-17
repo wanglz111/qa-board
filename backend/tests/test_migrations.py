@@ -35,9 +35,14 @@ def test_empty_test_schema_upgrades_to_head_twice(migrated_database):
     with migrated_database.connect() as connection:
         assert set(inspect(connection).get_table_names()) == EXPECTED_TABLES
         assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-            "0011_case_reference_assets"
+            "0012_sync_job_last_error"
         )
         assert "target_fingerprint" in {
+            column["name"] for column in inspect(connection).get_columns("sync_jobs")
+        }
+        # The reason a job failed has to survive a restart, so it is a column of
+        # the row and not a log line.
+        assert "last_error" in {
             column["name"] for column in inspect(connection).get_columns("sync_jobs")
         }
         assert "source" in {
@@ -161,7 +166,7 @@ def test_short_code_backfill_keeps_existing_groups_addressable(database_at_0004)
 
     with database_at_0004.connect() as connection:
         assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-            "0011_case_reference_assets"
+            "0012_sync_job_last_error"
         )
         assert connection.scalar(
             text("SELECT short_code FROM groups WHERE id = :id"), {"id": group_id}

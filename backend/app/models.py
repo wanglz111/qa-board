@@ -385,6 +385,11 @@ class SyncJob(Base):
     new_bug_record_id: Mapped[str | None] = mapped_column(String)
     target_fingerprint: Mapped[str | None] = mapped_column(String)
     error_kind: Mapped[str | None] = mapped_column(String)
+    # The reason behind ``error_kind``: Lark's HTTP status, its own code and
+    # message, and the remediation the client already words. Without it the
+    # operator can only see an internal category such as
+    # ``create_execution_failed`` and has no way to learn what Lark refused.
+    last_error: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

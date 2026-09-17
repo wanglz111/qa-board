@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 import app.lark.outbox as outbox_module
 import app.worker as worker_module
 from app.config import settings
+from app.lark.fields import person_field_names
 from app.lark.outbox import (
     EVIDENCE_SETTLE_SECONDS,
     claim_next_job,
@@ -157,6 +158,102 @@ def test_the_defect_remark_names_the_case_and_drops_the_marker(failed_attempt):
     assert "wallet.bind timeout" in fields["备注"]
     assert "【自动提】" not in fields["备注"]
     assert "【" not in fields["问题描述"]
+
+
+def test_a_person_typed_run_column_is_filled_with_an_id_or_left_out(failed_attempt):
+    """A person column refuses a display name, so it gets an id or nothing.
+
+    负责人 is the deployment's 待指派 placeholder and nobody holds an open id for
+    it, so a person-typed 负责人 is omitted instead of failing the whole create.
+    """
+
+    without_id = execution_fields(
+        failed_attempt,
+        failed_attempt.group_case,
+        owner="待指派",
+        reporter="Max",
+        attachments=[],
+        person_fields={"负责人", "报告人"},
+    )
+
+    assert "负责人" not in without_id
+    assert "报告人" not in without_id
+    # Only the columns the writer cannot fill are gone; the row is still a row.
+    assert without_id["用例"] == "B-001 管理员登录"
+    assert without_id["结果"] == "不通过"
+
+    with_id = execution_fields(
+        failed_attempt,
+        failed_attempt.group_case,
+        owner="待指派",
+        reporter="Max",
+        attachments=[],
+        person_fields={"负责人", "报告人"},
+        reporter_id="ou_reporter",
+    )
+
+    assert "负责人" not in with_id
+    assert with_id["报告人"] == [{"id": "ou_reporter"}]
+
+
+def test_a_person_typed_defect_column_is_never_sent_text(failed_attempt):
+    """反馈人 is a person column in the verified schema; a name there is refused."""
+
+    without_id = bug_fields(
+        failed_attempt,
+        failed_attempt.group_case,
+        reporter="Max",
+        attachments=[],
+        person_fields={"反馈人"},
+    )
+    assert "反馈人" not in without_id
+
+    with_id = bug_fields(
+        failed_attempt,
+        failed_attempt.group_case,
+        reporter="Max",
+        attachments=[],
+        person_fields={"反馈人"},
+        reporter_id="ou_reporter",
+    )
+    assert with_id["反馈人"] == [{"id": "ou_reporter"}]
+
+
+def test_a_text_typed_defect_column_keeps_the_display_name(failed_attempt):
+    """A legacy text column must not start receiving an id it cannot read."""
+
+    fields = bug_fields(
+        failed_attempt,
+        failed_attempt.group_case,
+        reporter="Max",
+        attachments=[],
+        person_fields=set(),
+        reporter_id="ou_reporter",
+    )
+
+    assert fields["反馈人"] == "Max"
+
+
+def test_the_stored_schema_tells_the_two_roles_apart():
+    """Each role reads its own half of the fingerprint, and only person columns."""
+
+    fingerprint = (
+        "负责人:1|报告人:11|用例:1||反馈人:11|跟进人:11|备注:1|进展状态:3"
+    )
+
+    assert person_field_names(fingerprint, "execution") == {"报告人"}
+    assert person_field_names(fingerprint, "bug") == {"反馈人", "跟进人"}
+    # A field name may carry the separator character itself; only the last colon
+    # belongs to the type.
+    assert person_field_names("a:b:11||", "execution") == {"a:b"}
+
+
+def test_an_unreadable_schema_fingerprint_yields_no_person_columns():
+    """The writer keeps its text behaviour rather than guessing a type."""
+
+    for value in (None, "", "schema-fixture", "用例:1|结果:3", "||"):
+        assert person_field_names(value, "execution") == set()
+        assert person_field_names(value, "bug") == set()
 
 
 def test_passing_attempt_creates_only_an_execution_record(
@@ -617,6 +714,133 @@ def test_sync_summary_reports_failed_and_uncertain_without_payloads(
     assert body["queued"] == 0
     assert body["last_error_kind"] == "create_bug_failed"
     assert "new-1" not in str(body["last_error_kind"])
+
+
+def test_the_failure_reason_survives_on_the_row_and_reaches_the_panel(
+    fake_lark, authenticated_client, confirmed_group, failed_attempt, db_session
+):
+    """``error_kind`` alone could not be acted on; the reason has to persist.
+
+    The category is an internal word. What Lark actually refused — its HTTP
+    status, its own code and message — is what an operator can fix, so it is
+    stored on the job and published beside the kind.
+    """
+
+    fake_lark.create_error = True
+
+    assert process_one_job(fake_lark, failed_attempt) == "pending"
+
+    job = _job(db_session, failed_attempt)
+    assert job.error_kind == "create_execution_failed"
+    assert job.last_error is not None
+    # Lark's own words, with the fake's code and message in them.
+    assert "create failed" in job.last_error
+    assert "create_execution_failed" != job.last_error
+
+    body = authenticated_client.get(f"/api/groups/{confirmed_group.id}/sync").json()
+
+    assert body["last_error_kind"] == job.error_kind
+    assert body["last_error"] == job.last_error
+    # The reason never carries the record id or anything else from the payload.
+    assert "new-" not in body["last_error"]
+    assert "用例" not in body["last_error"]
+
+
+def test_a_row_rearmed_for_a_retry_stops_reporting_its_old_reason(
+    fake_lark, authenticated_client, confirmed_group, failed_attempt, db_session
+):
+    """A requeued row must not keep answering with the reason it was stuck on."""
+
+    fake_lark.create_error = True
+
+    assert process_one_job(fake_lark, failed_attempt) == "pending"
+    assert _job(db_session, failed_attempt).state == "pending"
+    # The double arms one refusal per flag, so each round arms it again and the
+    # row walks its backoff up to the ceiling.
+    for _ in range(5):
+        fake_lark.create_error = True
+        process_one_job(fake_lark, failed_attempt)
+    assert _job(db_session, failed_attempt).state == "failed"
+
+    body = authenticated_client.post(f"/api/groups/{confirmed_group.id}/sync/enqueue").json()
+    assert body["requeued"] == 1
+
+    assert _job(db_session, failed_attempt).last_error is None
+    summary = authenticated_client.get(f"/api/groups/{confirmed_group.id}/sync").json()
+    assert summary["last_error_kind"] is None
+    assert summary["last_error"] is None
+
+
+def test_enqueue_revives_the_rows_it_can_and_leaves_uncertain_alone(
+    fake_lark, authenticated_client, confirmed_group, failed_attempt, db_session
+):
+    """The button an operator presses first has to move the rows they see.
+
+    A parked row and a failed row are both decisions this explicit action
+    already implies; a row whose write may have landed is not, because posting
+    it again can append a second remote record.
+    """
+
+    now = datetime.now(timezone.utc)
+    db_session.add(
+        SyncJob(
+            attempt_id=failed_attempt.id,
+            state="pending",
+            error_kind="target_changed",
+            last_error="stale pin",
+            target_fingerprint=None,
+            next_retry_at=now,
+        )
+    )
+    db_session.commit()
+
+    body = authenticated_client.post(
+        f"/api/groups/{confirmed_group.id}/sync/enqueue"
+    ).json()
+
+    # Nothing new to insert: this row already had a job.
+    assert body == {"queued": 0, "repointed": 1, "requeued": 0}
+    job = _job(db_session, failed_attempt)
+    assert job.error_kind is None
+    assert job.last_error is None
+    assert job.target_fingerprint == _stored_target(
+        db_session, confirmed_group.id
+    ).target_fingerprint
+    assert job.next_retry_at is not None and job.next_retry_at <= datetime.now(
+        timezone.utc
+    )
+
+    # A row parked after an unprovable write keeps waiting for its own button.
+    job.state = "uncertain"
+    job.error_kind = "timeout_unreconciled"
+    db_session.commit()
+    again = authenticated_client.post(
+        f"/api/groups/{confirmed_group.id}/sync/enqueue"
+    ).json()
+    assert again == {"queued": 0, "repointed": 0, "requeued": 0}
+    assert _job(db_session, failed_attempt).state == "uncertain"
+
+
+def test_enqueue_still_refuses_a_group_without_a_confirmed_target(
+    authenticated_client, unconfirmed_group, db_session
+):
+    """Re-arming rows must never bypass the write approval."""
+
+    response = authenticated_client.post(
+        f"/api/groups/{unconfirmed_group.id}/sync/enqueue"
+    )
+
+    assert response.status_code == 409
+    assert (
+        db_session.scalars(
+            select(SyncJob).join(
+                Attempt, SyncJob.attempt_id == Attempt.id
+            ).join(GroupCase, Attempt.group_case_id == GroupCase.id).where(
+                GroupCase.group_id == unconfirmed_group.id
+            )
+        ).all()
+        == []
+    )
 
 
 def test_sync_summary_surfaces_jobs_parked_for_a_repoint(

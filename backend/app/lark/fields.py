@@ -117,3 +117,36 @@ def missing_required_fields(
 def schema_fingerprint(fields: Iterable[dict[str, Any]]) -> str:
     types = field_types(fields)
     return "|".join(f"{name}:{types[name]}" for name in sorted(types))
+
+
+# ``LarkTarget.schema_fingerprint`` stores one role's ``schema_fingerprint``
+# output beside the other's, joined by this separator.
+ROLE_SEPARATOR = "||"
+# Lark's person field type. A person column only accepts ``[{"id": <open_id>}]``,
+# so the writer has to know which columns are one before it builds a value.
+PERSON_TYPE = 11
+
+
+def person_field_names(fingerprint: str | None, role: str) -> set[str]:
+    """The columns a stored schema fingerprint says are person columns.
+
+    The write path has no field listing of its own and must not buy one: the
+    destination's types were read when the administrator confirmed the target
+    and are already stored beside it. Only a well-formed fingerprint is trusted
+    — a target saved before this column existed, or a row the tests fabricate,
+    yields the empty set, which is the caller's signal to keep its legacy
+    behaviour instead of guessing a type.
+    """
+
+    if not fingerprint or ROLE_SEPARATOR not in fingerprint:
+        return set()
+    execution, bug = fingerprint.split(ROLE_SEPARATOR, 1)
+    part = execution if role == "execution" else bug
+    names: set[str] = set()
+    for entry in part.split("|"):
+        # ``rsplit`` because a field name may legitimately contain a colon; the
+        # type is always the last colon-separated token.
+        name, separator, type_id = entry.rpartition(":")
+        if separator and type_id.isdigit() and int(type_id) == PERSON_TYPE:
+            names.add(name)
+    return names
