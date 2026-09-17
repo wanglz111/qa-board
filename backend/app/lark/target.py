@@ -123,7 +123,7 @@ def resolve_link(client: LarkClient, url: str) -> dict[str, Any]:
         "source_url": url,
         "host": link.host,
         "base_token": base_token,
-        "base_name": str((base.get("app") or {}).get("name") or ""),
+        "base_name": base_name(base),
         "tables": [
             {
                 "table_id": str(table.get("table_id")),
