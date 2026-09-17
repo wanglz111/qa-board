@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import event, select
 
 from app.models import Group, ImportTicket
 
@@ -163,3 +163,54 @@ def test_each_case_carries_its_own_latest_result(authenticated_client, csv_book)
     assert skipped.status_code == 201, skipped.text
     cases = authenticated_client.get(f"/api/groups/{group_id}/cases").json()
     assert {case["code"]: case["latest_result"] for case in cases}["B-003"] == "未执行"
+
+
+def test_the_latest_result_read_stays_inside_the_group(
+    authenticated_client, csv_book, db_session
+):
+    """每个用例的最新结果只在「本组」的 committed attempt 里挑。
+
+    返回的映射在有没有这个谓词时都是一样的——一个 ``group_case_id`` 只属于一个
+    组——所以差别只能从语句本身看出来：少了 ``group_cases.group_id`` 谓词，
+    ``GET /groups/{id}/cases`` 就会为了一个组去读全库每一条 committed attempt，
+    而 ``group_progress``（``app/execution.py``）本来就是限定在本组的，注释却声称
+    两者同形。这条测试钉住的就是那个谓词。
+    """
+
+    preview = preview_csv(authenticated_client, csv_book).json()
+    group_id = authenticated_client.post(
+        "/api/import/confirm",
+        json={"ticket_id": preview["ticket_id"], "name": "0918"},
+    ).json()["id"]
+    for code, result in (("B-001", "通过"), ("B-002", "不通过")):
+        created = authenticated_client.post(
+            f"/api/groups/{group_id}/cases/{code}/attempts",
+            json={
+                "result": result,
+                "note": "登录按钮没反应" if result == "不通过" else None,
+                "idempotency_key": f"latest-scope-{code}",
+            },
+        )
+        assert created.status_code == 201, created.text
+
+    statements: list[str] = []
+
+    def record(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+
+    bind = db_session.get_bind()
+    event.listen(bind, "before_cursor_execute", record)
+    try:
+        body = authenticated_client.get(f"/api/groups/{group_id}/cases").json()
+    finally:
+        event.remove(bind, "before_cursor_execute", record)
+
+    # 语义没有变：每个用例还是自己最高序号那条 committed 结果的 result，
+    # 没跑过的仍然是 null（这份 fixture 有 14 条用例，所以只看这两条）。
+    by_code = {case["code"]: case["latest_result"] for case in body}
+    assert by_code["B-001"] == "通过"
+    assert by_code["B-002"] == "不通过"
+    assert by_code["B-003"] is None
+    latest = [sql for sql in statements if "max(attempts.sequence)" in sql]
+    assert len(latest) == 1
+    assert "group_cases.group_id" in latest[0]

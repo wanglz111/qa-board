@@ -204,13 +204,16 @@ def list_group_cases(
     ).all()
     # One row per case: its highest-sequence committed attempt. The same shape
     # group_progress counts, but kept per case so the page can open on the
-    # first case nobody has run instead of always on the first row.
+    # first case nobody has run instead of always on the first row. Both are
+    # scoped to this group: without the predicate the subquery groups every
+    # committed attempt in the database to answer for one group's cases.
     latest_sequences = (
         select(
             Attempt.group_case_id,
             func.max(Attempt.sequence).label("sequence"),
         )
-        .where(Attempt.state == "committed")
+        .join(GroupCase, Attempt.group_case_id == GroupCase.id)
+        .where(Attempt.state == "committed", GroupCase.group_id == group_id)
         .group_by(Attempt.group_case_id)
         .subquery()
     )
