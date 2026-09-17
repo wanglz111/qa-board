@@ -184,6 +184,8 @@ export type ProvisionPlan = {
   // Whether each role's table already carries the provisioning view, so nobody
   // is offered a view that is already there.
   views?: { execution: ProvisionView; bug: ProvisionView };
+  // How many rows a rebuild of each role would write again.
+  rebuild?: Record<TableRole, number>;
 };
 
 export type RetypeField = {
@@ -245,6 +247,8 @@ export type CreateTableResult = {
 export type RebuildTablePayload = {
   role: TableRole;
   acknowledge: boolean;
+  // 表头已经正确时默认拒绝重建；勾了「强制重建」才带这个。
+  force?: boolean;
 };
 
 export type RebuildTableResult = {

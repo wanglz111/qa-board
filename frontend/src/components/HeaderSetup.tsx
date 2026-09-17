@@ -178,6 +178,7 @@ export function HeaderSetup({
     execution: false,
     bug: false
   });
+  const [rebuildForce, setRebuildForce] = useState(false);
   const [rebuildBusy, setRebuildBusy] = useState(false);
   const [names, setNames] = useState<Record<TableRole, string>>(DEFAULT_TABLE_NAME);
   const [tableBusy, setTableBusy] = useState<TableRole | null>(null);
@@ -302,6 +303,7 @@ export function HeaderSetup({
     // Nothing is ticked to begin with: this one replaces real tables, so it
     // asks for the choice rather than pre-selecting it.
     setRebuildTicked({ execution: false, bug: false });
+    setRebuildForce(false);
     setRebuildNotice("");
     setError("");
     setRebuildOpen(true);
@@ -513,7 +515,14 @@ export function HeaderSetup({
     try {
       for (const role of roles) {
         try {
-          const result = await rebuild(groupId, { role, acknowledge: true });
+          // `force` is optional: a rebuild that does not need to override the
+          // layout guard leaves the field out, so the payload stays exactly
+          // what a plain rebuild has always sent.
+          const result = await rebuild(groupId, {
+            role,
+            acknowledge: true,
+            ...(rebuildForce ? { force: true } : {})
+          });
           moved.push({
             role,
             table: result.table,
@@ -850,12 +859,26 @@ export function HeaderSetup({
                       </span>
                       <span className="header-setup-type">
                         → {rebuiltNameOf(tableNames?.[role] ?? "")}
+                        {plan?.rebuild ? `，将重新写入 ${plan.rebuild[role]} 条记录` : ""}
                       </span>
                     </li>
                   </ul>
                 </li>
               ))}
             </ul>
+
+            <label className="header-setup-row">
+              <input
+                type="checkbox"
+                checked={rebuildForce}
+                aria-label="强制重建"
+                onChange={() => setRebuildForce((current) => !current)}
+              />
+              <span className="header-setup-name">强制重建</span>
+              <span className="header-setup-type">
+                表头已经正确时也会重建（会再新建一张表并重写全部记录）
+              </span>
+            </label>
 
             {rebuildNotice ? (
               <p className="inline-status saved" role="status">

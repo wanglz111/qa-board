@@ -651,3 +651,42 @@ it("hides the rebuild command when the page cannot rebuild a table", async () =>
     screen.queryByRole("button", { name: "重建数据表（表头修正）" })
   ).not.toBeInTheDocument();
 });
+
+it("says how many rows a rebuild would rewrite and can force one", async () => {
+  const { rebuild } = renderRebuild({
+    loadPlan: vi
+      .fn()
+      .mockResolvedValue({ ...COMPLETE, rebuild: { execution: 4, bug: 2 } })
+  });
+
+  await userEvent.click(await screen.findByRole("button", { name: "重建数据表（表头修正）" }));
+  expect(await screen.findByText(/将重新写入 4 条记录/)).toBeVisible();
+  expect(screen.getByText(/将重新写入 2 条记录/)).toBeVisible();
+
+  await userEvent.click(screen.getByRole("checkbox", { name: "重建执行记录数据表" }));
+  expect(rebuild).not.toHaveBeenCalled();
+  await userEvent.click(screen.getByRole("checkbox", { name: "强制重建" }));
+  await userEvent.click(screen.getByRole("button", { name: "重建勾选的数据表" }));
+
+  expect(rebuild).toHaveBeenCalledWith("g1", {
+    role: "execution",
+    acknowledge: true,
+    force: true
+  });
+});
+
+it("does not force a rebuild unless the box is ticked", async () => {
+  const { rebuild } = renderRebuild();
+
+  await userEvent.click(await screen.findByRole("button", { name: "重建数据表（表头修正）" }));
+  await userEvent.click(screen.getByRole("checkbox", { name: "重建执行记录数据表" }));
+  await userEvent.click(screen.getByRole("button", { name: "重建勾选的数据表" }));
+
+  // An unticked box leaves the optional `force` out of the payload entirely, so
+  // the request is byte-for-byte the plain rebuild the earlier tests pin down.
+  expect(rebuild).toHaveBeenCalledWith("g1", {
+    role: "execution",
+    acknowledge: true
+  });
+  expect(rebuild.mock.calls[0][1].force).toBeUndefined();
+});

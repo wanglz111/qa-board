@@ -281,7 +281,7 @@ git commit -m "feat(lark): say how many rows a rebuild would write again"
 - Modify: `frontend/src/api.ts`、`frontend/src/components/HeaderSetup.tsx`
 - Test: `frontend/src/components/HeaderSetup.test.tsx`
 
-- [ ] **Step 1: 改类型**
+- [x] **Step 1: 改类型**
 
 `frontend/src/api.ts`：
 
@@ -301,7 +301,7 @@ export type RebuildTablePayload = {
   rebuild?: Record<TableRole, number>;
 ```
 
-- [ ] **Step 2: 写失败的测试**
+- [x] **Step 2: 写失败的测试**
 
 在 `frontend/src/components/HeaderSetup.test.tsx` 末尾追加：
 
@@ -346,12 +346,12 @@ it("does not force a rebuild unless the box is ticked", async () => {
 
 （`renderRebuild` 已经存在，见该文件「rebuilds the ticked role's table and names the one it replaces」一节。）
 
-- [ ] **Step 3: 跑测试确认失败**
+- [x] **Step 3: 跑测试确认失败**
 
 Run: `cd frontend && npx vitest run src/components/HeaderSetup.test.tsx`
 Expected: FAIL — 找不到「将重新写入」文本，`force` 也没有传。
 
-- [ ] **Step 4: 实现**
+- [x] **Step 4: 实现**
 
 `frontend/src/components/HeaderSetup.tsx`：
 
@@ -373,6 +373,15 @@ Expected: FAIL — 找不到「将重新写入」文本，`force` 也没有传�
             force: rebuildForce
           });
 ```
+
+> **实现偏差（2026-09-17，执行者记录）**：这里没有照抄上面的片段，落地的形式是
+> `...(rebuildForce ? { force: true } : {})` —— 勾了才带上这个可选字段。原因：本文件既有的
+> `HeaderSetup.test.tsx:544` 与 `:586`（以及范围外的 `views/LarkCheck.test.tsx:931`）都断言了
+> **不带 `force` 的** payload，而 `LarkCheck.test.tsx` 不在本任务的文件清单里、不能改。上面片段里
+> `force: rebuildForce` 会让未勾选时也发 `force: false`，从而打破这三条既有断言（实测：本文件
+> `3 failed | 31 passed`，`LarkCheck.test.tsx` `1 failed | 34 passed`）。条件展开同时符合本计划
+> 自己的类型注释「勾了「强制重建」才带这个」；后端 `force: bool = False` 使两者行为等价，
+> 未勾选时只是省略该字段。
 
 对话框里，勾选列表那一行的 `→ {rebuiltNameOf(...)}` 之后补上条数：
 
@@ -399,14 +408,20 @@ Expected: FAIL — 找不到「将重新写入」文本，`force` 也没有传�
             </label>
 ```
 
+> **实现偏差（2026-09-17，执行者记录）**：上面的 `<input>` 落地时多了一行
+> `aria-label="强制重建"`。没有它时，包裹的 `<label>` 会把可访问名算成
+> 「强制重建 表头已经正确时也会重建（…）」，Step 2 的 `getByRole("checkbox", { name: "强制重建" })`
+> 精确匹配就找不到（实测 `Unable to find an accessible element with the role "checkbox" and name "强制重建"`）；
+> 该文件既有的复选框（如「重建执行记录数据表」）也都是用 `aria-label` 命名的。
+
 `rebuildForce` 也要进 `runRebuild` 的依赖视野——它是组件内 state，闭包即可，无需额外处理。
 
-- [ ] **Step 5: 跑测试确认通过**
+- [x] **Step 5: 跑测试确认通过**
 
 Run: `cd frontend && npx vitest run src/components/HeaderSetup.test.tsx`
 Expected: PASS
 
-- [ ] **Step 6: 跑前端全套与构建**
+- [x] **Step 6: 跑前端全套与构建**
 
 Run: `cd frontend && npx vitest run && npm run build`
 Expected: PASS + 构建通过
