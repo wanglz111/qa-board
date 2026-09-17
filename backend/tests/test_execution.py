@@ -1,3 +1,6 @@
+from sqlalchemy import event
+
+
 def _groups_with_shared_case(db_session, make_group_case):
     first = make_group_case(db_session, group_name="0918", code="B-001")
     second = make_group_case(db_session, group_name="0922", code="B-001")
@@ -157,6 +160,48 @@ def test_progress_ignores_attempts_from_another_group(
         "skipped": 1,
         "untested": 0,
     }
+
+
+def test_the_progress_read_stays_inside_the_group(
+    authenticated_client, db_session, make_group_case
+):
+    """进度只在「本组」的 committed attempt 里挑最高序号。
+
+    结果映射在有没有谓词时都是一样的——外层 join 用 ``group_cases.group_id`` 过滤，
+    所以上面那条 ``test_progress_ignores_attempts_from_another_group`` 改动前后都过——
+    差别只在发出的语句里：少了谓词，``latest_sequences`` 会把全库每一条 committed
+    attempt 都聚合一遍，只为回答一个组的进度。
+    """
+
+    first_id, second_id = _groups_with_shared_case(db_session, make_group_case)
+    created = authenticated_client.post(
+        f"/api/groups/{second_id}/cases/B-001/attempts",
+        json={"result": "通过", "idempotency_key": "progress-scope-1"},
+    )
+    assert created.status_code == 201, created.text
+
+    statements: list[str] = []
+
+    def record(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+
+    bind = db_session.get_bind()
+    event.listen(bind, "before_cursor_execute", record)
+    try:
+        body = authenticated_client.get(f"/api/groups/{first_id}/progress").json()
+    finally:
+        event.remove(bind, "before_cursor_execute", record)
+
+    # 语义没变：另一组那条「通过」不算进本组。
+    assert body == {"passed": 0, "failed": 0, "skipped": 0, "untested": 1}
+    latest = [sql for sql in statements if "max(attempts.sequence)" in sql]
+    assert len(latest) == 1
+    # The subquery is compiled inline into the outer SELECT, and the outer query
+    # carries a `group_cases.group_id` of its own — so asserting on the whole
+    # statement would pass whether or not the subquery has the predicate. Only
+    # the span between the aggregate and the subquery's own GROUP BY proves it.
+    subquery = latest[0].split("max(attempts.sequence)", 1)[1].split("GROUP BY", 1)[0]
+    assert "group_cases.group_id" in subquery
 
 
 def test_committed_attempts_have_no_update_or_delete_route(

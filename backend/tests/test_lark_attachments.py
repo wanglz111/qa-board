@@ -313,7 +313,10 @@ def test_a_cache_that_cannot_be_created_still_serves_the_bytes(
     assert response.content == PAYLOAD
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the mode bits")
+@pytest.mark.skipif(
+    not hasattr(os, "geteuid") or os.geteuid() == 0,
+    reason="root ignores the mode bits, and only POSIX has geteuid",
+)
 def test_a_read_only_cache_directory_still_serves_the_bytes(
     authenticated_client, lark_fake, history_ref, upload_dir
 ):

@@ -294,7 +294,8 @@ def group_progress(
             Attempt.group_case_id,
             func.max(Attempt.sequence).label("sequence"),
         )
-        .where(Attempt.state == "committed")
+        .join(GroupCase, Attempt.group_case_id == GroupCase.id)
+        .where(Attempt.state == "committed", GroupCase.group_id == group_id)
         .group_by(Attempt.group_case_id)
         .subquery()
     )

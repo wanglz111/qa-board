@@ -120,10 +120,17 @@ Expected: FAIL — `KeyError: 'latest_result'`
 > 与 `group_progress`（`app/execution.py:292`）同形；返回值与语义未变（每个用例仍是它自己
 > 最高序号的 committed 结果，没有的仍是 `None`）。
 >
-> 回归测试放在 `backend/tests/test_lark_provision.py::test_the_latest_result_read_stays_inside_the_group`：
-> 本次改动的写入范围只放开了两个 Lark 测试模块，`test_groups_api.py` 不在其中，所以这条只能
-> 落在允许的文件里。它断言两件事——返回值仍是每个用例自己最新那条结果，以及这一次
-> `GET /groups/{id}/cases` 发出的语句里必须带 `group_cases.group_id`（删掉谓词即失败）。
+> 回归测试是 `backend/tests/test_groups_api.py::test_the_latest_result_read_stays_inside_the_group`：
+> 它断言两件事——返回值仍是每个用例自己最新那条结果，以及这一次 `GET /groups/{id}/cases`
+> 发出的语句里必须带 `group_cases.group_id`（删掉谓词即失败）。它最初被落在
+> `test_lark_provision.py`（当时执行者的写入范围只放开了两个 Lark 测试模块），
+> 第二轮回审指出「测 `groups.py` 的测试住在 provision 模块里」之后已迁回 `test_groups_api.py`。
+>
+> 同一次回审还揪出这段括号里那句话当时其实**不成立**：`group_progress`
+> （`backend/app/execution.py`）的 `latest_sequences` 当时**仍是未限定组的旧形状**，
+> 只是靠外层 join 的 `group_id` 过滤才保持正确。现在两处补上了同一个谓词，
+> 「与 `group_progress` 同形」才是真的；`group_progress` 也补了同款语句级回归测试
+> （`test_execution.py::test_the_progress_read_stays_inside_the_group`）。
 
 - [x] **Step 4: 跑测试确认通过**
 
