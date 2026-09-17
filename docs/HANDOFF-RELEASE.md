@@ -70,9 +70,9 @@ cd /home/lucascool/qa-board
 # 1) 和 CI 一致的验证（后端需要一个本地 PostgreSQL 测试库）
 cd backend
 TEST_DATABASE_URL=postgresql+psycopg://testdeck:testdeck@127.0.0.1:5433/testdeck_test \
-  .venv/bin/python -m pytest -q          # 期望 315 passed
+  .venv/bin/python -m pytest -q          # 期望 316 passed
 cd ../frontend
-npx vitest run                            # 期望 113 passed（16 文件）
+npx vitest run                            # 期望 116 passed（16 文件）
 npm run build
 cd ..
 
@@ -86,7 +86,7 @@ git push git@github.com:wanglz111/qa-board.git v0.1.5
 
 推送必须走 SSH：本机 `origin` 是 https 且没有存凭据，`git push origin …` 会直接报 `could not read Username for 'https://github.com'`。用上面的 `git@github.com:wanglz111/qa-board.git` 地址推，或先把 origin 换成 SSH 地址。SSH 走 `~/.ssh/config` 里 github.com 的 443 端口配置，开箱即用。
 
-远端现在是 `main` = `f4d11e4`，标签 `v0.1.5`。已合并的 `feature/cloud-testdeck` 本地分支已删除；**远端同名分支还在**，因为 GitHub 上这个仓库的默认分支仍指向它，`git push --delete` 会报 `refusing to delete the current branch`。要清掉它：先把默认分支改成 `main`（仓库 Settings → General → Default branch），再执行
+远端现在是 `main` = `d64cbef`，标签 `v0.1.6`。已合并的 `feature/cloud-testdeck` 本地分支已删除；**远端同名分支还在**，因为 GitHub 上这个仓库的默认分支仍指向它，`git push --delete` 会报 `refusing to delete the current branch`。要清掉它：先把默认分支改成 `main`（仓库 Settings → General → Default branch），再执行
 
 ```bash
 git push git@github.com:wanglz111/qa-board.git --delete feature/cloud-testdeck
@@ -108,14 +108,14 @@ cd /home/ubuntu/testdeck
 
 # 备份当前 .env，再改两个镜像 tag
 cp .env .env.bak-$(date +%F-%H%M%S)
-sed -i -E 's|^(WEB_IMAGE=ghcr\.io/[^:]+):.*|\1:v0.1.5|; s|^(API_IMAGE=ghcr\.io/[^:]+):.*|\1:v0.1.5|' .env
+sed -i -E 's|^(WEB_IMAGE=ghcr\.io/[^:]+):.*|\1:v0.1.6|; s|^(API_IMAGE=ghcr\.io/[^:]+):.*|\1:v0.1.6|' .env
 
 # 拉取并重启；migrate 服务会在 db 健康后自动跑 alembic upgrade head + bootstrap
 sudo docker compose --env-file .env -f docker-compose.yml up -d --pull always
 sudo docker compose --env-file .env -f docker-compose.yml ps
 ```
 
-服务器上已经放好了 `deploy.sh`，上面三步可以合成一条：`./deploy.sh v0.1.5`。
+服务器上已经放好了 `deploy.sh`，上面三步可以合成一条：`./deploy.sh v0.1.6`。
 
 ### 4.4 验收（每次发版都做）
 
@@ -131,13 +131,13 @@ curl -s -o /dev/null -w '%{http_code}\n' https://testdeck.gleaftex.com/api/group
 ```bash
 cd /home/ubuntu/testdeck
 cp .env .env.bak-$(date +%F-%H%M%S)
-sed -i -E 's|^(WEB_IMAGE=ghcr\.io/[^:]+):.*|\1:v0.1.4|; s|^(API_IMAGE=ghcr\.io/[^:]+):.*|\1:v0.1.4|' .env
+sed -i -E 's|^(WEB_IMAGE=ghcr\.io/[^:]+):.*|\1:v0.1.5|; s|^(API_IMAGE=ghcr\.io/[^:]+):.*|\1:v0.1.5|' .env
 sudo docker compose --env-file .env -f docker-compose.yml up -d --pull always
 ```
 
 或者直接用 `.env.bak-*` 覆盖回去。迁移只向前：如果新版本带了不兼容的 schema 变更，回滚镜像并不能回滚数据库，这种情况要先恢复备份。
 
-注意 `0011_case_reference_assets` 只新增表和列，回滚到 v0.1.3 或更早不影响旧功能（新表留着不用），但如果线上已经开始导入带图用例包，回滚会丢掉这些图片的入口。v0.1.5 没有 schema 变更，从 v0.1.5 回滚到 v0.1.4 可以直接执行，不必恢复数据库。
+注意 `0011_case_reference_assets` 只新增表和列，回滚到 v0.1.3 或更早不影响旧功能（新表留着不用），但如果线上已经开始导入带图用例包，回滚会丢掉这些图片的入口。v0.1.5 / v0.1.6 都没有 schema 变更，从 v0.1.6 回滚到 v0.1.5 可以直接执行，不必恢复数据库。
 
 ## 6. 备份
 
@@ -304,3 +304,31 @@ Cloudflare 侧只需 `testdeck.gleaftex.com` 的 A 记录指向 `43.167.241.33`�
 | 另一 vhost `api.gleaftex.com` | 200，未受影响 |
 
 回滚：`cd /home/ubuntu/testdeck && ./deploy.sh v0.1.4`（本次无 schema 变更，可直接回滚）。
+
+## 14. 这次交付做了什么（v0.1.6）
+
+- 修掉执行页两个「数字和面板不跟着走」的问题（用户报的两个现象）：
+  - 徽标里的「待同步」取的是 `/groups/<id>/sync` 的 `pending_attempts`，而那是本组**累计的本地执行结果数**——通过/不通过都算，早就同步完的也照数，所以一直停在「待同步 3 条」。现在徽标改成 `Lark 目标已确认 · 待同步 <queued> 条 · 已同步 <synced> 条`（与「Lark 检查」页同一口径，`queued` 就是 outbox 里真正在排队的条数），并且保存后在队列清空之前每 3 秒重读一次，数字会在几秒内自己降到 0。`pending_attempts` 仍在响应里，只有「把已保存的本地结果排入同步」按钮和改目标表确认框继续用它。
+  - 旧表只读面板原来只在切换用例/测试组时读一次。保存「不通过」时写入先进 outbox、worker 几秒后才落到 Lark，面板读到的还是保存前的快照，于是仍显示「旧表没有该用例的失败记录 / 未匹配到旧缺陷」。现在队列排空时面板自动重读一次，并且来源行右侧加了「刷新」按钮可随时手动重读。
+- 顺带修掉「旧缺陷里永远没有我刚提的那条」的真正原因：本工具写进「问题描述」列的缺陷行都带 `【自动提】` 前缀，而读取端解析用例编号的正则锚定在文本开头（且拒绝把 `B-005` 当成 `B-0050`），这些自动行一律解析不出编号、永远匹配不上——线上两条自动行（`B-005`、`B-001-Rgroup-4e98c0-01`）都复现并验证过。现在读取端先剥掉开头的 `【…】` 再走同一套解析，边界规则不变。
+- 本地验证：后端 `316 passed`，前端 `116 passed`（16 文件）+ `npm run build` 通过；`git diff --check` 干净。
+- GitHub Actions 运行 [#35188895059](https://github.com/wanglz111/qa-board/actions/runs/35188895059) 成功：`verify` 与两个 `publish` 都是 success，镜像 `v0.1.6` 与 `sha-d64cbef` 已推到 GHCR。
+- 服务器执行 `./deploy.sh v0.1.6`：`.env` 备份为 `.env.bak-20260917-141656`，部署前数据库备份 `backup-2026-09-17-141655.sql.gz`；`migrate` 退出码 0（本次没有新迁移，`alembic_version` 仍是 `0011_case_reference_assets`），api / worker / web 全部换成 `ghcr.io/wanglz111/qa-board-*:v0.1.6`。
+
+升级后的实测结果（真实域名 + 真实 Lark 数据）：
+
+| 检查 | 结果 |
+| --- | --- |
+| `docker compose ps` | api（healthy）、worker、web 都是 `ghcr.io/wanglz111/qa-board-*:v0.1.6` |
+| 一次性 `migrate` | 退出码 0，`alembic_version` = `0011_case_reference_assets` |
+| `GET /health/ready` | 200 `{"ok":true}` |
+| 匿名 `GET /api/groups` | 401 |
+| 管理员登录（复用升级前的会话 cookie）+ `/api/auth/me` | 200，升级未重置管理员 |
+| `GET /api/groups/<id>/cases/B-005/lark-history` | `bugs` 里返回自家缺陷行 `recvvsev7JZ2it`（`matched_by` = `问题描述`，状态 待修复）；升级前同一请求是 `bugs: []` |
+| 部署的 API 容器内 `parse_labelled_case_reference("【自动提】B-005 …")` | `CaseReference(code='B-005', retest_label=None)` |
+| 部署的 SPA 资源 | `index-BR2MEcCX.js` / `index-DchAbWUx.css`，与本地 `v0.1.6` 构建产物一致 |
+| 浏览器实测（桌面 1440）执行页徽标 | `Lark 目标已确认 · 待同步 0 条 · 已同步 3 条`（升级前恒为「待同步 3 条」） |
+| 浏览器实测 B-005 旧表只读面板 | 显示「旧缺陷 待修复 /【自动提】B-005 发售阶段期次表与名额公式」；点一次「刷新」读取时间从 14:20:24 变 14:20:28，可手动重读 |
+| 容器日志（api / worker） | 无 error / traceback |
+
+回滚：`cd /home/ubuntu/testdeck && ./deploy.sh v0.1.5`（本次无 schema 变更，可直接回滚）。
