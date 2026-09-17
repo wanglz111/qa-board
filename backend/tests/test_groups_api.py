@@ -134,3 +134,32 @@ def test_confirm_rejects_a_blank_group_name(authenticated_client, csv_book):
     )
 
     assert response.status_code == 422
+
+
+def test_each_case_carries_its_own_latest_result(authenticated_client, csv_book):
+    preview = preview_csv(authenticated_client, csv_book).json()
+    created = authenticated_client.post(
+        "/api/import/confirm",
+        json={"ticket_id": preview["ticket_id"], "name": "0918"},
+    ).json()
+    group_id = created["id"]
+
+    saved = authenticated_client.post(
+        f"/api/groups/{group_id}/cases/B-002/attempts",
+        json={"result": "通过", "idempotency_key": "cursor-1"},
+    )
+    assert saved.status_code == 201, saved.text
+
+    cases = authenticated_client.get(f"/api/groups/{group_id}/cases").json()
+    by_code = {case["code"]: case["latest_result"] for case in cases}
+
+    assert by_code["B-002"] == "通过"
+    assert by_code["B-001"] is None
+    # A skipped case counts as done, or it would look untested forever.
+    skipped = authenticated_client.post(
+        f"/api/groups/{group_id}/cases/B-003/attempts",
+        json={"result": "未执行", "idempotency_key": "cursor-2"},
+    )
+    assert skipped.status_code == 201, skipped.text
+    cases = authenticated_client.get(f"/api/groups/{group_id}/cases").json()
+    assert {case["code"]: case["latest_result"] for case in cases}["B-003"] == "未执行"
