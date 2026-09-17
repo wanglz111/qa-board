@@ -447,8 +447,10 @@ import { allTested, readCursor, startIndexFor, writeCursor } from "../executionC
       // Resume where the operator left off, else at the first case nobody has
       // run. This is the whole point of the page: coming back after a break
       // must not mean re-reading the first row of the group.
-      const remembered = readCursor();
-      const start = startIndexFor(result, remembered?.groupId === groupId ? remembered.code : null);
+      // The cursor belongs to one group; only this group's is allowed to pick
+      // the start, which is why the group id goes in rather than being compared
+      // at the call site (where no unit test can reach it).
+      const start = startIndexFor(result, readCursor(), groupId);
       setCaseIndex(start);
       const current = result[start];
       if (current) {
@@ -487,6 +489,27 @@ import { allTested, readCursor, startIndexFor, writeCursor } from "../executionC
               <p className="inline-status saved" role="status">本组已全部测过</p>
             ) : null}
 ```
+
+**保存之后必须让 `latest_result` 跟上**：`cases` 只在选组时加载一次，而 `save()` 只刷新了
+`attempts` 与 `progress`。不补这一步，操作员做完**最后一个**用例时 `allTested(cases)` 仍是旧数据，
+侧栏写着 `14/14`、页面上却没有「本组已全部测过」——只有切组或刷新才出现。最省的改法是在 `save()`
+成功后把当前这一行就地更新：
+
+```tsx
+      setCases((current) =>
+        current.map((item) =>
+          item.code === current0.code ? { ...item, latest_result: input.result } : item
+        )
+      );
+```
+
+（`current0` 就是 `save()` 开头那个 `const current = cases[caseIndex]`，改名以免和外层 `current` 撞。）
+对应测试：把**最后一个**用例提交掉，然后断言「本组已全部测过」出现——不能只喂一个已经完整的数组。
+
+**e2e 的桩也要补 `latest_result`**：`frontend/e2e/execution.spec.ts`、`legacy.spec.ts`、`pip.spec.ts`
+里内联的 `/api/groups/<id>/cases` 响应现在少了这个字段（它们不在 `tsc -b` 的范围里，所以不会报错，
+但也就不再反映真实载荷）。补上，并让其中一个用例带 `latest_result`，然后在 Task 3 里跑一次
+`cd frontend && npx playwright test`。
 
 - [ ] **Step 5: 跑测试确认通过**
 
