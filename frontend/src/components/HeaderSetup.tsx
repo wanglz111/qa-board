@@ -179,6 +179,7 @@ export function HeaderSetup({
     bug: false
   });
   const [rebuildBusy, setRebuildBusy] = useState(false);
+  const [rebuildForce, setRebuildForce] = useState(false);
   const [names, setNames] = useState<Record<TableRole, string>>(DEFAULT_TABLE_NAME);
   const [tableBusy, setTableBusy] = useState<TableRole | null>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -302,6 +303,7 @@ export function HeaderSetup({
     // Nothing is ticked to begin with: this one replaces real tables, so it
     // asks for the choice rather than pre-selecting it.
     setRebuildTicked({ execution: false, bug: false });
+    setRebuildForce(false);
     setRebuildNotice("");
     setError("");
     setRebuildOpen(true);
@@ -513,7 +515,11 @@ export function HeaderSetup({
     try {
       for (const role of roles) {
         try {
-          const result = await rebuild(groupId, { role, acknowledge: true });
+          const result = await rebuild(groupId, {
+            role,
+            acknowledge: true,
+            force: rebuildForce
+          });
           moved.push({
             role,
             table: result.table,
@@ -828,7 +834,7 @@ export function HeaderSetup({
               结果、优先级、进展状态是下拉框，截图和人员是对应类型的字段。
             </p>
             <p className="inline-status">
-              表头顺序和主列无法在 Lark 里改，只能换一张表。旧表不会被删除，本组已经写入的记录会按当前规则重新写入新表（含截图）；重建后需要重新确认写入。
+              表头顺序和主列无法在 Lark 里改，只能换一张表。旧表不会被删除，本组按当前规则重新写入的行数见下（从表里采纳的记录不会重写，本组目标确认前写入的记录也不会）；重建后需要重新确认写入。
             </p>
 
             <ul className="header-setup-roles">
@@ -850,6 +856,11 @@ export function HeaderSetup({
                       </span>
                       <span className="header-setup-type">
                         → {rebuiltNameOf(tableNames?.[role] ?? "")}
+                        {plan?.rebuild
+                          ? plan.rebuild[role] > 0
+                            ? `，将重新写入 ${plan.rebuild[role]} 条记录`
+                            : "，这一类没有会被重写的记录"
+                          : ""}
                       </span>
                     </li>
                   </ul>
@@ -867,6 +878,19 @@ export function HeaderSetup({
                 {error}
               </p>
             ) : null}
+
+            <label className="header-setup-force">
+              <input
+                type="checkbox"
+                checked={rebuildForce}
+                aria-label="强制重建"
+                onChange={(event) => setRebuildForce(event.target.checked)}
+              />
+              <span>
+                <strong>强制重建</strong>
+                （表头已经正确时也重建：会再建一张新表，并把上面列出的记录重新写入）
+              </span>
+            </label>
 
             <div className="header-setup-actions">
               <button

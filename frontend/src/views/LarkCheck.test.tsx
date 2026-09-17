@@ -928,7 +928,11 @@ it("follows the group onto a rebuilt table and drops the one it replaced", async
   await userEvent.click(screen.getByRole("checkbox", { name: "重建缺陷记录数据表" }));
   await userEvent.click(screen.getByRole("button", { name: "重建勾选的数据表" }));
 
-  expect(rebuild).toHaveBeenCalledWith(GROUP.id, { role: "bug", acknowledge: true });
+  expect(rebuild).toHaveBeenCalledWith(GROUP.id, {
+    role: "bug",
+    acknowledge: true,
+    force: false
+  });
   expect(await screen.findByLabelText("缺陷记录表")).toHaveValue("tbl-fresh");
   // The rebuilt destination dropped the approval on the server, so the page
   // says so instead of showing the one that no longer stands.

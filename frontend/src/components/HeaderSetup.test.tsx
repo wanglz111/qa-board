@@ -541,7 +541,11 @@ it("rebuilds the ticked role's table and names the one it replaces", async () =>
   await userEvent.click(screen.getByRole("checkbox", { name: "重建执行记录数据表" }));
   await userEvent.click(screen.getByRole("button", { name: "重建勾选的数据表" }));
 
-  expect(rebuild).toHaveBeenCalledWith("g1", { role: "execution", acknowledge: true });
+  expect(rebuild).toHaveBeenCalledWith("g1", {
+    role: "execution",
+    acknowledge: true,
+    force: false
+  });
   expect(onTableRebuilt).toHaveBeenCalledWith(
     "execution",
     { table_id: "tbl-fresh", name: "执行记录（表头修正）" },
@@ -574,6 +578,60 @@ it("keeps the rebuild command disabled until a role is ticked", async () => {
   expect(rebuild).not.toHaveBeenCalled();
 });
 
+it("says how many rows a rebuild would rewrite and can force one", async () => {
+  const { rebuild } = renderRebuild({
+    loadPlan: vi
+      .fn()
+      .mockResolvedValue({ ...COMPLETE, rebuild: { execution: 4, bug: 2 } })
+  });
+
+  await userEvent.click(await screen.findByRole("button", { name: "重建数据表（表头修正）" }));
+  expect(await screen.findByText(/将重新写入 4 条记录/)).toBeVisible();
+  expect(screen.getByText(/将重新写入 2 条记录/)).toBeVisible();
+
+  await userEvent.click(screen.getByRole("checkbox", { name: "重建执行记录数据表" }));
+  expect(rebuild).not.toHaveBeenCalled();
+  await userEvent.click(screen.getByRole("checkbox", { name: "强制重建" }));
+  await userEvent.click(screen.getByRole("button", { name: "重建勾选的数据表" }));
+
+  expect(rebuild).toHaveBeenCalledWith("g1", {
+    role: "execution",
+    acknowledge: true,
+    force: true
+  });
+});
+
+it("does not force a rebuild unless the box is ticked", async () => {
+  const { rebuild } = renderRebuild();
+
+  await userEvent.click(await screen.findByRole("button", { name: "重建数据表（表头修正）" }));
+  await userEvent.click(screen.getByRole("checkbox", { name: "重建执行记录数据表" }));
+  await userEvent.click(screen.getByRole("button", { name: "重建勾选的数据表" }));
+
+  expect(rebuild).toHaveBeenCalledWith("g1", {
+    role: "execution",
+    acknowledge: true,
+    force: false
+  });
+});
+
+it("names a role with nothing to rewrite instead of showing a bare zero", async () => {
+  renderRebuild({
+    loadPlan: vi
+      .fn()
+      .mockResolvedValue({ ...COMPLETE, rebuild: { execution: 0, bug: 3 } })
+  });
+
+  await userEvent.click(await screen.findByRole("button", { name: "重建数据表（表头修正）" }));
+
+  // The copy promises the count, not every row: rows adopted from the table or
+  // written before the target was confirmed are never re-filed.
+  expect(screen.getByText(/本组按当前规则重新写入的行数见下/)).toBeVisible();
+  expect(await screen.findByText(/这一类没有会被重写的记录/)).toBeVisible();
+  expect(screen.getByText(/将重新写入 3 条记录/)).toBeVisible();
+  expect(screen.queryByText(/将重新写入 0 条记录/)).not.toBeInTheDocument();
+});
+
 it("rebuilds every ticked role, one table after the other", async () => {
   const { rebuild, onTableRebuilt } = renderRebuild();
 
@@ -584,8 +642,8 @@ it("rebuilds every ticked role, one table after the other", async () => {
   await userEvent.click(screen.getByRole("button", { name: "重建勾选的数据表" }));
 
   expect(rebuild.mock.calls).toEqual([
-    ["g1", { role: "execution", acknowledge: true }],
-    ["g1", { role: "bug", acknowledge: true }]
+    ["g1", { role: "execution", acknowledge: true, force: false }],
+    ["g1", { role: "bug", acknowledge: true, force: false }]
   ]);
   expect(onTableRebuilt).toHaveBeenCalledTimes(2);
   expect(
