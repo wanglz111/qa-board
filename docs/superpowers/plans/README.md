@@ -9,10 +9,17 @@ The approved product behavior is in `CLOUD-DEPLOY-PLAN.md`. Execute these three 
 5. `2026-09-16-05-lark-table-setup.md` - detect missing headers, offer an explicit 「设置表头」 button that creates only the approved fields, and create a whole table when a base has none.
 6. `2026-09-16-06-lark-reconcile.md` - read a group's table back (live or from snapshots), diff it against the local records, and resolve each row by hand with multi-select.
 7. `2026-09-16-image-case-bundle-import.md` - import a strict casebook v1 ZIP (`casebook.json` + `assets/`), attach reference images to each case, show them beside the case during execution, and hand both AI prompts (with the embedded schema) to the user on the import page.
+8. `2026-09-17-lark-read-volume.md` - cut the Lark read traffic: one client per process, one read per base, a 60-second snapshot of a table's records, and disk-cached attachments.
+9. `2026-09-17-execution-resume.md` - resume a half-finished group at its first unrun case, and remember which case was being read.
+10. `2026-09-17-rebuild-reprocess.md` - refuse to rebuild a table that already has the reference headers (with an explicit `force`), and say how many rows a rebuild would rewrite.
 
 For every checkbox task: write the failing test, verify it fails for the expected reason, implement the small change, run focused and affected suites, inspect `git diff --check`, and commit that task's own files immediately. Record the commit in the task plan before starting the next checkbox task. Never stage `.env`, `.env.production`, external case directories, runtime screenshots or backups.
 
 Plans 04 to 06 replace the environment-configured Lark target from Plan 03. Run them in order; each one is independently testable but 05 and 06 assume 04 has landed.
+
+Plans 08-10 come out of the 2026-09-17 audit of Lark traffic and of the execution page's
+resume behaviour. 08 and 09 are independent; 10 assumes 08's read path is in place only
+in the sense that both touch `app/lark/`. Run them in the listed order.
 
 All 18 application tasks are complete, plus the nine Plan 04-06 tasks; the delivered
 state is `baeeb76` on `feature/cloud-testdeck`. `.gitignore` was a separate completed
