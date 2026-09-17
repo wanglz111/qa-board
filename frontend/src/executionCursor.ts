@@ -31,6 +31,8 @@ export function writeCursor(cursor: Cursor): void {
   }
 }
 
+// Deliberately exported with no caller yet: it completes the cursor's surface so
+// the view layer can drop a cursor it cannot honour, instead of writing junk.
 export function clearCursor(): void {
   try {
     window.localStorage.removeItem(KEY);
@@ -45,8 +47,13 @@ function isDone(item: GroupCase): boolean {
   return (item.latest_result ?? null) !== null;
 }
 
-export function startIndexFor(cases: GroupCase[], rememberedCode: string | null): number {
+// Cases arrive in the server's `position` order, which is what makes "the first
+// untested case" mean "the untested case with the lowest position".
+export function startIndexFor(cases: GroupCase[], cursor: Cursor | null, groupId: string): number {
   if (cases.length === 0) return 0;
+  // A cursor only speaks for the group it was written in: codes repeat across
+  // groups, so a code from another group would land on an unrelated case.
+  const rememberedCode = cursor && cursor.groupId === groupId ? cursor.code : null;
   if (rememberedCode) {
     const remembered = cases.findIndex((item) => item.code === rememberedCode);
     if (remembered >= 0) return remembered;
