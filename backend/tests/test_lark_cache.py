@@ -108,6 +108,21 @@ def test_the_table_names_are_snapshotted_too():
     assert lark_cache.read_names(_Target(), fetch)["execution_table_name"] == "执行记录"
 
 
+def test_the_cached_names_error_list_is_not_handed_out_for_mutation():
+    """read_errors is the payload's one nested value, and it is a copy too."""
+
+    lark_cache.clear()
+    stored = {"execution_table_name": None, "read_errors": ["找不到执行记录表 tbl-runs"]}
+    lark_cache.read_names(_Target(), lambda: stored)
+
+    got = lark_cache.read_names(_Target(), lambda: {})
+    got["read_errors"].append("injected")
+
+    assert lark_cache.read_names(_Target(), lambda: {})["read_errors"] == [
+        "找不到执行记录表 tbl-runs"
+    ]
+
+
 def test_invalidate_target_drops_the_names_with_the_records():
     lark_cache.clear()
     names_calls = []

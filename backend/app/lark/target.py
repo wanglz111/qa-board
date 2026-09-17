@@ -493,11 +493,11 @@ def save_target(
     db.add(target)
     record_target_revision(db, group_id, draft)
     db.commit()
-    # A target is stored as one row updated in place, so this request can only
-    # name the destination it just saved: the names and rows of that one are
-    # dropped and the next read is live. A destination this row just left keeps
-    # its own entry until the TTL expires, which only re-pointing the group back
-    # to it within the minute can serve.
+    # The row is updated in place, so this request can only name the destination
+    # it just saved: that one's names and rows are dropped and the next read is
+    # live. A destination the row just left keeps its entry until the TTL, but
+    # nothing reaches it — pointing the group back is itself a save, and that
+    # save resolves to the destination being saved and drops it again.
     lark_cache.invalidate_group(db, group_id)
     db.refresh(target)
     return {

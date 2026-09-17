@@ -422,7 +422,12 @@ def read_sync(group_id: UUID, db: Annotated[Session, Depends(get_db)]) -> dict[s
         )
     )
     counts = sync_counts(db, group_id)
-    if counts.get("pending", 0) + counts.get("running", 0) == 0:
+    # The threshold is the page's own: it stops polling on "nothing is queued
+    # that is not parked". Deriving it from ``queued``/``parked`` — the two
+    # fields this response publishes — keeps the endpoint from drifting from
+    # that page, and a parked job, which stays pending for as long as nobody
+    # re-points the group, no longer keeps the rows that did drain out of view.
+    if counts["queued"] - counts["parked"] == 0:
         # Nothing is queued, so whatever the page cached before the worker ran is
         # now known to be out of date. The page re-reads the panel right after
         # this call, which is exactly when a stale snapshot would show up.

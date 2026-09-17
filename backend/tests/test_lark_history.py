@@ -460,10 +460,14 @@ def test_a_warm_snapshot_costs_no_lark_request_at_all(
     assert lark_fake.requests == []
 
 
-def test_submitting_a_result_drops_the_snapshot(
+def test_creating_an_attempt_drops_the_snapshot(
     authenticated_client, lark_fake, confirmed_group
 ):
-    """The row this operator just wrote has to be visible on the next read."""
+    """The row this operator just wrote has to be visible on the next read.
+
+    This pins ``create_attempt``. The reserved-attempt submission is a separate
+    write with its own invalidation, and a test of its own below.
+    """
 
     lark_fake.records = []
     authenticated_client.get(
@@ -563,3 +567,278 @@ def test_reserving_a_retest_drops_the_snapshot(
     )
     assert response.status_code == 200, response.text
     assert lark_fake.record_requests
+
+
+def test_submitting_a_reserved_attempt_drops_the_snapshot(
+    authenticated_client, lark_fake, confirmed_group
+):
+    """A submission is this process's own write, so the next read is live."""
+
+    reserved = authenticated_client.post(
+        f"/api/groups/{confirmed_group.id}/cases/B-001/retest"
+    )
+    assert reserved.status_code == 201, reserved.text
+    attempt_id = reserved.json()["id"]
+
+    # Warmed *after* the reservation: the reservation drops the snapshot too, so
+    # only a snapshot taken between it and the submit is the submit's to discard.
+    lark_fake.records = []
+    warmed = authenticated_client.get(
+        f"/api/groups/{confirmed_group.id}/cases/B-001/lark-history"
+    ).json()
+    assert warmed["original"] == []
+
+    # What the worker in the other container files once this row is queued.
+    lark_fake.records = [
+        {"record_id": "filed", "fields": {"用例": "B-001 Login", "结果": "不通过"}}
+    ]
+    submitted = authenticated_client.post(
+        f"/api/attempts/{attempt_id}/submit",
+        json={
+            "result": "不通过",
+            "note": "登录按钮没反应",
+            "console_text": "",
+            "idempotency_key": "key-submit-snapshot-1",
+        },
+    )
+    assert submitted.status_code == 200, submitted.text
+
+    body = authenticated_client.get(
+        f"/api/groups/{confirmed_group.id}/cases/B-001/lark-history"
+    ).json()
+    assert [record["record_id"] for record in body["original"]] == ["filed"]
+
+
+def _save_target(
+    client,
+    group_id,
+    *,
+    execution_base_token: str,
+    execution_table_id: str,
+    bug_base_token: str,
+    bug_table_id: str,
+):
+    """One acknowledged save, the way the connection page sends it."""
+
+    response = client.put(
+        f"/api/groups/{group_id}/lark/target",
+        json={
+            "source_url": "https://tenant.larksuite.com/wiki/node-1",
+            "execution_base_token": execution_base_token,
+            "execution_table_id": execution_table_id,
+            "execution_view_id": None,
+            "bug_base_token": bug_base_token,
+            "bug_table_id": bug_table_id,
+            "expected_previous_fingerprint": None,
+            "acknowledge_change": True,
+        },
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def test_saving_a_target_back_drops_the_snapshot(
+    authenticated_client, lark_fake, confirmed_group
+):
+    """A save drops what this process cached for the row it just wrote.
+
+    Only this shape discriminates. Saving *to* a destination can never serve it,
+    because nothing read it yet; saving *back* to the one the panel warmed on is
+    the read that would otherwise answer from the entry the warm read left.
+    """
+
+    lark_fake.records = [
+        {"record_id": "old1", "fields": {"用例": "B-001 Login", "结果": "不通过"}}
+    ]
+    warmed = authenticated_client.get(
+        f"/api/groups/{confirmed_group.id}/cases/B-001/lark-history"
+    ).json()
+    assert [record["record_id"] for record in warmed["original"]] == ["old1"]
+
+    _save_target(
+        authenticated_client,
+        confirmed_group.id,
+        execution_base_token="app-token",
+        execution_table_id="tbl-runs",
+        bug_base_token="app-token",
+        bug_table_id="tbl-defects",
+    )
+    lark_fake.records = [
+        {"record_id": "new1", "fields": {"用例": "B-001 Login", "结果": "不通过"}}
+    ]
+    _save_target(
+        authenticated_client,
+        confirmed_group.id,
+        execution_base_token="app-exec",
+        execution_table_id="tbl-runs",
+        bug_base_token="app-bug",
+        bug_table_id="tbl-defects",
+    )
+
+    body = authenticated_client.get(
+        f"/api/groups/{confirmed_group.id}/cases/B-001/lark-history"
+    ).json()
+    assert [record["record_id"] for record in body["original"]] == ["new1"]
+
+
+def test_retyping_a_header_drops_the_snapshot(
+    authenticated_client, lark_fake, confirmed_group
+):
+    """A retype changes a column's type, so the panel's copy of the table is stale."""
+
+    authenticated_client.get(
+        f"/api/groups/{confirmed_group.id}/cases/B-001/lark-history"
+    )
+    lark_fake.requests.clear()
+
+    # 结果 is one of the two headers the standard fake carries as plain text.
+    retyped = authenticated_client.post(
+        f"/api/groups/{confirmed_group.id}/lark/provision/retype",
+        json={"role": "execution", "field_names": ["结果"], "acknowledge": True},
+    )
+    assert retyped.status_code == 200, retyped.text
+    assert retyped.json()["retyped_fields"] == ["结果"]
+
+    response = authenticated_client.get(
+        f"/api/groups/{confirmed_group.id}/cases/B-001/lark-history"
+    )
+    assert response.status_code == 200, response.text
+    assert lark_fake.record_requests
+
+
+def test_a_half_applied_retype_drops_the_snapshot(
+    authenticated_client, lark_fake, confirmed_group, monkeypatch
+):
+    """The 409 left a real column change behind, so the old shape cannot stay.
+
+    ``_clear_invalidated_approval`` commits before this request refuses, which
+    makes a half-applied run the one failure that has already written.
+    """
+
+    from app.lark.client import LarkError
+
+    authenticated_client.get(
+        f"/api/groups/{confirmed_group.id}/cases/B-001/lark-history"
+    )
+    lark_fake.requests.clear()
+
+    real_update = lark_fake.client.update_field
+    updates = {"count": 0}
+
+    def refuse_the_second_header(*args, **kwargs):
+        updates["count"] += 1
+        if updates["count"] > 1:
+            raise LarkError("Lark 拒绝了这次修改")
+        return real_update(*args, **kwargs)
+
+    monkeypatch.setattr(lark_fake.client, "update_field", refuse_the_second_header)
+
+    refused = authenticated_client.post(
+        f"/api/groups/{confirmed_group.id}/lark/provision/retype",
+        json={
+            "role": "execution",
+            "field_names": ["结果", "优先级"],
+            "acknowledge": True,
+        },
+    )
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["detail"]["created_fields"] == ["结果"]
+
+    response = authenticated_client.get(
+        f"/api/groups/{confirmed_group.id}/cases/B-001/lark-history"
+    )
+    assert response.status_code == 200, response.text
+    assert lark_fake.record_requests
+
+
+def _queued_job(authenticated_client, group, db_session):
+    """One case's attempt, committed and queued, with its sync job returned."""
+
+    from sqlalchemy import select
+
+    from app.models import SyncJob
+
+    queued = authenticated_client.post(
+        f"/api/groups/{group.id}/cases/B-001/attempts",
+        json={
+            "result": "通过",
+            "note": None,
+            "console_text": "",
+            "idempotency_key": "key-queued-snapshot-1",
+        },
+    )
+    assert queued.status_code == 201, queued.text
+    job = db_session.scalar(
+        select(SyncJob).where(SyncJob.attempt_id == UUID(queued.json()["id"]))
+    )
+    assert job is not None
+    return job
+
+
+def test_a_drain_with_a_parked_job_drops_the_snapshot(
+    authenticated_client, lark_fake, confirmed_group, db_session
+):
+    """A parked job never leaves the queue, so the queue can never look empty.
+
+    The page stops polling on ``queued - parked``, and the rows that did drain
+    are in the table by then; waiting for a queue that never empties would serve
+    the pre-write snapshot until the TTL.
+    """
+
+    job = _queued_job(authenticated_client, confirmed_group, db_session)
+    # The worker parked this one on a re-point; it stays pending for good.
+    job.error_kind = "target_changed"
+    db_session.commit()
+
+    lark_fake.records = []
+    warmed = authenticated_client.get(
+        f"/api/groups/{confirmed_group.id}/cases/B-001/lark-history"
+    ).json()
+    assert warmed["original"] == []
+
+    lark_fake.records = [
+        {"record_id": "filed", "fields": {"用例": "B-001 Login", "结果": "通过"}}
+    ]
+    summary = authenticated_client.get(f"/api/groups/{confirmed_group.id}/sync")
+    assert summary.status_code == 200, summary.text
+    assert summary.json()["queued"] == 1
+    assert summary.json()["parked"] == 1
+
+    body = authenticated_client.get(
+        f"/api/groups/{confirmed_group.id}/cases/B-001/lark-history"
+    ).json()
+    assert [record["record_id"] for record in body["original"]] == ["filed"]
+
+
+def test_a_poll_with_work_in_flight_keeps_the_snapshot(
+    authenticated_client, lark_fake, confirmed_group, db_session
+):
+    """The page polls while the worker runs; each poll must not cost a read.
+
+    The snapshot only goes at the end of the drain, so a poll from a page that
+    is still waiting keeps answering from it instead of re-reading the table it
+    just read.
+    """
+
+    _queued_job(authenticated_client, confirmed_group, db_session)
+
+    lark_fake.records = [
+        {"record_id": "old1", "fields": {"用例": "B-001 Login", "结果": "通过"}}
+    ]
+    warmed = authenticated_client.get(
+        f"/api/groups/{confirmed_group.id}/cases/B-001/lark-history"
+    ).json()
+    assert [record["record_id"] for record in warmed["original"]] == ["old1"]
+    lark_fake.requests.clear()
+
+    summary = authenticated_client.get(f"/api/groups/{confirmed_group.id}/sync")
+    assert summary.status_code == 200, summary.text
+    assert summary.json()["queued"] == 1
+    assert summary.json()["parked"] == 0
+
+    response = authenticated_client.get(
+        f"/api/groups/{confirmed_group.id}/cases/B-001/lark-history"
+    )
+    assert response.status_code == 200, response.text
+    assert not lark_fake.record_requests
+    assert [record["record_id"] for record in response.json()["original"]] == ["old1"]

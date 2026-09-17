@@ -97,8 +97,9 @@ def read_names(target: Any, fetch: Callable[[], dict[str, Any]]) -> dict[str, An
     metadata and table listing for each role) — the record snapshot alone only
     removes the two record reads.
 
-    The dictionary is a copy; like the records, anything nested inside it is
-    shared with the snapshot and must be copied before it is edited.
+    The dictionary and its ``read_errors`` list are copies. Anything else nested
+    inside a names payload is shared with the snapshot, like the record dicts
+    are, and must be copied before it is edited.
     """
 
     key = _names_key(target)
@@ -106,12 +107,27 @@ def read_names(target: Any, fetch: Callable[[], dict[str, Any]]) -> dict[str, An
     with _lock:
         entry = _names.get(key)
         if entry is not None and now < entry[0]:
-            return dict(entry[1])
+            return _names_copy(entry[1])
         _prune_expired(now)
     names = fetch()
     with _lock:
         _names[key] = (time.monotonic() + DEFAULT_TTL_SECONDS, dict(names))
-    return dict(names)
+    return _names_copy(names)
+
+
+def _names_copy(names: dict[str, Any]) -> dict[str, Any]:
+    """A reader's own copy of a names payload, nested error list included.
+
+    ``read_errors`` is the payload's one nested value, and every reader of a hit
+    would otherwise share the snapshot's own list, so it is copied the way the
+    records' container is.
+    """
+
+    copied = dict(names)
+    errors = copied.get("read_errors")
+    if isinstance(errors, list):
+        copied["read_errors"] = list(errors)
+    return copied
 
 
 def invalidate_target(target: Any) -> None:

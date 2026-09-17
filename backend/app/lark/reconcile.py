@@ -177,6 +177,13 @@ def read_reconcile(
     client: Annotated[LarkClient, Depends(get_lark_client)],
     source: Annotated[str, Query(pattern="^(live|stored)$")] = "live",
 ) -> dict[str, Any]:
+    """The group's rows next to the table's, or next to the stored snapshot.
+
+    ``source="live"`` means "read from Lark" as opposed to the rows this tool
+    recorded: the rows come from the table, and since the record snapshot landed
+    they may be answered from a copy taken up to a minute ago.
+    """
+
     if db.get(Group, group_id) is None:
         raise HTTPException(status_code=404, detail="Group not found")
     target = target_for(db, group_id)

@@ -418,6 +418,13 @@ def provision_fields(
             # fingerprint is left for the confirm path, which re-reads it under
             # its own lock anyway.
             _clear_invalidated_approval(db, group_id, checked_fingerprint)
+            # The header is really there even though this request refuses, so the
+            # snapshot of this role's table goes with it. Two arguments rather
+            # than invalidate_group: when another tab re-pointed the group
+            # mid-request, _clear_invalidated_approval deliberately left the
+            # stored row alone, and invalidate_group would resolve to that new
+            # target's tables — none of which this request ever read.
+            lark_cache.invalidate(base_token, table_id)
         raise HTTPException(
             status_code=409,
             detail={
@@ -528,6 +535,10 @@ def retype_fields(
             # Half-applied: the table really did change, so the approval that
             # covered the older structure must not survive it.
             _clear_invalidated_approval(db, group_id, checked_fingerprint)
+            # ...and neither may the snapshot of that table, for the same reason
+            # the fields path above gives: a column really was converted before
+            # this request refused, and the role's own key is what is now stale.
+            lark_cache.invalidate(base_token, table_id)
         raise HTTPException(
             status_code=409,
             detail={
