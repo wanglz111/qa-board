@@ -406,3 +406,160 @@ def test_case_history_reports_a_stored_table_missing_from_the_listing(
     assert body["available"] is False
     assert body["read_errors"] == ["Lark 中找不到执行记录表 tbl-runs"]
     assert not lark_fake.record_requests
+
+
+def test_two_cases_in_a_row_share_one_table_read(
+    authenticated_client, lark_fake, confirmed_group, add_case
+):
+    """Working through a group re-reads the same table; the snapshot answers."""
+
+    # The group needs a second case to work through; the fixture imports one.
+    add_case(confirmed_group.id, code="B-002", title="绑定登录")
+    lark_fake.records = [
+        {"record_id": "old1", "fields": {"用例": "B-001 Login", "结果": "不通过"}},
+        {"record_id": "old2", "fields": {"用例": "B-002 Login", "结果": "通过"}},
+    ]
+    lark_fake.requests.clear()
+
+    for code in ("B-001", "B-002"):
+        response = authenticated_client.get(
+            f"/api/groups/{confirmed_group.id}/cases/{code}/lark-history"
+        )
+        assert response.status_code == 200, response.text
+
+    record_reads = [
+        request["path"]
+        for request in lark_fake.requests
+        if "/records" in request["path"]
+    ]
+    assert (
+        record_reads.count("/open-apis/bitable/v1/apps/app-exec/tables/tbl-runs/records")
+        == 1
+    )
+
+
+def test_a_warm_snapshot_costs_no_lark_request_at_all(
+    authenticated_client, lark_fake, confirmed_group, add_case
+):
+    """The second case in a sitting should not touch Lark for names or records."""
+
+    add_case(confirmed_group.id, code="B-002", title="绑定登录")
+    lark_fake.records = [
+        {"record_id": "old1", "fields": {"用例": "B-001 Login", "结果": "不通过"}}
+    ]
+    authenticated_client.get(
+        f"/api/groups/{confirmed_group.id}/cases/B-001/lark-history"
+    )
+    lark_fake.requests.clear()
+
+    response = authenticated_client.get(
+        f"/api/groups/{confirmed_group.id}/cases/B-002/lark-history"
+    )
+
+    assert response.status_code == 200, response.text
+    assert lark_fake.requests == []
+
+
+def test_submitting_a_result_drops_the_snapshot(
+    authenticated_client, lark_fake, confirmed_group
+):
+    """The row this operator just wrote has to be visible on the next read."""
+
+    lark_fake.records = []
+    authenticated_client.get(
+        f"/api/groups/{confirmed_group.id}/cases/B-001/lark-history"
+    )
+    lark_fake.records = [
+        {"record_id": "mine", "fields": {"用例": "B-001 Login", "结果": "不通过"}}
+    ]
+
+    submitted = authenticated_client.post(
+        f"/api/groups/{confirmed_group.id}/cases/B-001/attempts",
+        json={
+            "result": "不通过",
+            "note": "登录按钮没反应",
+            "console_text": "",
+            "idempotency_key": "key-snapshot-1",
+        },
+    )
+    assert submitted.status_code == 201, submitted.text
+
+    body = authenticated_client.get(
+        f"/api/groups/{confirmed_group.id}/cases/B-001/lark-history"
+    ).json()
+    assert [record["record_id"] for record in body["original"]] == ["mine"]
+
+
+def test_a_transient_name_read_failure_is_not_cached(
+    authenticated_client, lark_fake, confirmed_group
+):
+    """A refused read must heal on the next request, not linger for the TTL."""
+
+    lark_fake.bases_error = True
+    unavailable = authenticated_client.get(
+        f"/api/groups/{confirmed_group.id}/cases/B-001/lark-history"
+    ).json()
+    assert unavailable["available"] is False
+    assert unavailable["read_errors"]
+
+    lark_fake.bases_error = False
+    healed = authenticated_client.get(
+        f"/api/groups/{confirmed_group.id}/cases/B-001/lark-history"
+    ).json()
+    assert healed["available"] is True
+    assert healed["source_table_name"] == "执行记录"
+
+
+def test_an_idle_queue_lets_the_panel_see_the_row_the_worker_filed(
+    authenticated_client, lark_fake, confirmed_group
+):
+    """The worker runs in another container, so it cannot drop this snapshot.
+
+    The page polls the sync summary while it waits, and an empty queue is the
+    moment this process knows that whatever it cached before the worker ran is
+    out of date.
+    """
+
+    lark_fake.records = []
+    empty = authenticated_client.get(
+        f"/api/groups/{confirmed_group.id}/cases/B-001/lark-history"
+    ).json()
+    assert empty["original"] == []
+
+    # What the worker in the other container just filed.
+    lark_fake.records = [
+        {"record_id": "filed", "fields": {"用例": "B-001 Login", "结果": "不通过"}}
+    ]
+    summary = authenticated_client.get(f"/api/groups/{confirmed_group.id}/sync")
+    assert summary.status_code == 200, summary.text
+    assert summary.json()["queued"] == 0
+
+    body = authenticated_client.get(
+        f"/api/groups/{confirmed_group.id}/cases/B-001/lark-history"
+    ).json()
+    assert [record["record_id"] for record in body["original"]] == ["filed"]
+
+
+def test_reserving_a_retest_drops_the_snapshot(
+    authenticated_client, lark_fake, confirmed_group
+):
+    """A reservation is a write of this process's own, so the next read is live."""
+
+    lark_fake.records = [
+        {"record_id": "old1", "fields": {"用例": "B-001 Login", "结果": "不通过"}}
+    ]
+    authenticated_client.get(
+        f"/api/groups/{confirmed_group.id}/cases/B-001/lark-history"
+    )
+    lark_fake.requests.clear()
+
+    reserved = authenticated_client.post(
+        f"/api/groups/{confirmed_group.id}/cases/B-001/retest"
+    )
+    assert reserved.status_code == 201, reserved.text
+
+    response = authenticated_client.get(
+        f"/api/groups/{confirmed_group.id}/cases/B-001/lark-history"
+    )
+    assert response.status_code == 200, response.text
+    assert lark_fake.record_requests

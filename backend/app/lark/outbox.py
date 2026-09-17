@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from app.auth import require_admin
 from app.config import settings
 from app.db import get_db
+from app.lark import cache as lark_cache
 from app.lark.client import LarkError, LarkTimeout
 from app.lark.target import target_for
 from app.lark.write import (
@@ -421,6 +422,11 @@ def read_sync(group_id: UUID, db: Annotated[Session, Depends(get_db)]) -> dict[s
         )
     )
     counts = sync_counts(db, group_id)
+    if counts.get("pending", 0) + counts.get("running", 0) == 0:
+        # Nothing is queued, so whatever the page cached before the worker ran is
+        # now known to be out of date. The page re-reads the panel right after
+        # this call, which is exactly when a stale snapshot would show up.
+        lark_cache.invalidate_group(db, group_id)
     return {
         "confirmed": confirmed,
         "pending_attempts": int(pending_attempts or 0),

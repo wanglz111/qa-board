@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.auth import require_admin
 from app.db import get_db
+from app.lark import cache as lark_cache
 from app.lark.client import LarkClient, LarkError, get_lark_client
 from app.lark.fields import (
     BUG_PRIORITY_OPTIONS,
@@ -451,6 +452,9 @@ def provision_fields(
         # A structure change invalidates the earlier write approval.
         locked.confirmed_at = None
     db.commit()
+    # A header this request just added is part of what the snapshot describes,
+    # and the live schema read above is newer than anything already cached.
+    lark_cache.invalidate_group(db, group_id)
     db.refresh(locked)
     return {
         "created_fields": created,
@@ -545,6 +549,8 @@ def retype_fields(
     if retyped:
         locked.confirmed_at = None
     db.commit()
+    # A retype changes a column's type, so every snapshot of this table is stale.
+    lark_cache.invalidate_group(db, group_id)
     db.refresh(locked)
     return {
         "retyped_fields": retyped,
@@ -699,6 +705,9 @@ def rebuild_table(
         db, group_id, role=payload.role, fingerprint=draft.fingerprint
     )
     db.commit()
+    # A rebuild replaces the table entirely: the old table's snapshot must not
+    # answer a read of the new one.
+    lark_cache.invalidate_group(db, group_id)
     db.refresh(locked)
     return {
         "role": payload.role,
@@ -748,6 +757,10 @@ def provision_table(
         )
     except LarkError as error:
         raise HTTPException(status_code=409, detail=f"新建数据表失败：{error}") from None
+    # The table did not reach this group's target yet. What it did change is its
+    # base's listing, and a cached names payload for this group may describe that
+    # base, so drop it rather than serve a listing the next read would outgrow.
+    lark_cache.invalidate_group(db, group_id)
     return {
         "table": {
             "table_id": str(table.get("table_id") or ""),

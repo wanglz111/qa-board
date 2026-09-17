@@ -39,19 +39,14 @@ def base_name(metadata: dict[str, Any]) -> str:
     return str((metadata.get("app") or {}).get("name") or "")
 
 
-def read_target_names(client: LarkClient, target: Any) -> dict[str, Any]:
-    """The live names of a target's two tables, never its schema."""
+def _read_target_names(client: LarkClient, target: Any) -> dict[str, Any]:
+    """The live names of a target's two tables, or a payload naming what is missing.
 
-    try:
-        reads = read_bases(client, [target.execution_base_token, target.bug_base_token])
-    except LarkError as error:
-        return {
-            "execution_base_name": None,
-            "execution_table_name": None,
-            "bug_base_name": None,
-            "bug_table_name": None,
-            "read_errors": [str(error)],
-        }
+    Raises ``LarkError`` when Lark refuses the read: the caller caches this
+    result, and a remembered failure would be served for the whole TTL.
+    """
+
+    reads = read_bases(client, [target.execution_base_token, target.bug_base_token])
 
     execution_base, execution_tables = reads[target.execution_base_token]
     bug_base, bug_tables = reads[target.bug_base_token]
@@ -72,3 +67,20 @@ def read_target_names(client: LarkClient, target: Any) -> dict[str, Any]:
         "bug_table_name": bug_table_name,
         "read_errors": read_errors,
     }
+
+
+def read_target_names(client: LarkClient, target: Any) -> dict[str, Any]:
+    """The live names of a target's two tables, never its schema."""
+
+    from app.lark import cache as lark_cache
+
+    try:
+        return lark_cache.read_names(target, lambda: _read_target_names(client, target))
+    except LarkError as error:
+        return {
+            "execution_base_name": None,
+            "execution_table_name": None,
+            "bug_base_name": None,
+            "bug_table_name": None,
+            "read_errors": [str(error)],
+        }

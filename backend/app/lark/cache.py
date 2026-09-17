@@ -123,6 +123,21 @@ def invalidate_target(target: Any) -> None:
     invalidate(target.bug_base_token, target.bug_table_id)
 
 
+def invalidate_group(db: Any, group_id: Any) -> None:
+    """Drop the snapshots of whatever target this group points at.
+
+    Every write this process makes has to say so: the snapshot lives in this
+    process's memory, while the worker that files the row runs in another
+    container and cannot reach it.
+    """
+
+    from app.lark.target import target_for
+
+    target = target_for(db, group_id)
+    if target is not None:
+        invalidate_target(target)
+
+
 def clear() -> None:
     with _lock:
         _entries.clear()

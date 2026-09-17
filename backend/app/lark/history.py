@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.auth import require_admin
 from app.db import get_db
+from app.lark import cache as lark_cache
 from app.lark.client import LarkClient, LarkError, get_lark_client
 from app.lark.fields import (
     DATE_FIELD_CANDIDATES,
@@ -346,8 +347,12 @@ def case_lark_history(
     # (the app lost advanced permissions, or Lark throttled the read), so this
     # stays the page's unreadable-target state instead of escaping as a 500.
     try:
-        records = client.list_records(
-            target.execution_base_token, target.execution_table_id
+        records = lark_cache.read_records(
+            target.execution_base_token,
+            target.execution_table_id,
+            lambda: client.list_records(
+                target.execution_base_token, target.execution_table_id
+            ),
         )
         history = history_for(records, code)
         case_history = history.original + history.retests
@@ -362,7 +367,11 @@ def case_lark_history(
             for record in case_history
         }
         bugs = match_bugs(
-            client.list_records(target.bug_base_token, target.bug_table_id),
+            lark_cache.read_records(
+                target.bug_base_token,
+                target.bug_table_id,
+                lambda: client.list_records(target.bug_base_token, target.bug_table_id),
+            ),
             code,
         )
     except LarkError as error:

@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.auth import require_admin
 from app.db import get_db
+from app.lark import cache as lark_cache
 from app.lark.outbox import enqueue_attempt_job
 from app.models import Attempt, Group, GroupCase
 from app.screenshots import screenshot_payload
@@ -190,6 +191,9 @@ def create_attempt(
         # as the local attempt, so the two can never disagree.
         enqueue_attempt_job(db, attempt)
         db.commit()
+        # The row this process just wrote is what the snapshot describes, so a
+        # read that came before it must not answer the next page.
+        lark_cache.invalidate_group(db, group_id)
         db.refresh(attempt)
         return _attempt_payload(attempt)
 
@@ -209,6 +213,9 @@ def reserve_retest(
         group_case = _locked_case_or_404(db, group_id, code)
         attempt = _reserve_attempt(db, group_case)
         db.commit()
+        # A reservation is a write of this process's own, so the snapshot it held
+        # before this commit must not answer the page that follows.
+        lark_cache.invalidate_group(db, group_id)
         db.refresh(attempt)
         return _attempt_payload(attempt)
 
@@ -239,6 +246,7 @@ def submit_attempt(
         _commit_attempt(attempt, payload)
         enqueue_attempt_job(db, attempt)
         db.commit()
+        lark_cache.invalidate_group(db, attempt.group_case.group_id)
         db.refresh(attempt)
         return _attempt_payload(attempt)
 

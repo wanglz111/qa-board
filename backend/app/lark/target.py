@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from app.auth import require_admin
 from app.config import settings
 from app.db import get_db
+from app.lark import cache as lark_cache
 from app.lark.client import LarkClient, LarkError, get_lark_client
 from app.lark.fields import (
     REQUIRED_BUG_FIELD_TYPES,
@@ -492,6 +493,12 @@ def save_target(
     db.add(target)
     record_target_revision(db, group_id, draft)
     db.commit()
+    # A target is stored as one row updated in place, so this request can only
+    # name the destination it just saved: the names and rows of that one are
+    # dropped and the next read is live. A destination this row just left keeps
+    # its own entry until the TTL expires, which only re-pointing the group back
+    # to it within the minute can serve.
+    lark_cache.invalidate_group(db, group_id)
     db.refresh(target)
     return {
         "target": serialize_target(target),
@@ -547,5 +554,9 @@ def confirm_target(
     locked.schema_fingerprint = state["schema_fingerprint"]
     locked.confirmed_at = datetime.now(timezone.utc)
     db.commit()
+    # Confirming changes no row in the table, so this is harmless rather than
+    # necessary — it keeps every write path telling the snapshot the same story,
+    # and the panel re-reads the tables right after it.
+    lark_cache.invalidate_group(db, group_id)
     db.refresh(locked)
     return serialize_target(locked)
