@@ -153,6 +153,24 @@ desk 内紧凑进度行（PiP 可见）：
 
 ---
 
+### F. 实施期修正（Task 3 两段评审后生效的行为，以本节为准）
+
+1. **守卫用「访问令牌」而不是下标**：`save()` 开头记 `savedVisit = caseRequest.current`（`caseRequest` 只在 `selectGroup` / `showCase` 里自增），所有**用例范围**的写入用 `loadedGroup.current === savedGroupId && caseRequest.current === savedVisit` 判定。下标比不出来「一直没走开」与「走开又回到同一下标」，后者会被强行拽走。`caseIndexRef` 因此整个删除。
+2. **截图没传成功就不前进**：`advanceTo = uploaded ? nextUntestedIndex(updated, savedIndex) : null`。原规格没写这条，但前进会清空 `images`（证据被丢弃），而 `keepStatus` 留下的 error 状态 + 未失效的 `lastAttemptId` 会让下一条用例上的「重试上传截图」把**新用例的截图传到上一条的 attempt**。留在原用例才让附件与重试按钮都指向正确的记录。
+3. **迟到的写入一律不许跨界**：`setAttempts` / `setLastAttemptId` / `setImages([])` / 表单复位 / 前进 都带同一对守卫；保存期间切走后落地的保存不再改动画面上那一条的任何东西。
+4. **`setReserved` 收窄为「只清掉本次保存消费的那条预留」**（`setReserved(current => current?.id === reserved?.id ? null : current)`）：`LegacyHistory` 的「复测」按钮没有 `disabled`，操作员能在保存飞行期间预留，原写法会把它抹掉并孤儿化标签。
+5. **`startRetest` 丢弃迟到的预留**（捕获组与访问令牌，返回时比对）：预留落在已被离开的用例上时不写入 `reserved`。预留行仍是 `started` 且无结果，丢弃不丢数据。
+6. **`setStatus` 刻意不门控**：它是「事件发生了」的通知、且文本自带用例编号（`{code} 已保存到本地 · …`）；门控掉等于静默吞掉「到底存进去没有」的反馈。
+7. **`setCases` / `setSync` 只按组门控**（它们描述的是这个组的列表与徽标，不是某一次访问）。
+
+### G. 实施期发现的待决缺陷（不在本次批准范围内，未修，交人类决定）
+
+| # | 缺陷 | 证据 | 建议修法 |
+|---|---|---|---|
+| O1 | 幂等键签名不含 group（`save()` 的 `signature` 只有 code/result/note/console/reserved），而 `Attempt.idempotency_key` 全局唯一且服务端按 key 去重：两个组里的同编号用例提交**完全相同**的载荷时会复用同一个 key → 第二次保存可能被服务端当成重复而什么都没存 | `backend/app/models.py:157`（unique）、`backend/app/execution.py:74-92`（按 key 匹配）、`frontend/src/views/Execution.tsx` 的 `signature` | 把 `savedGroupId` 加进签名数组 + 一条跨组回归测试 |
+| O2 | `submitting` 被「保存」与「预留重测」共用：预留流程的 `finally { setSubmitting(false) }` 会在保存仍在飞行时释放保存的 spinner（于是可能出现并发提交） | 复审探针（`LegacyHistory` 路径）复现 | 拆成两个标志或改计数器 |
+| O3 | `LegacyHistory.tsx:243` 的「复测（新标签，不覆盖旧结果）」按钮**没有 `disabled`**，保存期间仍可点（O2 的入口；预留本身已由修正 4 保护） | 同上 | 与其他入口对齐，加 `disabled={submitting}` |
+
 ## 三、影响面与验证策略
 
 | 层 | 文件 | 验证 |
