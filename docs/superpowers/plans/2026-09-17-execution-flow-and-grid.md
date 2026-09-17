@@ -54,7 +54,8 @@ cd /home/lucascool/qa-board/frontend && npx playwright test
 
 在 `frontend/src/executionCursor.test.ts` 里：
 1. 把现有 `it("returns to the case being looked at when it still exists", ...)`（用 `CASES` 里的 `"B-002"`，它是 `不通过` 即已测）改成断言**新规则**：已测的记忆条目不再回去，落到第一条未测（`2`），并改写标题为 `"falls back to the first unrun case once the remembered case is done"`。
-2. 新增：`"returns to the remembered case while it is still unrun"` —— `startIndexFor(CASES, { groupId: GROUP, code: "B-003" }, GROUP)` 返回 `2`（B-003 是第 3 条、`latest_result` 为 `null`）。
+2. 新增：`"returns to the remembered case while it is still unrun"` —— `startIndexFor(CASES, { groupId: GROUP, code: "B-004" }, GROUP)` 返回 `3`（B-004 是第 4 条、`latest_result` 为 `null`）。
+   > **实施期修正（Task 1 评审）**：原稿写 `"B-003"` 返回 `2`，但 B-003 既是记忆项又是第一条未测用例——把记忆分支整段删掉也照样通过，测不出东西。改用 `B-004`：删掉分支会退化成 `2` 而失败。
    > 注意：`startIndexFor(cases, cursor: Cursor | null, groupId: string)` 是**三参数**签名，`Cursor` 形如 `{ groupId, code }`；现有的「忽略别的组的游标」测试就在这个文件里，照它的写法传参。
 3. 新增 `nextUntestedIndex` 的 5 条测试（用同一个 `CASES` 数组与 `caseWith` 辅助函数）：
 
@@ -85,6 +86,8 @@ it("treats a negative index as 'from the beginning'", () => {
 });
 ```
 
+> **实施期修正（Task 1 评审）**：实际落地的测试比上面这 5 条多 3 条，都是评审要求补的变异杀手——`"looks strictly after the current case before wrapping"`（`[未测, 通过, 未测]` 从 `1` 出发必须得 `2`，naive 的 `findIndex` 会得 `0`）、`"treats an out-of-range start as the beginning of the group"`（唯一未测在最后一行、`from = length` 与 `99` 都必须得 `2`）、`"does not fall back to the current case when it is the only one left"`（`[通过, 未测]` 从 `1` 出发必须是 `null`）。最终该文件 20 条断言。
+
 - [ ] **Step 2: 跑测试确认失败**
 
 Run: `cd /home/lucascool/qa-board/frontend && npx vitest run src/executionCursor.test.ts`
@@ -110,14 +113,19 @@ Expected: FAIL —— `nextUntestedIndex` 不是一个函数 / 起点断言 2 !=
 
 ```ts
 // The next case nobody has run, starting after `from` and wrapping once to the
-// top of the group. `null` means every case already carries a result, which is
-// the caller's signal to stay put and say the group is finished.
+// top of the group. `null` means there is no unrun case other than `from`
+// itself, which is the caller's signal to stay put; whether the group is
+// finished stays `allTested`'s call. A `from` outside the array behaves like
+// `-1`: the search starts at the top.
 export function nextUntestedIndex(cases: GroupCase[], from: number): number | null {
   const start = Math.max(from, -1);
   for (let index = start + 1; index < cases.length; index += 1) {
     if (!isDone(cases[index])) return index;
   }
-  const ceiling = Math.min(start, cases.length - 1);
+  // The wrap stops before `from`, and `cases.length` (not `length - 1`) is the
+  // bound: an out-of-range `from` must fall back to `-1`, and capping at
+  // `length - 1` would then never inspect the group's last row.
+  const ceiling = Math.min(start, cases.length);
   for (let index = 0; index < ceiling; index += 1) {
     if (!isDone(cases[index])) return index;
   }
