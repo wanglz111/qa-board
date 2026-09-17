@@ -682,12 +682,15 @@ class FakeLark:
 
 @pytest.fixture(autouse=True)
 def clean_lark_state():
-    """No shared client survives from one test into the next."""
+    """No snapshot or shared client survives from one test into the next."""
 
+    import app.lark.cache as lark_cache
     import app.lark.client as lark_client_module
 
+    lark_cache.clear()
     lark_client_module.reset_shared_client()
     yield
+    lark_cache.clear()
     lark_client_module.reset_shared_client()
 
 
