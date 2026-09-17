@@ -23,7 +23,7 @@ import {
   type SaveInput,
   type SaveStatus
 } from "../components/OutcomeForm";
-import { allTested, readCursor, startIndexFor, writeCursor } from "../executionCursor";
+import { allTested, clearCursor, readCursor, startIndexFor, writeCursor } from "../executionCursor";
 import { dispatchCaseKey, useCaseKeys, type CaseKeyHandlers } from "../useCaseKeys";
 import { usePiP } from "../usePiP";
 
@@ -97,6 +97,10 @@ export function ExecutionView({
   const [sync, setSync] = useState<SyncStatus | null>(null);
   const [legacyVersion, setLegacyVersion] = useState(0);
   const caseRequest = useRef(0);
+  // Which group the cases currently in state were loaded for. A save outlives
+  // several awaits while the group list stays clickable, so it has to check this
+  // before touching a list the operator may already have replaced.
+  const loadedGroup = useRef<string | null>(null);
   const deskMountRef = useRef<HTMLDivElement>(null);
   const [deskHost] = useState(() => {
     const host = document.createElement("div");
@@ -155,7 +159,14 @@ export function ExecutionView({
         setGroups(result);
         // Reopening the page should land on the group the operator was working
         // in, not on whichever group the server lists first.
-        const rememberedGroup = readCursor()?.groupId ?? null;
+        const remembered = readCursor();
+        // A cursor naming a group that is gone can never be honoured again, so
+        // drop it here rather than letting it fall through silently on every
+        // later open.
+        if (remembered && !result.some((group) => group.id === remembered.groupId)) {
+          clearCursor();
+        }
+        const rememberedGroup = remembered?.groupId ?? null;
         const preferred =
           result.find((group) => group.id === initialGroupId) ??
           result.find((group) => group.id === rememberedGroup) ??
@@ -190,6 +201,7 @@ export function ExecutionView({
       const result = await loadCases(groupId);
       if (requestId !== caseRequest.current) return;
       setCases(result);
+      loadedGroup.current = groupId;
       // Resume where the operator left off, else at the first case nobody has
       // run. This is the whole point of the page: coming back after a break
       // must not mean re-reading the first row of the group.
@@ -249,10 +261,12 @@ export function ExecutionView({
   }
 
   async function save(input: SaveInput) {
-    // The case this save belongs to, snapshotted so the state updater below can
-    // keep the conventional `current` name for the list it receives.
+    // The case and the group this save belongs to. Both are snapshotted: the
+    // awaits below are long enough for the operator to switch groups, and two
+    // groups can hold the same code.
+    const savedGroupId = selectedGroupId;
     const saved = cases[caseIndex];
-    if (!saved || !selectedGroupId) return;
+    if (!saved || !savedGroupId) return;
     const signature = JSON.stringify([saved.code, input.result, input.note, input.consoleText, reserved?.id ?? null]);
     const payload: SubmitPayload = {
       result: input.result,
@@ -265,23 +279,30 @@ export function ExecutionView({
     try {
       const attempt = reserved && commitReserved
         ? await commitReserved(reserved.id, payload)
-        : await submit(selectedGroupId, saved.code, payload);
+        : await submit(savedGroupId, saved.code, payload);
       setLastAttemptId(attempt.id);
       setReserved(null);
-      setAttempts(await loadAttempts(selectedGroupId, saved.code));
-      await refreshProgress(selectedGroupId);
+      const history = await loadAttempts(savedGroupId, saved.code);
+      if (loadedGroup.current === savedGroupId) setAttempts(history);
+      await refreshProgress(savedGroupId);
       // The cases were loaded once. Without this the operator who just recorded
-      // the last result would not see 本组已全部测过 until they reloaded.
+      // the last result would not see 本组已全部测过 until they reloaded. The
+      // response is the authority on the result, and the list is only touched
+      // while it is still this group's.
       setCases((current) =>
-        current.map((item) =>
-          item.code === saved.code ? { ...item, latest_result: input.result } : item
-        )
+        loadedGroup.current !== savedGroupId
+          ? current
+          : current.map((item) =>
+              item.code === saved.code ? { ...item, latest_result: attempt.result } : item
+            )
       );
       let confirmed = sync?.confirmed ?? false;
       if (loadSync) {
         try {
-          const latestSync = await loadSync(selectedGroupId);
-          setSync(latestSync);
+          const latestSync = await loadSync(savedGroupId);
+          // The badge belongs to whatever group is on screen, so a save that
+          // outlived a group switch must not write its numbers into it.
+          if (loadedGroup.current === savedGroupId) setSync(latestSync);
           confirmed = latestSync.confirmed;
         } catch {
           // The badge keeps its previous value; the save itself already succeeded.
@@ -419,9 +440,11 @@ export function ExecutionView({
         {activeCase ? (
           <>
             {/* Landing on the last row of a finished group is not the operator's
-                answer to "what is left?" — say it out loud. */}
+                answer to "what is left?" — say it out loud. No role="status":
+                the save confirmation announces at the same moment, and two
+                polite regions speaking at once read as noise. */}
             {allTested(cases) ? (
-              <p className="inline-status saved" role="status">本组已全部测过</p>
+              <p className="inline-status saved">本组已全部测过</p>
             ) : null}
             <CaseDetail
               testCase={activeCase}

@@ -408,3 +408,92 @@ it("announces the finish in the very session that finishes the group", async () 
 
   expect(await screen.findByText("本组已全部测过")).toBeVisible();
 });
+
+it("keeps a save from repainting another group's list", async () => {
+  const pendingSave = deferred<Attempt>();
+  const submit = vi.fn<(groupId: string, code: string, payload: SubmitPayload) => Promise<Attempt>>();
+  submit.mockReturnValue(pendingSave.promise);
+  renderExecution({
+    initialGroupId: "0918-id",
+    submit,
+    // Both groups carry a B-001 — this app re-imports the same casebook — so a
+    // save can only match its own group's row.
+    loadCases: async (groupId) =>
+      groupId === "0918-id"
+        ? [testCase("a1", "A 组待执行", null, "B-001", null)]
+        : [
+            testCase("b1", "B 组已完成", null, "B-002", "通过"),
+            testCase("b2", "B 组待执行", null, "B-001", null)
+          ],
+    loadAttempts: async (groupId) =>
+      groupId === "0918-id" ? [committed("attempt-a", "B-001", "通过", "A 组的历史结果")] : []
+  });
+
+  await screen.findByText("A 组待执行");
+  await userEvent.click(screen.getByRole("button", { name: "通过" }));
+  await userEvent.click(screen.getByRole("button", { name: /保存结果/ }));
+
+  // The save is still on the wire when the operator moves on; the group list
+  // stays clickable while it is.
+  await userEvent.click(screen.getByText("Sprint 0922"));
+  expect(await screen.findByText("B 组待执行")).toBeVisible();
+
+  pendingSave.resolve(committed("attempt-1", "B-001", "通过", null));
+  await settle();
+
+  // A's verdict and A's history must not follow the operator into B, whose own
+  // B-001 is still the unrun case here.
+  expect(screen.queryByText("本组已全部测过")).not.toBeInTheDocument();
+  // A regex, not a string: the row renders as 说明：A 组的历史结果.
+  expect(screen.queryByText(/A 组的历史结果/)).not.toBeInTheDocument();
+  expect(screen.getByText("B 组待执行")).toBeVisible();
+});
+
+it("remembers the case the operator walks to, not only the one it landed on", async () => {
+  renderExecution({
+    initialGroupId: "0918-id",
+    loadCases: async () => [
+      testCase("c1", "第一条", null, "B-001", "通过"),
+      testCase("c2", "第二条", null, "B-002", null)
+    ]
+  });
+
+  expect(await screen.findByText("第二条")).toBeVisible();
+  expect(window.localStorage.getItem("testdeck.execution.cursor")).toBe(
+    JSON.stringify({ groupId: "0918-id", code: "B-002" })
+  );
+
+  // Stepping back to re-read a finished case is part of "where the operator
+  // is"; reopening after that must not send them forward again.
+  await userEvent.click(screen.getByRole("button", { name: "上一条用例" }));
+  expect(await screen.findByText("第一条")).toBeVisible();
+  expect(window.localStorage.getItem("testdeck.execution.cursor")).toBe(
+    JSON.stringify({ groupId: "0918-id", code: "B-001" })
+  );
+});
+
+it("opens the group the cursor names when the caller does not name one", async () => {
+  // App.tsx mounts this view without initialGroupId, so the remembered group is
+  // the branch production actually takes.
+  window.localStorage.setItem(
+    "testdeck.execution.cursor",
+    JSON.stringify({ groupId: "0922-id", code: "B-001" })
+  );
+  renderExecution();
+
+  expect(await screen.findByText("钱包绑定")).toBeVisible();
+  expect(screen.queryByText("管理员登录")).not.toBeInTheDocument();
+});
+
+it("drops a cursor that names a group the server no longer lists", async () => {
+  window.localStorage.setItem(
+    "testdeck.execution.cursor",
+    JSON.stringify({ groupId: "0917-id", code: "B-001" })
+  );
+  renderExecution({ loadGroups: async () => [] });
+
+  expect(await screen.findByText("该测试组暂无用例")).toBeVisible();
+  // The group is gone, so the cursor can never be honoured again: keeping it
+  // would silently steer every later open.
+  expect(window.localStorage.getItem("testdeck.execution.cursor")).toBeNull();
+});
