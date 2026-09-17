@@ -909,20 +909,52 @@ Expected: 两个新测试 FAIL（还没接快照；第二个读到的是旧快�
 `backend/app/lark/reconcile.py`：live 分支里的 `client.list_records(...)` 同样包一层
 `lark_cache.read_records(...)`，并加同一个 import。
 
-`backend/app/lark/names.py` 的 `read_target_names`：把整个读取包进快照，这样热缓存下一次开用例
-**一次 Lark 请求都不用发**（名字与记录各自 60 秒，失效事件相同）：
+`backend/app/lark/names.py` 的 `read_target_names` 也要进快照，这样热缓存下一次开用例
+**一次 Lark 请求都不用发**（名字与记录各自 60 秒，失效事件相同）。
+
+**这里有个坑**：`read_names` 会把 `fetch()` 的返回值原样存下来，而 `read_target_names` 失败时是
+**返回**一个带 `read_errors` 的 dict、不是抛异常。直接 `return lark_cache.read_names(target, …)` 等于把
+「目标表读不了」这个瞬时状态缓存 60 秒——一次限流就会让整分钟内打开的每个用例都显示不可读，而且没有任何写入去失效它。
+所以**错误翻译必须留在被缓存的那次调用之外**：
 
 ```python
+def _read_target_names(client: LarkClient, target: Any) -> dict[str, Any]:
+    """The live names of a target's two tables. Raises when Lark refuses.
+
+    Raising matters: the caller caches this result, and a cached failure would
+    pin the page into 「目标表不可读」 for the whole TTL. Only a successful read
+    is worth remembering, so the translation to a payload lives one level up.
+    """
+
+    reads = read_bases(client, [target.execution_base_token, target.bug_base_token])
+    ...  # 原名 read_target_names 的函数体，去掉 try/except，成功路径照旧
+
+
 def read_target_names(client: LarkClient, target: Any) -> dict[str, Any]:
     """The live names of a target's two tables, never its schema."""
 
     from app.lark import cache as lark_cache
 
-    return lark_cache.read_names(target, lambda: _read_target_names(client, target))
+    try:
+        return lark_cache.read_names(
+            target, lambda: _read_target_names(client, target)
+        )
+    except LarkError as error:
+        return {
+            "execution_base_name": None,
+            "execution_table_name": None,
+            "bug_base_name": None,
+            "bug_table_name": None,
+            "read_errors": [str(error)],
+        }
 ```
 
-原函数体整体改名成私有的 `_read_target_names`（内容不变），`case_lark_history` 仍然调 `read_target_names`。
+原来的 `try/except LarkError` 从函数体里挪到包装层（上面那个 `except`），函数体其余部分不变。
+`case_lark_history` 仍然调 `read_target_names`，行为不变。
 `lark_cache.invalidate_target(target)` 已经会把这个 key 一起丢掉，所以写入口与「队列排空」的失效不用再加。
+
+**要有一条测试钉住它**：让 `bases_error` 打开 → 第一次请求返回不可读；关掉 `bases_error` →
+**紧接着的第二次请求必须恢复正常**（如果实现成缓存失败，第二次仍然是不可读）。
 
 `backend/app/execution.py` 加一个 helper（放在 `_attempt_payload` 附近）：
 
