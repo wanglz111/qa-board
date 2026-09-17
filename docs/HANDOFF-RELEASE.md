@@ -435,3 +435,68 @@ live base `LIhnb0ok7a1TMksi3t1jrVoLpke` 现有 5 张表，其中这两张是本�
 - 我为了验证截图链路造过一条**真实的**测试记录（`attempt a327b24e-…`，复测标签 `B-005-Rgroup-4e98c0-01`，一次「不通过」，备注「端到端截图链路验证」）。它已经按预期写进了新执行表和新 bug 表各一行，Lark 没有删除记录的 API，需要你手动删掉这两行。
 
 回滚：`cd /home/ubuntu/testdeck && ./deploy.sh v0.1.8`（本次无 schema 变更，可直接回滚）。注意已重建的两张表不会因此回退，本组的目标已指向新表。
+
+## 18. 这次交付做了什么（v0.1.10）
+
+起因是「Lark 请求太多」和「做到一半关掉网页又从头开始」。先做了一次审计（用线上凭证给 `client._send` 打点、数真实请求），量出**打开一个用例 = 9 次 Lark 请求**：
+
+| 次数 | 请求 | 用途 |
+| --- | --- | --- |
+| 2 | `GET /apps/{base}` | 取库名——两个角色同一个库，**同一请求调了两次** |
+| 2 | `GET /apps/{base}/tables` | 取表名——同上重复 |
+| 2 | `.../{表}/fields` | 只为算 `schema_errors`/指纹，页面并不用 |
+| 2 | `.../{表}/records` | 真正要的数据 |
+| 1 | `POST /auth/v3/tenant_access_token` | **每个 HTTP 请求都新建 client，于是每次都换 token** |
+
+20 个用例浏览一遍约 180 次，而且每切回一个用例就重读整张表。于是按三份计划、12 个任务实施（每任务「实现 → 规格复核 → 代码质量复核」，复核由独立 subagent 做，多次抓到真问题并复现）：
+
+**1）Lark 读请求瘦身**（`2026-09-17-lark-read-volume.md`，6 个任务）
+
+- 进程内复用同一个 `LarkClient`：token 在到期前才续期（原来基础版是**永久缓存**，worker 跑满 2 小时后每个写入都会失败——这是个潜在故障，被顺手修掉），连接也复用；401 时丢弃缓存 token 并**重试一次**，读、写、附件下载三条路径都覆盖。
+- 同一个库只读一次；历史面板不再为「表名」去读 fields（拆出 `names.py`）。
+- 新增 60 秒快照（表名 + 记录），由**本进程的写入口**失效，并在 `GET /sync` 报告队列排空时失效一次——api 与 worker 是两个容器，worker 的写入无法失效 api 的内存，这一条是补上跨进程的那段。
+- 旧表附件按 `sha256(token)` 落盘缓存 24 小时（sidecar 先写、唯一临时名、长度校验、尽力而为），响应头从 `no-store` 改成 `private, max-age=86400`。
+
+实测（线上真实库）：**冷启动打开一个用例 5 次请求**（token + 库 + 表清单 + 2 张 records），**热缓存再打开 3 个用例 0 次请求**；审计基线是每个用例 9 次。
+
+**2）执行进度续做**（`2026-09-17-execution-resume.md`，3 个任务）
+
+进度从来没丢（`attempts` 一直在，`/progress` 也一直在算），丢的是**光标**：`selectGroup()` 写死 `caseIndex = 0`。现在 `GET /cases` 带上每个用例的 `latest_result`，页面默认落在**第一个没有结果的用例**，并用 `localStorage` 记住上次看的**组和用例**；需要回看时手动切，不做自动前进。保存后会把当前用例的结果就地更新，所以「本组已全部测过」在**完成的那一轮**就会显示，而不是刷新之后。
+
+来源刻意用本地数据、不读 Lark：表里的行没有任何字段带 group id（工具靠 `(用例,结果,控制台,日期)` 认自家行），而这个仓库会反复重导同一份用例书（`B-003` 在每个组里都存在），按编号做差集必然串组。
+
+**3）重建数据表的写放大防护**（`2026-09-17-rebuild-reprocess.md`，3 个任务）
+
+管理员曾在已经修正过的表上又重建了一次，于是线上出现「执行记录（表头修正）（表头修正）」，而每次重建都会把该角色全部记录重写一遍。现在：
+
+- 表头已经是参考布局（列序 + 主列 + 每列类型）时**拒绝重建**（409 并说明原因），要重建得显式勾「强制重建」；列序或主列不对的表照旧可以重建（包括带多余空列的那种——Lark 没有删列 API，重建是唯一出路）。
+- 对话框显示「将重新写入 N 条记录」，N 取的是**重建真正会动的 job 数**（`SyncJob`），与重建返回的 `requeued` 恒等；从表里采纳的行（`source="reconcile"`）与目标确认前写入的行不计入，文案也照此改写。
+- 对话框每次打开都重读一次计划，所以刚做完用例再来重建时数字是新的。
+
+### 上线记录
+
+- `main` 推进到 `254c36e` 并打 tag `v0.1.10`；GitHub Actions [#35228535028](https://github.com/wanglz111/qa-board/actions/runs/35228535028) success，两个镜像已推到 GHCR。
+- 服务器执行 `./deploy.sh v0.1.10`：`.env` 备份为 `.env.bak-20260917-214304`，部署前数据库备份 `backups/backup-<部署时间>.sql.gz`；无新迁移，api / worker / web 全部换成 `ghcr.io/wanglz111/qa-board-*:v0.1.10`。
+- 本地验证：后端 **415 passed**，前端 **156 passed**（17 文件）+ `npm run build` 通过，`git diff --check` 干净。Playwright 有 8 条既有失败（`execution.spec.ts` 与 `legacy.spec.ts` 的「…without overflow」），改动前后**逐条相同**，与本次无关。
+
+升级后的实测结果（真实域名 + 真实 Lark 数据）：
+
+| 检查 | 结果 |
+| --- | --- |
+| `docker compose ps` | api（healthy）、worker、web 都是 `ghcr.io/wanglz111/qa-board-*:v0.1.10` |
+| `GET /health/ready` | 200 `{"ok":true}` |
+| 部署的 SPA 资源 | `index-DXBl3AJM.js` / `index-xxRhoqog.css`，与本地 v0.1.10 构建产物一致 |
+| `GET /api/groups/<id>/cases` | 14 条用例各自带 `latest_result`（B-001 通过、B-005/B-010 不通过、其余 `null`）——页面因此会停在 B-003 |
+| `GET /api/groups/<id>/lark/provision` | `rebuild` = `{"execution": 6, "bug": 4}`，`roles`/`retype` 均为空（表头已完整） |
+| `POST .../lark/provision/rebuild`（当前表已是参考布局） | **409**「这张表已经是参考表头（列序、主列与类型都对）…请勾选「强制重建」」，且没有新建任何表 |
+| 请求数实测（给 `client._send` 打点） | 冷启动 5 次 / 热缓存 0 次（每个用例 9 次是审计基线） |
+
+回滚：`cd /home/ubuntu/testdeck && ./deploy.sh v0.1.9`（本次无 schema 变更，可直接回滚）。快照与附件缓存都是进程内/磁盘缓存，回滚后自动失效，无需清理。
+
+### 已知未做（有意记录）
+
+- 保存的 UI 尾巴（`setStatus`/`setImages`/`setLastAttemptId`）仍假设「还在原来的组」：保存过程中切组，新页面可能显示旧组的保存确认、清掉新页面暂存的截图，或让「重试上传截图」指向旧组的 attempt。本轮把它从 6 处收到 3 处，剩下的要按「归属哪个用例」来设计。
+- `selectGroup` 里的 `loadSync` 没有 requestId 守卫，快速 A→B→C 切组可能把 A 的徽标数字留在 C 上。
+- 游标只有一份（不是每组一份），两个标签页共用；单用户下可接受。
+- 重建时若把 `reset_jobs_for_rebuilt_table` 改成「补齐缺失 job」，新表还能带上目标确认前写入的行——那会改变重建的语义（写入之前被确认闸门挡住的行），属产品决策，未做。
+- 面板失败路径的「不留半写状态」目前依赖 session teardown 回滚；生产正确，但性质不显式。
