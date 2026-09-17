@@ -132,6 +132,34 @@ def test_old_bug_is_matched_read_only(lark_fake):
     )
 
 
+def test_bug_this_tool_created_is_matched_through_its_marker():
+    """The outbox writes 【自动提】 rows, so the read must see through it."""
+
+    records = [
+        {
+            "record_id": "auto1",
+            "fields": {
+                "问题描述": "【自动提】B-005 发售阶段期次表与名额公式\n旧表没有该用例的失败记录",
+                "进展状态": "待修复",
+            },
+        },
+        # The marker must not blur the case-code boundary.
+        {
+            "record_id": "other",
+            "fields": {"问题描述": "【自动提】B-0050 另一个用例", "进展状态": "待修复"},
+        },
+        # An ordinary legacy row keeps matching exactly as before.
+        {
+            "record_id": "legacy",
+            "fields": {"问题描述": "【已修复】B-005 旧缺陷", "进展状态": "已修复"},
+        },
+    ]
+
+    matches = match_bugs(records, "B-005")
+
+    assert [match["record_id"] for match in matches] == ["auto1", "legacy"]
+
+
 def test_read_audit_is_get_only(lark_fake):
     lark_fake.records = [{"record_id": "old1", "fields": {"用例": "B-001"}}]
     lark_fake.media["secret-file-token"] = (b"png-bytes", "image/png")

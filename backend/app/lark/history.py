@@ -37,6 +37,12 @@ RETEST_SUFFIX = re.compile(r"(?P<retest>-R[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*)$")
 EXPLICIT_LINK_FIELDS = ("关联用例", "用例编号")
 CASE_TEXT_FIELDS = ("用例", "用例编号", "用例标题", "标题")
 
+# A defect row may carry a leading label before its text, and the outbox's own
+# 【自动提】 rows always do. The label is decoration: the case code starts right
+# after it, so the reader strips it instead of reporting "未匹配到旧缺陷" for the
+# very rows this tool created.
+LEADING_MARKER = re.compile(r"^\s*(?:【[^】]*】\s*)*")
+
 
 @dataclass(frozen=True)
 class CaseReference:
@@ -82,6 +88,14 @@ def parse_case_reference(text: str | None) -> CaseReference | None:
     if "-" not in code:
         return CaseReference(code=token, retest_label=None)
     return CaseReference(code=code, retest_label=retest.group("retest"))
+
+
+def parse_labelled_case_reference(text: str | None) -> CaseReference | None:
+    """The same parse, ignoring a leading 【…】 label such as 【自动提】."""
+
+    if not text:
+        return None
+    return parse_case_reference(LEADING_MARKER.sub("", text))
 
 
 def record_fields(record: dict[str, Any]) -> dict[str, Any]:
@@ -181,7 +195,7 @@ def match_bugs(bug_records: list[dict[str, Any]], code: str) -> list[dict[str, A
                 break
         if matched_by is None:
             for name in DESCRIPTION_FIELDS:
-                reference = parse_case_reference(str(fields.get(name) or ""))
+                reference = parse_labelled_case_reference(str(fields.get(name) or ""))
                 if reference is not None and reference.code == code:
                     matched_by = name
                     break
