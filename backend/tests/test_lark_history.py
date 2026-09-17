@@ -751,6 +751,118 @@ def test_a_half_applied_retype_drops_the_snapshot(
     assert lark_fake.record_requests
 
 
+def _repoint_the_stored_target(db_session, group_id) -> None:
+    """Move the group to the fake's other base, the way a second tab does.
+
+    Committed, not left open: this stands in for another tab's finished save,
+    which is what makes the stored row name a destination this request never
+    read by the time its failure path runs.
+    """
+
+    from app.lark.target import TargetDraft, target_for
+
+    stored = target_for(db_session, group_id)
+    stored.execution_base_token = "app-token"
+    stored.execution_table_id = "tbl-runs"
+    stored.bug_base_token = "app-token"
+    stored.bug_table_id = "tbl-defects"
+    stored.target_fingerprint = TargetDraft(
+        "app-token", "tbl-runs", None, "app-token", "tbl-defects"
+    ).fingerprint
+    stored.confirmed_at = None
+    db_session.commit()
+
+
+def test_a_repointed_half_applied_retype_drops_the_table_it_touched(
+    authenticated_client, lark_fake, confirmed_group, db_session, monkeypatch
+):
+    """The request converted a column of a table the group no longer names.
+
+    Dropping the *group's* snapshots here would drop the destination the
+    re-point just saved — a table this request never read — and leave the one
+    that really changed answering from its pre-conversion copy for the TTL.
+    """
+
+    import app.lark.cache as lark_cache
+    from app.lark.client import LarkError
+
+    authenticated_client.get(
+        f"/api/groups/{confirmed_group.id}/cases/B-001/lark-history"
+    )
+    # The destination the re-point moves to, held by this process all along.
+    lark_cache.read_records("app-token", "tbl-runs", lambda: [])
+    lark_fake.requests.clear()
+
+    real_update = lark_fake.client.update_field
+    calls = {"count": 0}
+
+    def repoint_then_refuse(*args, **kwargs):
+        calls["count"] += 1
+        if calls["count"] > 1:
+            raise LarkError("Lark 拒绝了这次修改")
+        _repoint_the_stored_target(db_session, confirmed_group.id)
+        return real_update(*args, **kwargs)
+
+    monkeypatch.setattr(lark_fake.client, "update_field", repoint_then_refuse)
+
+    refused = authenticated_client.post(
+        f"/api/groups/{confirmed_group.id}/lark/provision/retype",
+        json={
+            "role": "execution",
+            "field_names": ["结果", "优先级"],
+            "acknowledge": True,
+        },
+    )
+
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["detail"]["created_fields"] == ["结果"]
+    assert ("app-exec", "tbl-runs") not in lark_cache._entries
+    assert ("app-token", "tbl-runs") in lark_cache._entries
+
+
+def test_a_repointed_half_applied_provision_drops_the_table_it_touched(
+    authenticated_client, lark_fake, confirmed_group, db_session, monkeypatch
+):
+    """The same race, on the sibling branch that creates headers."""
+
+    import app.lark.cache as lark_cache
+    from app.lark.client import LarkError
+
+    # Only 用例 exists, so 结果 and 优先级 are both in the create-only plan.
+    lark_fake.fields = [{"field_id": "fld-用例", "field_name": "用例", "type": 1}]
+    authenticated_client.get(
+        f"/api/groups/{confirmed_group.id}/cases/B-001/lark-history"
+    )
+    lark_cache.read_records("app-token", "tbl-runs", lambda: [])
+    lark_fake.requests.clear()
+
+    real_create = lark_fake.client.create_field
+    calls = {"count": 0}
+
+    def repoint_then_refuse(*args, **kwargs):
+        calls["count"] += 1
+        if calls["count"] > 1:
+            raise LarkError("Lark 拒绝了这次修改")
+        _repoint_the_stored_target(db_session, confirmed_group.id)
+        return real_create(*args, **kwargs)
+
+    monkeypatch.setattr(lark_fake.client, "create_field", repoint_then_refuse)
+
+    refused = authenticated_client.post(
+        f"/api/groups/{confirmed_group.id}/lark/provision/fields",
+        json={
+            "role": "execution",
+            "field_names": ["结果", "优先级"],
+            "acknowledge": True,
+        },
+    )
+
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["detail"]["created_fields"] == ["结果"]
+    assert ("app-exec", "tbl-runs") not in lark_cache._entries
+    assert ("app-token", "tbl-runs") in lark_cache._entries
+
+
 def _queued_job(authenticated_client, group, db_session):
     """One case's attempt, committed and queued, with its sync job returned."""
 
