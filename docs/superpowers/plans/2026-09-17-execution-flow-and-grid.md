@@ -194,6 +194,11 @@ it("clears a validation message left behind by an empty submit", async () => {
 ```
 > 若 `renderForm` 没把 label 关联到 textarea，用文件里现有的取法（例如 `screen.getByLabelText("失败说明")` 已能用，`<label>` 包着 `<textarea>`），以现有测试的写法为准；`act` 需要从 `@testing-library/react` 引入。
 
+> **实施期修正（Task 2 两段评审）**：最终该文件 7 条断言，比上面多两处加固，都是评审用变异实测发现的空洞——
+> 1. 第一条测试的标题改成 `"resets the result, the note, the console and the validation, leaving the form pristine"`：原断言只看「不通过按钮未按下」，把 `setResult(null)` 改成 `setResult("通过")` 也能通过。补上 `reset()` 之后点「保存结果」必须重新出现 `请选择执行结果` 的告警，才真正钉住「回到初始态」。
+> 2. 新增 `"leaves the attachments and the save status to the caller"`：给 `reset()` 里塞一句 `onImagesChange([])` 原本能让 6 条测试全绿，而 Task 3 的「截图上传承失败 → 重试上传截图」正依赖附件存活。该测试必须在真有图片渲染的前提下断言（照文件里既有的 `URL.createObjectURL` 桩写法）。
+> 3. 组件里的契约注释也要写清两件事：`reset()` **不碰附件与保存状态**（调用方自己清），以及**只有提交请求被拒才不复位**——「结果已落库但截图上传失败」这条 error 路径**仍然复位**（注意 `tone: "error"` 在 `Execution.tsx` 里有这两种含义，别按 `status.tone` 加守卫）。
+
 - [ ] **Step 2: 跑测试确认失败**
 
 Run: `cd /home/lucascool/qa-board/frontend && npx vitest run src/components/OutcomeForm.test.tsx`
@@ -248,13 +253,14 @@ git commit -m "feat(execution): give the outcome form a reset the caller control
 
 - [ ] **Step 1: 写失败的测试**
 
-在 `frontend/src/views/Execution.test.tsx` 末尾追加 5 条（沿用文件里的 `renderExecution` / `testCase` / mock 写法；`testCase(id, title, expected, code, latestResult)` 第 5 个参数就是 `latest_result`）：
+在 `frontend/src/views/Execution.test.tsx` 末尾追加 6 条（沿用文件里的 `renderExecution` / `testCase` / mock 写法；`testCase(id, title, expected, code, latestResult)` 第 5 个参数就是 `latest_result`）：
 
 1. `"moves to the next unrun case after a save"` —— 组内三条：`("c1","第一条",null,"B-001","通过")`、`("c2","第二条",null,"B-002",null)`、`("c3","第三条",null,"B-003",null)`；页面应停在「第二条」；点「通过」后再点「保存结果」→ 断言 `await screen.findByText("第三条")` 可见、且「第二条」不在文档里。
 2. `"keeps the save confirmation visible on the case it moved to"` —— 同上提交后，断言 `screen.getByText(/已保存到本地/)` 仍可见，且文案里带着刚保存的编号（`/B-002 已保存到本地/`）。
 3. `"wraps to the earliest unrun case when the tail is finished"` —— 用 `window.localStorage.setItem("testdeck.execution.cursor", JSON.stringify({ groupId: "0918-id", code: "B-003" }))` 让页面停在最后一条未测的用例上（三组数据：B-001 未测、B-002 通过、B-003 未测），保存 B-003 后断言跳到「第一条」（B-001）。
 4. `"stays put and says the group is finished when nothing is left"` —— 只有一条未测；保存后断言「本组已全部测过」可见且仍在同一条用例上。
 5. `"does not submit the previous case's note after moving on"` —— 在第一条的「失败说明」里输入文字，点「下一条用例」（`CaseDetail` 的 `aria-label="下一条用例"`），再点「保存结果」并选择「通过」；断言 `submit` mock 收到的 payload 的 `note` 是 `null`（表单已复位）。
+6. `"leaves the case the operator moved to alone when the save lands"` —— **门控回归测试（必写）**：让 `submit` 返回一个手动控制 resolve 的 promise；点「保存结果」开始保存，在它还挂着的时候点「下一条用例」并在新用例的「失败说明」里输入 `"给下一条的话"`；然后 resolve 保存。断言：①页面**仍停在**新用例上（没有被自动前进抢走）；②输入框里**仍然**是 `"给下一条的话"`（reset 没有清掉别人的草稿）。没有这条断言，「保存期间切走 → 草稿被清空」这个镜像 bug 无人看守。
 
 > 测试文件已有 `beforeEach(() => window.localStorage.clear())` 之类的清理，按现有写法来；提交用 `submit` mock 的返回值（`{ id, label, sequence, state: "committed", result, note, console_text, created_at }`）。
 
@@ -341,14 +347,19 @@ import { allTested, clearCursor, nextUntestedIndex, readCursor, startIndexFor, w
           : { tone: "error", text: `${saved.code} 结果已保存到本地，但截图上传失败` }
       );
       if (uploaded) setImages([]);
-      formRef.current?.reset();
-      // Only advance if the page still shows the case this save belongs to: a
-      // group switch or a manual jump while the request was in flight means the
-      // operator has already chosen where to be.
+      // One guard for both effects. `save()` outlives a case switch (it takes
+      // several awaits while the ←/→ buttons stay clickable), so by now the form
+      // on screen may belong to a *different* case: clearing it would throw away
+      // what the operator typed there, and jumping would steal their choice of
+      // where to be. This is the mirror of the bug being fixed — a lost draft
+      // instead of a misattributed one.
       if (loadedGroup.current === savedGroupId && caseIndexRef.current === savedIndex) {
+        formRef.current?.reset();
         advanceTo = nextUntestedIndex(updated, savedIndex);
       }
     } catch (reason) {
+      // The submit request itself was rejected: nothing was stored, so the form
+      // must keep the note for the retry (spec 二/B.4「保存失败不复位」).
       setStatus({ tone: "error", text: `保存失败：${message(reason)}，可重试` });
     } finally {
       setSubmitting(false);
@@ -483,6 +494,7 @@ git commit -m "feat(execution): add the per-case result grid"
 1. `"shows one square per case with its own colour"` —— 组内 3 条（通过 / 未测 / 未执行），断言 `screen.getAllByRole("button", { name: /^(B-001|B-002|B-003) / })` 里的类名，以及图例文案里的计数。
 2. `"jumps to a case by clicking its square"` —— 点第 3 个方格后，「第三条」的标题可见。
 3. `"shows the running counts in the desk so the PiP window carries them"` —— 断言工具栏里的进度文案（例如 `screen.getByText(/1\/3/)` 与 `/未测 2/`）存在，且它位于 `.execution-desk` 之内（`document.querySelector(".execution-desk")?.textContent` 包含它）。
+4. `"keeps a half-typed note when the current case's own square is clicked"` —— 在当前用例的「失败说明」里输入 `"半截草稿"`，点该用例自己的方格，断言输入框里仍是 `"半截草稿"`（同下标必须短路，否则 `showCase` 会静默清空）。
 
 - [ ] **Step 2: 跑测试确认失败**
 
@@ -500,7 +512,12 @@ Expected: 新增测试 FAIL。
             <CaseGrid
               cases={cases}
               caseIndex={caseIndex}
-              onJump={(index) => void showCase(index)}
+              // Clicking the square of the case already on screen must be a
+              // no-op: `showCase` resets the form, so re-entering the current
+              // case would silently wipe a half-typed 失败说明.
+              onJump={(index) => {
+                if (index !== caseIndex) void showCase(index);
+              }}
             />
           ) : null}
 ```
