@@ -47,10 +47,12 @@ def _read_entry(directory: Path, name: str, ttl: float) -> tuple[bytes, str] | N
         # A cache the volume will not let us read is a miss, not a failure.
         return None
     if not isinstance(meta, dict) or meta.get("length") != len(content):
-        # Either the bytes or the sidecar that vouches for them went missing:
-        # an entry whose type we cannot vouch for is worse than no entry.
+        # A sidecar whose length does not match the bytes beside it vouches for
+        # nothing: re-download rather than serve a truncated picture.
         return None
     mime = meta.get("mime")
+    # A missing type is not a reason to re-download: the bytes are fine and the
+    # endpoint's allowlist turns anything unusable into an octet-stream.
     return content, mime if isinstance(mime, str) and mime else "application/octet-stream"
 
 
