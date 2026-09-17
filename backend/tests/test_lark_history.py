@@ -184,6 +184,30 @@ def test_a_defect_row_this_tool_wrote_is_matched_through_its_remark():
     assert matches[0]["description"] == "登录接口返回 500"
 
 
+def test_a_labelled_remark_decides_the_row():
+    """One defect row belongs to one case, and the 用例： label says which.
+
+    问题描述 holds the operator's free prose now, so a code-shaped token at the
+    front of it is a coincidence — "B-002 也复现了" is someone mentioning another
+    case, not a claim that this row is B-002's history. The label is a statement,
+    so when it names B-001 the row is B-001's and nobody else's.
+    """
+
+    row = {
+        "record_id": "x",
+        "fields": {
+            "问题描述": "B-002 也复现了，麻烦一起看",
+            "备注": "用例：B-001 管理员登录",
+        },
+    }
+
+    matched = match_bugs([row], "B-001")
+
+    assert [match["record_id"] for match in matched] == ["x"]
+    assert matched[0]["matched_by"] == "备注"
+    assert match_bugs([row], "B-002") == []
+
+
 def test_the_writer_output_round_trips_through_the_matcher(failed_attempt):
     """The row the writer ships today must be findable by the reader today.
 
@@ -258,6 +282,33 @@ def test_existing_description_matching_still_works():
     assert {match["record_id"]: match["matched_by"] for match in matches} == {
         "legacy": "问题描述",
         "alt": "缺陷描述",
+    }
+
+
+def test_a_legacy_row_without_a_labelled_remark_still_matches_through_its_description():
+    """No label is no statement, so the description stays the last resort.
+
+    Both rows here predate the remark label: one has no remark at all, the other
+    says "由用例 B-001 提交" without ever using the 用例： label. Neither decides
+    the row, so the leading token of 问题描述 is still read as the case.
+    """
+
+    records = [
+        {"record_id": "no-remark", "fields": {"问题描述": "B-001 绑定未触发"}},
+        {
+            "record_id": "unlabelled-remark",
+            "fields": {
+                "问题描述": "B-001 登录接口返回 500",
+                "备注": "由用例 B-001 提交（结果：不通过）",
+            },
+        },
+    ]
+
+    matches = match_bugs(records, "B-001")
+
+    assert {match["record_id"]: match["matched_by"] for match in matches} == {
+        "no-remark": "问题描述",
+        "unlabelled-remark": "问题描述",
     }
 
 

@@ -118,6 +118,21 @@ def parse_remark_case_reference(text: str | None) -> CaseReference | None:
     return parse_case_reference(text[match.end() :])
 
 
+def labelled_remark(fields: dict[str, Any]) -> tuple[str, CaseReference] | None:
+    """The remark carrying a 用例： label, with the case that label names.
+
+    The label is a statement — this tool files it, and a person types it to say
+    which case the row belongs to — so the row it appears on is decided by it.
+    A remark without the label is only prose and says nothing here.
+    """
+
+    for name in REMARK_FIELDS:
+        reference = parse_remark_case_reference(str(fields.get(name) or ""))
+        if reference is not None:
+            return name, reference
+    return None
+
+
 def record_fields(record: dict[str, Any]) -> dict[str, Any]:
     fields = record.get("fields")
     return fields if isinstance(fields, dict) else {}
@@ -214,17 +229,25 @@ def match_bugs(bug_records: list[dict[str, Any]], code: str) -> list[dict[str, A
                 matched_by = f"字段「{name}」"
                 break
         if matched_by is None:
-            for name in DESCRIPTION_FIELDS:
-                reference = parse_labelled_case_reference(str(fields.get(name) or ""))
-                if reference is not None and reference.code == code:
+            # A 用例： label is a statement of which case the row belongs to, while
+            # a leading code-shaped token in 问题描述 is only a coincidence: that
+            # column holds the operator's own prose now, so "B-002 也复现了" must
+            # not read as this row being B-002's history. A labelled remark
+            # therefore decides the row outright — matching it matches, naming
+            # another case means this row is not this case's — and the
+            # description is read as the last resort only when no label exists at
+            # all, which is how the legacy rows keep matching.
+            labelled = labelled_remark(fields)
+            if labelled is None:
+                for name in DESCRIPTION_FIELDS:
+                    reference = parse_labelled_case_reference(str(fields.get(name) or ""))
+                    if reference is not None and reference.code == code:
+                        matched_by = name
+                        break
+            else:
+                name, reference = labelled
+                if reference.code == code:
                     matched_by = name
-                    break
-        if matched_by is None:
-            for name in REMARK_FIELDS:
-                reference = parse_remark_case_reference(str(fields.get(name) or ""))
-                if reference is not None and reference.code == code:
-                    matched_by = name
-                    break
         if matched_by is None:
             continue
         matches.append(
