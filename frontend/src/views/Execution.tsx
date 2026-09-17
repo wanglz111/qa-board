@@ -96,11 +96,10 @@ export function ExecutionView({
   const [lastAttemptId, setLastAttemptId] = useState<string | null>(null);
   const [sync, setSync] = useState<SyncStatus | null>(null);
   const [legacyVersion, setLegacyVersion] = useState(0);
+  // The visit identity: it increments on exactly the two events that move the
+  // desk (`selectGroup`, `showCase`), so a save that outlives several awaits
+  // compares it to tell whether the operator is still on the case it belongs to.
   const caseRequest = useRef(0);
-  // The live index, so a save that outlives several awaits can tell whether the
-  // operator has moved on. `caseIndex` inside `save()` is a render-time snapshot
-  // and cannot answer that.
-  const caseIndexRef = useRef(0);
   // Which group the cases currently in state were loaded for. A save outlives
   // several awaits while the group list stays clickable, so it has to check this
   // before touching a list the operator may already have replaced.
@@ -189,35 +188,20 @@ export function ExecutionView({
     const requestId = ++caseRequest.current;
     setSelectedGroupId(groupId);
     setCases([]);
-    // `loadedGroup` is the authority the save guard reads, and the list it stands
-    // for is gone from this line on — so it has to go now, not after the load
-    // below. `loadCases` takes a round-trip, and one round-trip of truth lag is
-    // enough for a save still in flight to repaint this group's cases under the
-    // new selection and, by moving a case, abort the very load meant to replace
-    // them.
-    // `caseIndexRef` is cleared alongside it, deliberately: the save guard ANDs
-    // the two halves, and the group half is the one that actually decides — this
-    // ref is read nowhere else, and `loadedGroup` is already null in the only
-    // window where the index could be stale, so the index conjunct can never see
-    // a stale value. Keep the defensive pair together rather than "cleaning up"
-    // the half no test can see: it costs nothing, it keeps the ref truthful about
-    // what is on screen, and it is what would matter if this clearing ever changed.
+    // Invalidate before the round trip below, not after it: `loadedGroup` is the
+    // authority the case-scoped writes read, and the list it stands for is gone
+    // from this line on. One round-trip of truth lag is enough for a save still
+    // in flight to repaint this group's cases under the new selection.
     loadedGroup.current = null;
     setCaseIndex(0);
-    caseIndexRef.current = 0;
     setAttempts([]);
     setReserved(null);
+    setLastAttemptId(null);
     setImages([]);
     setStatus(null);
-    // A group switch must not carry the previous case's note into the new one.
-    // This reset is deliberately defensive, and it is *not* what actually clears
-    // the form: `cases` was cleared a few lines up, so <OutcomeForm> unmounts on
-    // the next render and its state (note, result, console, validation) dies with
-    // the component instance. No test can tell whether this line ran — that is
-    // precisely why it needs saying out loud, so nobody deletes it as dead code.
-    // Keep it anyway: it does not depend on that unmount happening, and a future
-    // render that keeps the form mounted across a group switch would otherwise
-    // inherit the previous case's draft.
+    // Defence in depth: clearing `cases` above unmounts <OutcomeForm>, so its
+    // state (note, result, console, validation) dies with the instance anyway.
+    // This line does not depend on that unmount happening.
     formRef.current?.reset();
     setFailure("");
     setSync(null);
@@ -236,7 +220,6 @@ export function ExecutionView({
       // must not mean re-reading the first row of the group.
       const start = startIndexFor(result, readCursor(), groupId);
       setCaseIndex(start);
-      caseIndexRef.current = start;
       const current = result[start];
       if (current) {
         writeCursor({ groupId, code: current.code });
@@ -254,11 +237,13 @@ export function ExecutionView({
     const target = cases[index];
     if (!target || !selectedGroupId) return;
     const requestId = ++caseRequest.current;
-    caseIndexRef.current = index;
     setCaseIndex(index);
     writeCursor({ groupId: selectedGroupId, code: target.code });
     setAttempts([]);
     setReserved(null);
+    // A retry button must never point at another case's attempt: leaving the case
+    // retires the id it was offered for.
+    setLastAttemptId(null);
     setImages([]);
     // Moving on by hand abandons the previous save message; moving on because the
     // save just landed keeps it, so the operator sees the proof on the case they
@@ -302,6 +287,11 @@ export function ExecutionView({
     // groups can hold the same code.
     const savedGroupId = selectedGroupId;
     const savedIndex = caseIndex;
+    // The visit this save belongs to. `caseRequest` increments on exactly the two
+    // "the desk moved" events (`selectGroup`, `showCase`), so it is the visit
+    // identity: an index snapshot cannot tell "never left" from "left and came
+    // back to the same case".
+    const savedVisit = caseRequest.current;
     const saved = cases[savedIndex];
     if (!saved || !savedGroupId) return;
     const signature = JSON.stringify([saved.code, input.result, input.note, input.consoleText, reserved?.id ?? null]);
@@ -321,14 +311,20 @@ export function ExecutionView({
       setLastAttemptId(attempt.id);
       setReserved(null);
       const history = await loadAttempts(savedGroupId, saved.code);
-      if (loadedGroup.current === savedGroupId) setAttempts(history);
+      // The panel under the case on screen must show *that* case's history: a
+      // save that landed while the operator pressed ←/→ would otherwise paint the
+      // case it belongs to over the one they are reading.
+      if (loadedGroup.current === savedGroupId && caseRequest.current === savedVisit) {
+        setAttempts(history);
+      }
       await refreshProgress(savedGroupId);
       // The cases were loaded once. Without this the operator who just recorded
       // the last result would not see 本组已全部测过 until they reloaded. The
       // response is the authority on the result, and the list is only touched
-      // while it is still this group's. One array drives both the state and the
-      // advance decision: reading the state back would be a render behind, and
-      // the decision belongs to this save, not to whatever the page shows next.
+      // while it is still this group's. `updated` feeds the advance decision
+      // below as well, but honestly: `nextUntestedIndex` never inspects index
+      // `from`, so the saved row's own `latest_result` cannot move the jump
+      // target — this array is here for `setCases` and the banner.
       const updated = cases.map((item) =>
         item.code === saved.code ? { ...item, latest_result: attempt.result } : item
       );
@@ -348,6 +344,10 @@ export function ExecutionView({
       const uploaded = await uploadAll(attempt.id, images);
       // The confirmation follows the operator to the next case, so it names the
       // case it is about.
+      // Deliberately outside the guard: this is a notification that an event
+      // happened, not a description of the desk, and it names its own case
+      // (`{code} 已保存到本地 · …`) — gating it would silently swallow the
+      // confirmation for a save that outlived a group switch.
       setStatus(
         uploaded
           ? {
@@ -366,9 +366,14 @@ export function ExecutionView({
       // several awaits while the ←/→ buttons stay clickable), so by now the form
       // on screen may belong to a *different* case: clearing it would throw away
       // what the operator typed there, and jumping would steal their choice of
-      // where to be. This is the mirror of the bug being fixed — a lost draft
-      // instead of a misattributed one.
-      if (loadedGroup.current === savedGroupId && caseIndexRef.current === savedIndex) {
+      // where to be — coming back to the same case is still a move, which is why
+      // the visit token decides and not the index. This is the mirror of the bug
+      // being fixed — a lost draft instead of a misattributed one.
+      // The group half is belt and braces here: every group switch bumps
+      // `caseRequest` too, so the visit token already implies it and no test can
+      // tell whether this conjunct ran — keep it as the readable statement of
+      // what the guard is about.
+      if (loadedGroup.current === savedGroupId && caseRequest.current === savedVisit) {
         formRef.current?.reset();
         // The text is stored, but the evidence is not: staying on this case is
         // what keeps the screenshot attached to the attempt it belongs to and
@@ -383,7 +388,8 @@ export function ExecutionView({
     } finally {
       setSubmitting(false);
     }
-    // After the spinner is down, so 「保存中」 never covers the case we land on.
+    // The advance sits outside the `try`, so nothing it does can be reported as
+    // 「保存失败」.
     if (advanceTo !== null) await showCase(advanceTo, { keepStatus: true });
   }
 
@@ -403,9 +409,17 @@ export function ExecutionView({
   async function startRetest() {
     const current = cases[caseIndex];
     if (!current || !selectedGroupId || !reserveRetest) return;
+    const requestedGroupId = selectedGroupId;
+    const requestedVisit = caseRequest.current;
     setSubmitting(true);
     try {
-      const attempt = await reserveRetest(selectedGroupId, current.code);
+      const attempt = await reserveRetest(requestedGroupId, current.code);
+      // A reservation that arrives after the desk moved is dropped: `save()`
+      // prefers `commitReserved(reserved.id, …)` whenever `reserved` is set, so
+      // keeping it would commit the new case's result into the old case's
+      // attempt. Dropping loses nothing — the reservation is still `started` and
+      // carries no result.
+      if (loadedGroup.current !== requestedGroupId || caseRequest.current !== requestedVisit) return;
       setReserved(attempt);
       setStatus({ tone: "info", text: `已预留重测 ${attempt.label}，提交后生效` });
     } catch (reason) {

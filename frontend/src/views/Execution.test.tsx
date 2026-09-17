@@ -9,6 +9,7 @@ import type {
   GroupProgress,
   LegacyHistory as LegacyHistoryData,
   ReferenceAsset,
+  Screenshot,
   SubmitPayload,
   SyncStatus
 } from "../api";
@@ -296,6 +297,62 @@ it("reserves a retest label before committing it", async () => {
   expect(commitReserved).toHaveBeenCalledWith("attempt-retest", expect.objectContaining({ result: "通过" }));
 });
 
+it("drops a retest reservation that lands after the desk moved", async () => {
+  const pendingReserve = deferred<Attempt>();
+  const reserved: Attempt = {
+    id: "attempt-retest",
+    label: "B-001-R0918-a1b2c3-01",
+    sequence: 2,
+    state: "started",
+    result: null,
+    note: null,
+    console_text: null,
+    source: "execution",
+    created_at: "2026-09-16T10:00:00Z",
+    screenshots: []
+  };
+  const reserveRetest = vi.fn().mockReturnValue(pendingReserve.promise);
+  const commitReserved = vi.fn().mockResolvedValue({ ...reserved, state: "committed", result: "通过" });
+  const submit = vi.fn<(groupId: string, code: string, payload: SubmitPayload) => Promise<Attempt>>();
+  submit.mockResolvedValue(committed("attempt-2", "B-002", "通过", null));
+  renderExecution({
+    initialGroupId: "0918-id",
+    submit,
+    reserveRetest,
+    commitReserved,
+    loadCases: async () => [
+      testCase("c1", "第一条", null, "B-001", null),
+      testCase("c2", "第二条", null, "B-002", null)
+    ],
+    loadAttempts: async (_groupId, code) =>
+      code === "B-001" ? [committed("attempt-1", "B-001", "不通过", "首次失败")] : []
+  });
+
+  await screen.findByText(/首次失败/);
+  await userEvent.click(await screen.findByRole("button", { name: /开始重测/ }));
+  // The reserve is on the wire and the ←/→ stepper stays clickable while it is.
+  await userEvent.click(screen.getByRole("button", { name: "下一条用例" }));
+  expect(await screen.findByText("第二条")).toBeVisible();
+
+  await act(async () => {
+    pendingReserve.resolve(reserved);
+    await pendingReserve.promise;
+  });
+  await settle();
+
+  // A reservation for the case the operator left is dropped rather than adopted:
+  // `save()` prefers `commitReserved(reserved.id, …)` while `reserved` is set, so
+  // adopting it would commit 第二条's result into 第一条's attempt and store
+  // nothing at all for 第二条.
+  expect(screen.queryByText(/已预留重测/)).not.toBeInTheDocument();
+
+  await userEvent.click(screen.getByRole("button", { name: "通过" }));
+  await userEvent.click(screen.getByRole("button", { name: /保存结果/ }));
+
+  expect(commitReserved).not.toHaveBeenCalled();
+  expect(submit).toHaveBeenCalledWith("0918-id", "B-002", expect.anything());
+});
+
 it("keeps the saved result when a screenshot upload fails and offers a retry", async () => {
   const uploadScreenshot = vi.fn().mockRejectedValue(new Error("上传失败"));
   renderExecution({ initialGroupId: "0918-id", uploadScreenshot });
@@ -356,6 +413,70 @@ it("stays on the case when the result saved but the screenshot did not", async (
   expect(uploadScreenshot).toHaveBeenCalledWith(
     "attempt-1",
     expect.objectContaining({ name: "shot.png" })
+  );
+});
+
+it("offers no retry that would upload this case's file into the previous case's attempt", async () => {
+  const submit = vi.fn<(groupId: string, code: string, payload: SubmitPayload) => Promise<Attempt>>();
+  submit.mockResolvedValueOnce(committed("attempt-1", "B-001", "通过", null));
+  submit.mockRejectedValueOnce(new Error("网络中断"));
+  const uploadScreenshot = vi
+    .fn<(attemptId: string, file: File) => Promise<Screenshot>>()
+    .mockResolvedValue({
+      id: "shot-1",
+      attempt_id: "attempt-1",
+      storage_key: "shot-1.png",
+      mime: "image/png",
+      size_bytes: 3,
+      created_at: "2026-09-16T09:00:00Z"
+    });
+  renderExecution({
+    initialGroupId: "0918-id",
+    submit,
+    uploadScreenshot,
+    loadCases: async () => [
+      testCase("c1", "第一条", null, "B-001", null),
+      testCase("c2", "第二条", null, "B-002", null)
+    ]
+  });
+
+  await screen.findByText("第一条");
+  await userEvent.click(screen.getByRole("button", { name: "通过" }));
+  await userEvent.upload(
+    screen.getByLabelText("上传截图"),
+    new File(["png"], "b001.png", { type: "image/png" })
+  );
+  await userEvent.click(screen.getByRole("button", { name: /保存结果/ }));
+
+  // The upload succeeded, so the desk advances to the case that is still unrun —
+  // which is exactly how "on a new case with the previous case's attempt id"
+  // became the normal post-save state.
+  expect(await screen.findByText("第二条")).toBeVisible();
+  await waitFor(() =>
+    expect(uploadScreenshot).toHaveBeenCalledWith(
+      "attempt-1",
+      expect.objectContaining({ name: "b001.png" })
+    )
+  );
+  const uploadsBeforeRetry = uploadScreenshot.mock.calls.length;
+
+  await userEvent.upload(
+    screen.getByLabelText("上传截图"),
+    new File(["png"], "b002.png", { type: "image/png" })
+  );
+  await userEvent.click(screen.getByRole("button", { name: "通过" }));
+  await userEvent.click(screen.getByRole("button", { name: /保存结果/ }));
+  expect(await screen.findByText(/保存失败：网络中断/)).toBeVisible();
+
+  // Nothing of this case's own was stored, so there is no attempt here to retry.
+  // The form still offers 重试上传截图 wherever an error status sits next to
+  // pending attachments, so the click is what has to be inert: the id the button
+  // would use belongs to the previous case's attempt.
+  await userEvent.click(screen.getByRole("button", { name: /重试上传截图/ }));
+  expect(uploadScreenshot).toHaveBeenCalledTimes(uploadsBeforeRetry);
+  expect(uploadScreenshot).not.toHaveBeenCalledWith(
+    "attempt-1",
+    expect.objectContaining({ name: "b002.png" })
   );
 });
 
@@ -775,6 +896,14 @@ it("leaves the case the operator moved to alone when the save lands", async () =
   const pendingSave = deferred<Attempt>();
   const submit = vi.fn<(groupId: string, code: string, payload: SubmitPayload) => Promise<Attempt>>();
   submit.mockReturnValue(pendingSave.promise);
+  // A distinct, non-empty history per case. An empty default could not tell the
+  // save's own case's history apart from the history of the case on screen, so it
+  // would let a group-only write paint the wrong one and still pass.
+  const historyNotes: Record<string, string> = {
+    "B-001": "第一条的历史",
+    "B-002": "第二条的历史",
+    "B-003": "第三条的历史"
+  };
   renderExecution({
     initialGroupId: "0918-id",
     submit,
@@ -782,6 +911,9 @@ it("leaves the case the operator moved to alone when the save lands", async () =
       testCase("c1", "第一条", null, "B-001", null),
       testCase("c2", "第二条", null, "B-002", null),
       testCase("c3", "第三条", null, "B-003", null)
+    ],
+    loadAttempts: async (_groupId, code) => [
+      committed(`attempt-${code}`, code, "不通过", historyNotes[code] ?? null)
     ]
   });
 
@@ -814,4 +946,52 @@ it("leaves the case the operator moved to alone when the save lands", async () =
   expect(screen.queryByText("第二条")).not.toBeInTheDocument();
   // (b) And the draft belongs to the case on screen, not to the save.
   expect(screen.getByLabelText("失败说明")).toHaveValue("给下一条的话");
+  // (c) And the panel under 第三条 shows *第三条's* history: the save's own
+  // history for B-001 may not be painted over the case the operator is reading.
+  await waitFor(() => expect(screen.getByText(/第三条的历史/)).toBeVisible());
+  expect(screen.queryByText(/第一条的历史/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/第二条的历史/)).not.toBeInTheDocument();
+});
+
+it("leaves the desk alone when a save lands after the operator walked away and came back", async () => {
+  const pendingSave = deferred<Attempt>();
+  const submit = vi.fn<(groupId: string, code: string, payload: SubmitPayload) => Promise<Attempt>>();
+  submit.mockReturnValue(pendingSave.promise);
+  renderExecution({
+    initialGroupId: "0918-id",
+    submit,
+    loadCases: async () => [
+      testCase("c1", "第一条", null, "B-001", null),
+      testCase("c2", "第二条", null, "B-002", null)
+    ]
+  });
+
+  await screen.findByText("第一条");
+  await userEvent.click(screen.getByRole("button", { name: "通过" }));
+  await userEvent.click(screen.getByRole("button", { name: /保存结果/ }));
+
+  // Away and back: the desk is on the same *case* again, but it is a different
+  // visit, and the save has no business deciding anything about it. Comparing the
+  // index cannot see this — that is the whole defect the visit token fixes.
+  await userEvent.click(screen.getByRole("button", { name: "下一条用例" }));
+  expect(await screen.findByText("第二条")).toBeVisible();
+  await userEvent.click(screen.getByRole("button", { name: "上一条用例" }));
+  expect(await screen.findByText("第一条")).toBeVisible();
+
+  // fireEvent, not userEvent.type: the form disables its fields while a save is
+  // in flight, and userEvent honours the disabled attribute.
+  fireEvent.change(screen.getByLabelText("失败说明"), { target: { value: "回到第一条补的话" } });
+
+  await act(async () => {
+    pendingSave.resolve(committed("attempt-1", "B-001", "通过", null));
+    await pendingSave.promise;
+  });
+  await waitFor(() => expect(screen.getByText(/已保存到本地/)).toBeVisible());
+
+  // An index-shaped guard sees `caseIndex === savedIndex` here and both clears the
+  // draft and jumps to 第二条, the earliest unrun case after B-001 — stealing the
+  // operator's choice of where to be one round trip after they made it.
+  expect(screen.getByText("第一条")).toBeVisible();
+  expect(screen.queryByText("第二条")).not.toBeInTheDocument();
+  expect(screen.getByLabelText("失败说明")).toHaveValue("回到第一条补的话");
 });
