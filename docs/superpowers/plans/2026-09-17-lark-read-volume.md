@@ -846,7 +846,7 @@ def test_two_cases_in_a_row_share_one_table_read(
     )
 
 
-def test_submitting_a_result_drops_the_snapshot(
+def test_creating_an_attempt_drops_the_snapshot(
     authenticated_client, lark_fake, confirmed_group
 ):
     """The row this operator just wrote has to be visible on the next read."""
@@ -875,6 +875,10 @@ def test_submitting_a_result_drops_the_snapshot(
     ).json()
     assert [record["record_id"] for record in body["original"]] == ["mine"]
 ```
+
+> 测试名的更正：这个端点（`POST /cases/{code}/attempts`）是 **create_attempt**，不是 `submit_attempt`。
+> 第一版把它叫成 `test_submitting_…`，评审据此以为 `submit_attempt` 有覆盖，其实没有——`submit_attempt`
+> 另有专门的测试（保留 → 读面板预热 → 改远端 → 提交 → 再读）。名字按被测端点写。
 
 - [ ] **Step 2: 跑测试确认失败**
 
