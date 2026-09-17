@@ -1164,3 +1164,108 @@ it("keeps the attachments the operator added while a save was in flight", async 
   // 第二条 believing the screenshot is on it.
   expect(screen.getByText("b002.png")).toBeVisible();
 });
+
+// The grid and the desk's progress line are two renderings of one array. These
+// tests pin the wiring (sidebar placement, PiP-carried placement, the same-index
+// short circuit) rather than CaseGrid's own rendering, which its unit tests own.
+function gridCases() {
+  return [
+    testCase("c1", "第一条", null, "B-001", "通过"),
+    testCase("c2", "第二条", null, "B-002", null),
+    testCase("c3", "第三条", null, "B-003", "未执行")
+  ];
+}
+
+function squares() {
+  return Array.from(document.querySelectorAll<HTMLButtonElement>(".case-grid .case-square"));
+}
+
+// `toHaveClass` only asserts a subset, so three per-index checks would still
+// pass on a square carrying two tone classes: collect the tones and require
+// exactly the one each square stands for.
+function tonesOf(square: Element) {
+  return ["passed", "failed", "skipped", "untested"].filter((tone) => square.classList.contains(tone));
+}
+
+it("shows one square per case with its own colour", async () => {
+  renderExecution({ initialGroupId: "0918-id", loadCases: async () => gridCases() });
+
+  // The first case already carries a result, so the desk opens on the first
+  // untested row — the titles below are the ones actually on screen.
+  await screen.findByText("第二条");
+  const found = squares();
+  expect(found).toHaveLength(3);
+  expect(found.map(tonesOf)).toEqual([["passed"], ["untested"], ["skipped"]]);
+  expect(screen.getByText("通过 1 · 不通过 0 · 跳过 1 · 未测 1")).toBeVisible();
+});
+
+it("jumps to a case by clicking its square", async () => {
+  renderExecution({ initialGroupId: "0918-id", loadCases: async () => gridCases() });
+
+  await screen.findByText("第二条");
+  await userEvent.click(squares()[2]);
+
+  expect(await screen.findByText("第三条")).toBeVisible();
+  expect(screen.queryByText("第二条")).not.toBeInTheDocument();
+});
+
+it("shows the running counts in the desk so the PiP window carries them", async () => {
+  renderExecution({
+    initialGroupId: "0918-id",
+    loadCases: async () => [
+      testCase("c1", "第一条", null, "B-001", "通过"),
+      // The fixture needs a 「未执行」 row: it is the one shape where counting
+      // `done` from ✓/✗ alone still renders a plausible line, so without it the
+      // rule this test exists for would go unpinned.
+      testCase("c2", "第二条", null, "B-002", "未执行"),
+      testCase("c3", "第三条", null, "B-003", null)
+    ]
+  });
+
+  // 未执行 is a decision, so it is done: 2/3, with one row left untested.
+  await screen.findByText("第三条");
+  const line = screen.getByText("2/3 · ✓1 ✗0 ○1");
+  const desk = document.querySelector(".execution-desk");
+  // The text alone would also be satisfied by the sidebar, which `usePiP` leaves
+  // in the main window — only this node travels into the small window.
+  expect(desk).not.toBeNull();
+  expect(desk?.contains(line)).toBe(true);
+  expect(desk?.textContent).toContain("2/3 · ✓1 ✗0 ○1");
+  expect(line).toHaveAttribute("title", "通过 1 · 不通过 0 · 跳过 1 · 未测 1");
+});
+
+it("keeps a half-typed note when the current case's own square is clicked", async () => {
+  renderExecution({
+    initialGroupId: "0918-id",
+    loadCases: async () => [
+      testCase("c1", "第一条", null, "B-001", null),
+      testCase("c2", "第二条", null, "B-002", null)
+    ]
+  });
+
+  await screen.findByText("第一条");
+  await userEvent.click(screen.getByRole("button", { name: "不通过" }));
+  await userEvent.type(screen.getByLabelText("失败说明"), "半截草稿");
+
+  // Re-entering the case already on screen would run `showCase`, whose
+  // `formRef.reset()` silently wipes the draft.
+  const found = squares();
+  expect(found).toHaveLength(2);
+  await userEvent.click(found[0]);
+
+  expect(screen.getByLabelText("失败说明")).toHaveValue("半截草稿");
+});
+
+it("keeps the grid's container contract that the stylesheet selects", async () => {
+  renderExecution({ initialGroupId: "0918-id", loadCases: async () => gridCases() });
+
+  await screen.findByText("第二条");
+  expect(document.querySelector(".case-grid")).toHaveAttribute("aria-label", "用例完成情况");
+  expect(document.querySelector(".case-grid-legend")).not.toBeNull();
+  expect(document.querySelector(".case-grid-block")).not.toBeNull();
+  // It lives in the sidebar, which the PiP window does not move: a grid inside
+  // the desk would disappear from the main window while the small one is open.
+  const grid = document.querySelector(".case-grid");
+  expect(document.querySelector("aside.execution-groups")?.contains(grid)).toBe(true);
+  expect(document.querySelector(".execution-desk")?.contains(grid)).toBe(false);
+});

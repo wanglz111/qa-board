@@ -14,6 +14,7 @@ import type {
   SyncStatus
 } from "../api";
 import { CaseDetail } from "../components/CaseDetail";
+import { CaseGrid } from "../components/CaseGrid";
 import { GroupSelector } from "../components/GroupSelector";
 import { History } from "../components/History";
 import { LegacyHistory } from "../components/LegacyHistory";
@@ -486,6 +487,20 @@ export function ExecutionView({
   }, [pip.pipWindow]);
 
   const activeCase = cases[caseIndex];
+  // The sidebar grid and the desk's progress line are two renderings of the same
+  // array, so both read these names rather than counting for themselves.
+  // 「未执行」 is a decision — the operator looked and said so — hence `done`, but
+  // it is neither ✓ nor ✗.
+  const passed = cases.filter((item) => item.latest_result === "通过").length;
+  const failed = cases.filter((item) => item.latest_result === "不通过").length;
+  const skipped = cases.filter((item) => item.latest_result === "未执行").length;
+  const done = passed + failed + skipped;
+  // The complement of `done`, not a fourth filter. `CaseGrid` calls a case 未测
+  // exactly when it carries none of the three results above, so deriving the
+  // number makes the two renderings agree for *any* input — including a row the
+  // server omits `latest_result` from — and keeps `done + untested` the total by
+  // construction rather than by the array's type.
+  const untested = cases.length - done;
 
   return (
     <section className="workspace-section execution-layout" aria-labelledby="execution-title">
@@ -504,6 +519,18 @@ export function ExecutionView({
             onSelect={(groupId) => void selectGroup(groupId)}
           />
         )}
+        {cases.length > 0 ? (
+          <CaseGrid
+            cases={cases}
+            caseIndex={caseIndex}
+            // Clicking the square of the case already on screen must be a
+            // no-op: `showCase` resets the form, so re-entering the current
+            // case would silently wipe a half-typed 失败说明.
+            onJump={(index) => {
+              if (index !== caseIndex) void showCase(index);
+            }}
+          />
+        ) : null}
       </aside>
 
       <div className="execution-desk-mount" ref={deskMountRef} />
@@ -514,6 +541,17 @@ export function ExecutionView({
             <Keyboard size={15} />
             Enter 通过 · Backspace 不通过 · Ctrl+B 未执行 · ←/→ 切换
           </span>
+          {/* The sidebar grid is left behind when the desk moves into the PiP
+              window, so the counts travel with the desk instead. */}
+          {cases.length > 0 ? (
+            <span
+              className="desk-progress"
+              title={`通过 ${passed} · 不通过 ${failed} · 跳过 ${skipped} · 未测 ${untested}`}
+              aria-label={`已测 ${done} / ${cases.length}：通过 ${passed}，不通过 ${failed}，跳过 ${skipped}，未测 ${untested}`}
+            >
+              {done}/{cases.length} · ✓{passed} ✗{failed} ○{untested}
+            </span>
+          ) : null}
           <button
             type="button"
             className="ghost-button"
