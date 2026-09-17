@@ -62,38 +62,35 @@ PY
 
 ## 4. 一次完整发版（复制粘贴）
 
-### 4.1 本地：验证 → 合并 → 打 tag
+### 4.1 本地：验证 → 打 tag
 
 ```bash
 cd /home/lucascool/qa-board
 
-# 1) 分支与合并（当前 main 是 feature/cloud-testdeck 的祖先，所以是快进合并）
-git checkout main
-git merge --ff-only feature/cloud-testdeck
-
-# 2) 和 CI 一致的验证（后端需要一个本地 PostgreSQL 测试库）
+# 1) 和 CI 一致的验证（后端需要一个本地 PostgreSQL 测试库）
 cd backend
 TEST_DATABASE_URL=postgresql+psycopg://testdeck:testdeck@127.0.0.1:5433/testdeck_test \
-  .venv/bin/python -m pytest -q          # 期望 310 passed
+  .venv/bin/python -m pytest -q          # 期望 315 passed
 cd ../frontend
-npx vitest run                            # 期望 112 passed
+npx vitest run                            # 期望 113 passed（16 文件）
 npm run build
 cd ..
 
-# 3) 推送 main 和版本 tag（推送 tag 才会触发镜像发布）
-git push origin main
-git tag -a v0.1.4 -m "v0.1.4"
-git push origin v0.1.4
+# 2) 推送 main 和版本 tag（推送 tag 才会触发镜像发布）
+#    本机 origin 是 https 且没有存凭据，所以显式用 SSH 地址推送，
+#    或者先执行一次 git remote set-url origin git@github.com:wanglz111/qa-board.git
+git push git@github.com:wanglz111/qa-board.git main
+git tag -a v0.1.5 -m "v0.1.5"
+git push git@github.com:wanglz111/qa-board.git v0.1.5
 ```
 
-推送偶发失败时的可用写法（本机 `~/.ssh/config` 里 github.com 的 `ProxyCommand` 指向的本地代理可能没开）：
+推送必须走 SSH：本机 `origin` 是 https 且没有存凭据，`git push origin …` 会直接报 `could not read Username for 'https://github.com'`。用上面的 `git@github.com:wanglz111/qa-board.git` 地址推，或先把 origin 换成 SSH 地址。SSH 走 `~/.ssh/config` 里 github.com 的 443 端口配置，开箱即用。
+
+远端现在是 `main` = `f4d11e4`，标签 `v0.1.5`。已合并的 `feature/cloud-testdeck` 本地分支已删除；**远端同名分支还在**，因为 GitHub 上这个仓库的默认分支仍指向它，`git push --delete` 会报 `refusing to delete the current branch`。要清掉它：先把默认分支改成 `main`（仓库 Settings → General → Default branch），再执行
 
 ```bash
-GIT_SSH_COMMAND="ssh -o ProxyCommand=none" git push origin main
-GIT_SSH_COMMAND="ssh -o ProxyCommand=none" git push origin v0.1.4
+git push git@github.com:wanglz111/qa-board.git --delete feature/cloud-testdeck
 ```
-
-远端现在是 `main` = `adcf60e`，标签 `v0.1.4`。
 
 ### 4.2 GitHub Actions：镜像发布
 
@@ -111,14 +108,14 @@ cd /home/ubuntu/testdeck
 
 # 备份当前 .env，再改两个镜像 tag
 cp .env .env.bak-$(date +%F-%H%M%S)
-sed -i -E 's|^(WEB_IMAGE=ghcr\.io/[^:]+):.*|\1:v0.1.4|; s|^(API_IMAGE=ghcr\.io/[^:]+):.*|\1:v0.1.4|' .env
+sed -i -E 's|^(WEB_IMAGE=ghcr\.io/[^:]+):.*|\1:v0.1.5|; s|^(API_IMAGE=ghcr\.io/[^:]+):.*|\1:v0.1.5|' .env
 
 # 拉取并重启；migrate 服务会在 db 健康后自动跑 alembic upgrade head + bootstrap
 sudo docker compose --env-file .env -f docker-compose.yml up -d --pull always
 sudo docker compose --env-file .env -f docker-compose.yml ps
 ```
 
-服务器上已经放好了 `deploy.sh`，上面三步可以合成一条：`./deploy.sh v0.1.4`。
+服务器上已经放好了 `deploy.sh`，上面三步可以合成一条：`./deploy.sh v0.1.5`。
 
 ### 4.4 验收（每次发版都做）
 
@@ -134,13 +131,13 @@ curl -s -o /dev/null -w '%{http_code}\n' https://testdeck.gleaftex.com/api/group
 ```bash
 cd /home/ubuntu/testdeck
 cp .env .env.bak-$(date +%F-%H%M%S)
-sed -i -E 's|^(WEB_IMAGE=ghcr\.io/[^:]+):.*|\1:v0.1.3|; s|^(API_IMAGE=ghcr\.io/[^:]+):.*|\1:v0.1.3|' .env
+sed -i -E 's|^(WEB_IMAGE=ghcr\.io/[^:]+):.*|\1:v0.1.4|; s|^(API_IMAGE=ghcr\.io/[^:]+):.*|\1:v0.1.4|' .env
 sudo docker compose --env-file .env -f docker-compose.yml up -d --pull always
 ```
 
 或者直接用 `.env.bak-*` 覆盖回去。迁移只向前：如果新版本带了不兼容的 schema 变更，回滚镜像并不能回滚数据库，这种情况要先恢复备份。
 
-注意 `0011_case_reference_assets` 只新增表和列，回滚到 v0.1.3 不影响旧功能（新表留着不用），但如果线上已经开始导入带图用例包，回滚会丢掉这些图片的入口。
+注意 `0011_case_reference_assets` 只新增表和列，回滚到 v0.1.3 或更早不影响旧功能（新表留着不用），但如果线上已经开始导入带图用例包，回滚会丢掉这些图片的入口。v0.1.5 没有 schema 变更，从 v0.1.5 回滚到 v0.1.4 可以直接执行，不必恢复数据库。
 
 ## 6. 备份
 
@@ -209,9 +206,8 @@ Cloudflare 侧只需 `testdeck.gleaftex.com` 的 A 记录指向 `43.167.241.33`�
 
 ## 9. 已知未决项
 
-1. **超时认领可能误认旧行**（`backend/app/lark/outbox.py` 的 `LarkTimeout` 分支）：创建执行记录超时后，如果按用例编号能且只能匹配到一行，就把它当作刚创建的那行认领。若目标表里早就有同编号的行（首次执行的标签就是裸编号 `B-001`），这条记录会被误认，任务显示「已同步」但实际没有新增行。表现：`不通过` 的用例也照常新建缺陷行。修法方向是只认领「可证明是新建的行」（记录时间不早于本次尝试，或排除已存快照的 record id），否则保持 `uncertain` 交人工核对。当前版本保留原行为。
-2. Cloudflare 源站只开了 80（Flexible SSL）。想升级成 Full(Strict) 需要在源站加证书或让 nginx 直接上 443。
-3. 没有自动部署：tag 推送只发布镜像，服务器更新是手动一条命令（有意如此，避免未经确认自动升级）。
+1. Cloudflare 源站只开了 80（Flexible SSL）。想升级成 Full(Strict) 需要在源站加证书或让 nginx 直接上 443。
+2. 没有自动部署：tag 推送只发布镜像，服务器更新是手动一条命令（有意如此，避免未经确认自动升级）。
 
 ## 10. 这次交付做了什么（v0.1.2）
 
@@ -278,3 +274,33 @@ Cloudflare 侧只需 `testdeck.gleaftex.com` 的 A 记录指向 `43.167.241.33`�
 | 另一 vhost `api.gleaftex.com` | 200，重建 `nginx-proxy` 未影响其他项目 |
 
 回滚：`cd /home/ubuntu/testdeck && ./deploy.sh v0.1.3`。
+
+## 13. 这次交付做了什么（v0.1.5）
+
+- 把 `main` 从 `adcf60e` 推进到 `f4d11e4`（6 个提交），并打了 `v0.1.5`：执行页里待提交的缺陷截图可以点缩略图全屏预览（复用 `reference-gallery-dialog` 的呈现，`Escape` 和关闭按钮都能关，打开时抢焦点所以不会触发执行台快捷键；不做轮播、下载或新标签页）。
+- 同一批提交收紧了 Lark 的写入与对账：
+  - 修掉了原先第 9 节列出的「超时认领可能误认旧行」。创建执行记录超时后的认领不再按用例编号匹配，而是要求 `用例`、`结果`、`控制台` 全部相等、且 `日期` 相等——`日期` 取的是本次尝试的 `created_at` 毫秒值，所以表里遗留的同名旧行不会再被认领，认领不到就停在 `uncertain` 交人工。失败方向落在安全的一侧，代价是「远端其实写成功了、但比对不上」也会变成 `uncertain`，需要在「Lark 检查」页点一次同步重试，这类待同步数可能比以前略多。
+  - 对账改用 `SyncJob.new_exec_record_id` 作为主键配对，不再受 Lark 返回顺序影响。
+  - 写到 Lark「用例」列和「问题描述」列的内容改为 `用例编号 + 标题`，内部重测标签（`-R…`）不再出现在 Lark 里，均有测试锁定。
+- 本地验证：后端 `315 passed`，前端 `113 passed`（16 文件）+ `npm run build` 通过。
+- GitHub Actions 运行 [#35185335706](https://github.com/wanglz111/qa-board/actions/runs/35185335706) 成功：`verify` 与两个 `publish` 都是 success，镜像 `v0.1.5` 与 `sha-f4d11e4821d7c876020d86a7d1d2f9ecbc269e92` 已推到 GHCR。
+- 服务器执行 `./deploy.sh v0.1.5`：`.env` 备份为 `.env.bak-20260917-132742`，`migrate` 退出码 0（本次没有新迁移，`alembic_version` 仍是 `0011_case_reference_assets`），api / worker / web 全部换成 `ghcr.io/wanglz111/qa-board-*:v0.1.5`；部署前另做了数据库备份 `backup-2026-09-17-132543.sql.gz`。
+
+升级后的实测结果：
+
+| 检查 | 结果 |
+| --- | --- |
+| `docker compose ps` | api（healthy）、worker、web 都是 `ghcr.io/wanglz111/qa-board-*:v0.1.5` |
+| 镜像 digest | 运行中 api `sha256:5c3168d4…`、web `sha256:cc73088a…`，与 GHCR `v0.1.5` 一致 |
+| 一次性 `migrate` | 退出码 0，`alembic_version` = `0011_case_reference_assets` |
+| `GET /health/ready` | 200 `{"ok":true}` |
+| 匿名 `GET /api/groups` | 401 |
+| 管理员登录 + `/api/auth/me` + `/api/auth/csrf` | 200，升级后管理员未被重置 |
+| 带会话 `/api/groups`、`/api/groups/<id>/cases` | 200（1 个测试组、14 条用例） |
+| `/api/groups/<id>/lark/target` | 200，执行表「执行记录」、缺陷表「冒烟测试bug表」仍在 |
+| `/api/groups/<id>/reconcile` | 200，live 读取且 `read_errors` 为空 |
+| 部署的 SPA 资源 | `index-DEQtQeU9.js` / `index-9buM1eSG.css`，与本地 `v0.1.5` 构建产物一致 |
+| 容器日志（api / worker / migrate / nginx-proxy） | 无 error / traceback |
+| 另一 vhost `api.gleaftex.com` | 200，未受影响 |
+
+回滚：`cd /home/ubuntu/testdeck && ./deploy.sh v0.1.4`（本次无 schema 变更，可直接回滚）。
