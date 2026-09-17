@@ -17,6 +17,14 @@ export type SaveStatus = {
 export type OutcomeFormHandle = {
   setResult: (result: AttemptResult) => void;
   focusNote: () => void;
+  // Clears the four fields this form owns (result / note / console / validation).
+  // Attachments and the save status belong to the caller: they survive a reset on
+  // purpose, so a failed screenshot upload can still be retried. Only a submit
+  // whose *request* rejected must skip the reset — a save that landed with a
+  // failed upload still resets, because the note is already stored server-side.
+  // A case switch resets too, so a note typed for case A can never be submitted
+  // under case B. The reset itself is unconditional: the caller decides when.
+  reset: () => void;
 };
 
 type Props = {
@@ -127,7 +135,13 @@ export const OutcomeForm = forwardRef<OutcomeFormHandle, Props>(function Outcome
       setResult(next);
       setValidation("");
     },
-    focusNote: () => noteInput.current?.focus()
+    focusNote: () => noteInput.current?.focus(),
+    reset: () => {
+      setResult(null);
+      setNote("");
+      setConsoleText("");
+      setValidation("");
+    }
   }));
 
   function appendImages(files: File[]) {

@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { createRef, useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -135,5 +135,58 @@ describe("OutcomeForm", () => {
     });
 
     expect(onImagesChange).not.toHaveBeenCalled();
+  });
+
+  it("resets the result, the note, the console and the validation, leaving the form pristine", async () => {
+    const user = userEvent.setup();
+    const { ref } = renderForm();
+
+    await user.click(screen.getByRole("button", { name: "不通过" }));
+    await user.type(screen.getByLabelText("失败说明"), "绑定未触发");
+    await user.type(screen.getByLabelText("控制台输出"), "wallet.bind timeout");
+
+    act(() => ref.current?.reset());
+
+    expect(screen.getByRole("button", { name: "不通过" })).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByLabelText("失败说明")).toHaveValue("");
+    expect(screen.getByLabelText("控制台输出")).toHaveValue("");
+
+    // Behavioural proof of "pristine": with no result selected, submitting again
+    // must re-raise the validation instead of saving something the user cleared.
+    await user.click(screen.getByRole("button", { name: "保存结果" }));
+    expect(screen.getByRole("alert")).toHaveTextContent("请选择执行结果");
+  });
+
+  it("clears a validation message left behind by an empty submit", async () => {
+    const user = userEvent.setup();
+    const { ref } = renderForm();
+
+    await user.click(screen.getByRole("button", { name: "保存结果" }));
+    expect(screen.getByRole("alert")).toHaveTextContent("请选择执行结果");
+
+    act(() => ref.current?.reset());
+
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("leaves the attachments and the save status to the caller", async () => {
+    const createObjectURL = vi.fn(() => "blob:retained-preview");
+    const revokeObjectURL = vi.fn();
+    Object.defineProperties(URL, {
+      createObjectURL: { configurable: true, value: createObjectURL },
+      revokeObjectURL: { configurable: true, value: revokeObjectURL }
+    });
+    const shot = new File(["png"], "shot.png", { type: "image/png" });
+    const { ref, onImagesChange, onSave } = renderForm({
+      images: [shot],
+      status: { tone: "error", text: "结果已保存到本地，但截图上传失败" }
+    });
+
+    act(() => ref.current?.reset());
+
+    expect(screen.getByRole("img", { name: "缺陷截图：shot.png" })).toBeInTheDocument();
+    expect(screen.getByText("结果已保存到本地，但截图上传失败")).toBeInTheDocument();
+    expect(onImagesChange).not.toHaveBeenCalled();
+    expect(onSave).not.toHaveBeenCalled();
   });
 });
