@@ -38,14 +38,6 @@ backups/
 /task_plan.md
 /findings.md
 /progress.md
-.planning/lark-pip-fixes/findings.md
-.planning/lark-pip-fixes/progress.md
-.planning/lark-pip-fixes/task_plan.md
-.planning/pr-image-case-bundle-audit/audit-prompt.md
-.planning/pr-image-case-bundle-audit/findings.md
-.planning/pr-image-case-bundle-audit/fix-log.md
-.planning/pr-image-case-bundle-audit/progress.md
-.planning/pr-image-case-bundle-audit/task_plan.md
-.planning/defect-image-previews/findings.md
-.planning/defect-image-previews/progress.md
-.planning/defect-image-previews/task_plan.md
+# The whole directory is session-local: it carries the per-task working memory
+# (task_plan / findings / progress) that the planning-with-files flow writes.
+.planning/
