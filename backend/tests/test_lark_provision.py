@@ -1341,4 +1341,7 @@ def test_rebuilding_a_table_reports_a_field_read_failure(
 
     assert response.status_code == 409, response.text
     assert "读取数据表字段失败" in response.json()["detail"]
+    # The hint is the actionable half: a field read fails because the app lost
+    # its collaborator seat far more often than for any other reason.
+    assert "协作者" in response.json()["detail"]
     assert lark_fake.created_tables == []
