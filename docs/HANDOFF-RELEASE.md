@@ -82,18 +82,18 @@ cd ..
 
 # 3) 推送 main 和版本 tag（推送 tag 才会触发镜像发布）
 git push origin main
-git tag -a v0.1.3 -m "v0.1.3"
-git push origin v0.1.3
+git tag -a v0.1.4 -m "v0.1.4"
+git push origin v0.1.4
 ```
 
 推送偶发失败时的可用写法（本机 `~/.ssh/config` 里 github.com 的 `ProxyCommand` 指向的本地代理可能没开）：
 
 ```bash
 GIT_SSH_COMMAND="ssh -o ProxyCommand=none" git push origin main
-GIT_SSH_COMMAND="ssh -o ProxyCommand=none" git push origin v0.1.3
+GIT_SSH_COMMAND="ssh -o ProxyCommand=none" git push origin v0.1.4
 ```
 
-远端现在是 `main` = `1485e9c`，标签 `v0.1.3`。
+远端现在是 `main` = `adcf60e`，标签 `v0.1.4`。
 
 ### 4.2 GitHub Actions：镜像发布
 
@@ -111,14 +111,14 @@ cd /home/ubuntu/testdeck
 
 # 备份当前 .env，再改两个镜像 tag
 cp .env .env.bak-$(date +%F-%H%M%S)
-sed -i -E 's|^(WEB_IMAGE=ghcr\.io/[^:]+):.*|\1:v0.1.3|; s|^(API_IMAGE=ghcr\.io/[^:]+):.*|\1:v0.1.3|' .env
+sed -i -E 's|^(WEB_IMAGE=ghcr\.io/[^:]+):.*|\1:v0.1.4|; s|^(API_IMAGE=ghcr\.io/[^:]+):.*|\1:v0.1.4|' .env
 
 # 拉取并重启；migrate 服务会在 db 健康后自动跑 alembic upgrade head + bootstrap
 sudo docker compose --env-file .env -f docker-compose.yml up -d --pull always
 sudo docker compose --env-file .env -f docker-compose.yml ps
 ```
 
-服务器上已经放好了 `deploy.sh`，上面三步可以合成一条：`./deploy.sh v0.1.3`。
+服务器上已经放好了 `deploy.sh`，上面三步可以合成一条：`./deploy.sh v0.1.4`。
 
 ### 4.4 验收（每次发版都做）
 
@@ -134,11 +134,13 @@ curl -s -o /dev/null -w '%{http_code}\n' https://testdeck.gleaftex.com/api/group
 ```bash
 cd /home/ubuntu/testdeck
 cp .env .env.bak-$(date +%F-%H%M%S)
-sed -i -E 's|^(WEB_IMAGE=ghcr\.io/[^:]+):.*|\1:v0.1.2|; s|^(API_IMAGE=ghcr\.io/[^:]+):.*|\1:v0.1.2|' .env
+sed -i -E 's|^(WEB_IMAGE=ghcr\.io/[^:]+):.*|\1:v0.1.3|; s|^(API_IMAGE=ghcr\.io/[^:]+):.*|\1:v0.1.3|' .env
 sudo docker compose --env-file .env -f docker-compose.yml up -d --pull always
 ```
 
 或者直接用 `.env.bak-*` 覆盖回去。迁移只向前：如果新版本带了不兼容的 schema 变更，回滚镜像并不能回滚数据库，这种情况要先恢复备份。
+
+注意 `0011_case_reference_assets` 只新增表和列，回滚到 v0.1.3 不影响旧功能（新表留着不用），但如果线上已经开始导入带图用例包，回滚会丢掉这些图片的入口。
 
 ## 6. 备份
 
@@ -188,7 +190,7 @@ sudo docker exec nginx-proxy nginx -s reload
 
 - `nginx-proxy` 和 `testdeck-web` 必须共用 `monitor_net`，否则 nginx 解析不到 `testdeck-web`。
 - `X-Forwarded-Proto: https` + 应用里的 `FORWARDED_ALLOW_IPS=*` 是登录不被当成跨站请求的前提。
-- 再加域名就照抄一个 server 块，并把新容器加入 `monitor_net`；改之前先 `cp nginx.conf nginx.conf.bak-$(date +%F)`。
+- 再加域名就照抄一个 server 块，并把新容器加入 `monitor_net`；改之前先 `cp nginx.conf nginx.conf.bak-$(date +%F)`。注意 `nginx.conf` 是**单文件 bind mount**（挂到容器 `/etc/nginx/conf.d/default.conf`）：`sed -i` 会新建 inode，容器里仍是旧文件，必须 `sudo docker exec nginx-proxy nginx -t` 校验后**重建容器**（`sudo bash -c 'cd /root/nginx && docker compose up -d --force-recreate nginx'`）才生效，只 `nginx -s reload` 不够。
 - 上传限制必须 ≥ 应用上限：文本用例 10 MB、截图 20 MB、带图用例包 ZIP 100 MB（均为 MiB）。`client_max_body_size` 要覆盖整个 multipart 请求，当前取 110m 留出边界余量；旧部署若仍是 30m，30–100 MB 的合法用例包会在到达 API 前被 413 拒绝。
 
 Cloudflare 侧只需 `testdeck.gleaftex.com` 的 A 记录指向 `43.167.241.33`，橙云开启；源站只有 80 端口，SSL 模式用 **Flexible**，或改成 Full 并在源站上证书。免费版 Cloudflare 的单请求体上限是 100 MB，因此接近上限的用例包可能被边缘拒绝，需要按实际使用调整计划或把包拆小。
@@ -199,7 +201,7 @@ Cloudflare 侧只需 `testdeck.gleaftex.com` 的 A 记录指向 `43.167.241.33`�
 | --- | --- |
 | 502 / 504 | `sudo docker logs --tail=50 nginx-proxy`；`sudo docker compose --env-file .env -f docker-compose.yml ps` 看 `testdeck-web` 是否在跑、是否在 `monitor_net` 上 |
 | 登录 403 cross-site | 检查 nginx 是否发了 `X-Forwarded-Proto https`、compose 里 `FORWARDED_ALLOW_IPS` 是否为 `*` |
-| 上传大文件失败（413） | 先确认 nginx 的 `client_max_body_size` 已调到 110m 并 reload；再确认包/截图本身未超过应用上限（ZIP 100 MB、截图 20 MB），以及 Cloudflare 免费版 100 MB 的请求体上限 |
+| 上传大文件失败（413） | 先确认 nginx 的 `client_max_body_size` 已调到 110m，并用 `sudo docker exec nginx-proxy grep client_max_body_size /etc/nginx/conf.d/default.conf` 看**容器内**实际值（改完要 `--force-recreate` 才生效，只 reload 无效）；再确认包/截图本身未超过应用上限（ZIP 100 MB、截图 20 MB），以及 Cloudflare 免费版 100 MB 的请求体上限 |
 | 容器起不来 | `sudo docker compose --env-file .env -f docker-compose.yml logs --tail=100 migrate api worker`；常见原因是 `.env` 少了必填变量 |
 | 拉镜像 401/403 | GHCR 包被改成了 private，需要 `docker login ghcr.io` 或把包改回 public |
 | SSH 突然 `Connection closed by ... port 22` | 短时间并发连接过多触发的限流，等几分钟再连；脚本里请用单条长连接而不是并发 ssh |
@@ -252,3 +254,27 @@ Cloudflare 侧只需 `testdeck.gleaftex.com` 的 A 记录指向 `43.167.241.33`�
 | 容器内 `table_fields("execution")` | `截图` 的 `property` 是 `None`，`日期` 是 `{"date_formatter": "yyyy/MM/dd", "auto_fill": false}` |
 
 回滚：`cd /home/ubuntu/testdeck && ./deploy.sh v0.1.2`。
+
+## 12. 这次交付做了什么（v0.1.4）
+
+- 把 `feature/image-case-bundle-import` 的 12 个提交合并进 `main`（快进到 `adcf60e`），并打了 `v0.1.4`：带图用例包导入（`casebook.json` + `assets/` 图片树 → 用例组，图片按组去重存盘，执行页展示参考图并可放大）。
+- 同一提交里修掉一次独立审计提出的 1 项 P1 + 8 项 P2：放大原型图时 Enter 不再误提交「通过」；显式 `null` 不再被当作缺省；NaN／超大坐标／超 int4 的 `position`／损坏或超像素图片／`.` 这类 ZIP 成员名都改成带字段路径的 422，不再 500 或静默接受；locator 图的 focus 不再丢失；写图失败不再残留半写文件；nginx 上传限制与 100 MB 用例包对齐。
+- 本地验证：后端 `310 passed`，前端 `112 passed`（16 文件）+ `npm run build` 通过。
+- GitHub Actions 运行 [#35172365259](https://github.com/wanglz111/qa-board/actions/runs/35172365259) 成功：`verify` 与两个 `publish` 都是 success，镜像 `v0.1.4` 与 `sha-adcf60e` 已推到 GHCR。
+- 服务器执行 `./deploy.sh v0.1.4`：`.env` 备份为 `.env.bak-20260917-100353`，`migrate` 退出码 0（`0010_reconcile_marks -> 0011_case_reference_assets`），api / worker / web 全部换成 `ghcr.io/wanglz111/qa-board-*:v0.1.4`。
+- 服务器 nginx：`testdeck.gleaftex.com` 的 `client_max_body_size` 从 `30m` 调到 `110m`（配置备份 `/root/nginx/nginx.conf.bak-2026-09-17-100735`）。因为该文件是单文件 bind mount，改完必须 `--force-recreate` 容器才生效。
+
+升级后的实测结果：
+
+| 检查 | 结果 |
+| --- | --- |
+| `docker compose ps` | api（healthy）、worker、web 都是 `ghcr.io/wanglz111/qa-board-*:v0.1.4` |
+| 一次性 `migrate` | 退出码 0，`alembic_version` = `0011_case_reference_assets` |
+| `GET /health/ready` | 200 `{"ok":true}` |
+| 匿名 `GET /api/groups` | 401 |
+| 匿名 `GET /api/case-reference-assets/<uuid>` | 401（新路由存在且要求登录） |
+| 40 MB multipart POST 到 `/api/import/preview` | 401（请求体完整上传，未被 nginx 以 413 拦下） |
+| 部署的 SPA 资源 | `index-DLiMvKnc.js` / `index-HXJ3eNlt.css`，与本地 `v0.1.4` 构建产物一致 |
+| 另一 vhost `api.gleaftex.com` | 200，重建 `nginx-proxy` 未影响其他项目 |
+
+回滚：`cd /home/ubuntu/testdeck && ./deploy.sh v0.1.3`。
