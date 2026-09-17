@@ -40,6 +40,8 @@ function ImagePreview({
   onRemove: () => void;
 }) {
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [zoomed, setZoomed] = useState(false);
+  const dialog = useRef<HTMLDivElement>(null);
   const displayName = file.name || "粘贴的截图";
 
   useEffect(() => {
@@ -48,10 +50,23 @@ function ImagePreview({
     return () => URL.revokeObjectURL(objectUrl);
   }, [file]);
 
+  useEffect(() => {
+    if (zoomed) dialog.current?.focus();
+  }, [zoomed]);
+
   return (
     <li className="attachment-preview">
       <div className="attachment-preview-frame">
-        {previewUrl ? <img src={previewUrl} alt={`缺陷截图：${displayName}`} /> : null}
+        {previewUrl ? (
+          <button
+            type="button"
+            className="attachment-preview-open"
+            aria-label={`预览 ${displayName}`}
+            onClick={() => setZoomed(true)}
+          >
+            <img src={previewUrl} alt={`缺陷截图：${displayName}`} />
+          </button>
+        ) : null}
         <button
           type="button"
           className="attachment-remove"
@@ -63,6 +78,35 @@ function ImagePreview({
         </button>
       </div>
       <span className="attachment-name" title={displayName}>{displayName}</span>
+      {zoomed && previewUrl ? (
+        <div
+          className="reference-gallery-dialog"
+          role="dialog"
+          aria-modal="true"
+          aria-label={displayName}
+          tabIndex={-1}
+          ref={dialog}
+          onKeyDown={(event) => {
+            if (event.key === "Escape") {
+              event.stopPropagation();
+              setZoomed(false);
+            }
+          }}
+        >
+          <div className="reference-gallery-dialog-bar">
+            <span>{displayName}</span>
+            <button
+              type="button"
+              className="icon-button"
+              aria-label="关闭图片预览"
+              onClick={() => setZoomed(false)}
+            >
+              <X size={17} />
+            </button>
+          </div>
+          <img src={previewUrl} alt={displayName} />
+        </div>
+      ) : null}
     </li>
   );
 }

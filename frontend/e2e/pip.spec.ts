@@ -137,6 +137,16 @@ test("pasted defect screenshots render as removable image previews", async ({ pa
   await expect.poll(() => preview.evaluate((image) => image.complete && image.naturalWidth > 0)).toBe(true);
   await page.screenshot({ path: "test-results/defect-image-preview-desktop.png", fullPage: true });
 
+  await page.getByRole("button", { name: "预览 checkout-error.png" }).click();
+  const dialog = page.getByRole("dialog", { name: "checkout-error.png" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toBeFocused();
+  const fullImage = dialog.getByRole("img", { name: "checkout-error.png" });
+  await expect.poll(() => fullImage.evaluate((image) => image.complete && image.naturalWidth > 0)).toBe(true);
+  await page.screenshot({ path: "test-results/defect-image-fullscreen-desktop.png" });
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+
   await page.getByRole("button", { name: "移除 checkout-error.png" }).click();
   await expect(preview).toHaveCount(0);
 
@@ -145,6 +155,13 @@ test("pasted defect screenshots render as removable image previews", async ({ pa
   await expect(page.getByRole("img", { name: "缺陷截图：checkout-error.png" })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.screenshot({ path: "test-results/defect-image-preview-mobile.png", fullPage: true });
+
+  await page.getByRole("button", { name: "预览 checkout-error.png" }).click();
+  await expect(page.getByRole("dialog", { name: "checkout-error.png" })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: "test-results/defect-image-fullscreen-mobile.png" });
+  await page.getByRole("button", { name: "关闭图片预览" }).click();
+  await expect(page.getByRole("dialog", { name: "checkout-error.png" })).toHaveCount(0);
 });
 
 test("picture-in-picture opens when supported and degrades visibly when not", async ({ page }) => {
@@ -178,10 +195,17 @@ test("picture-in-picture opens when supported and degrades visibly when not", as
   const preview = pipPage.getByRole("img", { name: "缺陷截图：checkout-error.png" });
   await expect(preview).toBeVisible();
   await expect.poll(() => preview.evaluate((image) => image.complete && image.naturalWidth > 0)).toBe(true);
+  await pipPage.getByRole("button", { name: "预览 checkout-error.png" }).click();
+  const dialog = pipPage.getByRole("dialog", { name: "checkout-error.png" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toBeFocused();
   expect(
     await pipPage.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)
   ).toBe(true);
   await pipPage.screenshot({ path: "test-results/task5-pip-open.png", fullPage: true });
+
+  await pipPage.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
 
   await pipPage.getByRole("button", { name: "移除 checkout-error.png" }).click();
   await expect(preview).toHaveCount(0);

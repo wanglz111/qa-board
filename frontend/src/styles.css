@@ -75,6 +75,7 @@ table { width: 100%; border-collapse: collapse; font-size: .8rem; } th { color: 
 .attachment-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 120px)); gap: 10px; margin: 0 0 14px; padding: 0; list-style: none; }
 .attachment-preview { min-width: 0; }
 .attachment-preview-frame { position: relative; aspect-ratio: 1; overflow: hidden; background: #eef1f2; border: 1px solid #d9dddf; border-radius: 6px; }
+.attachment-preview-open { display: block; width: 100%; height: 100%; padding: 0; background: none; border: 0; cursor: zoom-in; }
 .attachment-preview-frame img { display: block; width: 100%; height: 100%; object-fit: cover; }
 .attachment-remove { position: absolute; top: 5px; right: 5px; width: 26px; height: 26px; display: grid; place-items: center; padding: 0; color: #fff; background: rgba(27, 32, 35, .82); border: 1px solid rgba(255, 255, 255, .72); border-radius: 50%; box-shadow: 0 2px 7px rgba(20, 25, 30, .24); }
 .attachment-remove:hover { background: #a23b36; }.attachment-remove:disabled { opacity: .55; cursor: not-allowed; }

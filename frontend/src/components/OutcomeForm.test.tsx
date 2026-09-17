@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { createRef, useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -107,6 +107,17 @@ describe("OutcomeForm", () => {
     const preview = await screen.findByRole("img", { name: "缺陷截图：checkout-error.png" });
     expect(preview).toHaveAttribute("src", "blob:defect-preview");
     expect(createObjectURL).toHaveBeenCalledWith(pasted);
+
+    await userEvent.click(screen.getByRole("button", { name: "预览 checkout-error.png" }));
+    const dialog = screen.getByRole("dialog", { name: "checkout-error.png" });
+    expect(within(dialog).getByRole("img", { name: "checkout-error.png" })).toHaveAttribute(
+      "src",
+      "blob:defect-preview"
+    );
+
+    await userEvent.keyboard("{Escape}");
+
+    expect(screen.queryByRole("dialog", { name: "checkout-error.png" })).not.toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("button", { name: "移除 checkout-error.png" }));
 
