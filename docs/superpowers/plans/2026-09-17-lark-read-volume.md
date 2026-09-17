@@ -984,6 +984,23 @@ def cached_download(
 `history.py` 需要 `from app.config import settings` 与
 `from app.lark.attachments import cache_directory, cached_download`。
 
+> **执行偏差（agent E·加固）:** 本步的 `attachments.py` 片段**已不再与仓库里的文件一致，且不该照抄**。一次独立只读复审在
+> 这条链路上确认了四个问题：① `directory / file_token` 拿上游 token 直接当路径分量 —— 含 `..` 可逃出缓存目录读写、
+> 含 `/` 或超长会让 `stat()/read_bytes()/write_bytes()` 抛 `OSError` 变成 500（同一段代码里 `filename` 是洗过的，
+> 这种不对称就是线索）；② 没有大小上限，20 MiB 以上的附件**先落盘**、再在 `history.py` 里 502，于是此后每次请求都 502，
+> 而那份字节永久留在 `upload_dir` 指向的 Docker 命名卷上（`compose.yaml` 里 api/worker 共用，跨发布存活）；
+> ③ 缓存自身读写失败会把一个已经拿到字节的请求变成 500 —— 缓存不该对请求有否决权；④ `f"{file_token}.part-{os.getpid()}"`
+> 只按进程唯一，同进程两个首次请求共用同一临时名，实测其一 `os.replace` 会撞上另一条已被改名走的路径抛 `FileNotFoundError`。
+> 因此实现改为：条目名 = `sha256(file_token)`（token 不出现在任何路径分量里）；`.json` 侧车记 `{"mime", "length"}`，
+> 读取时校验长度，对不上就当 miss 重新下载；新增 `max_bytes` 关键字（超限的字节**照旧返回**给调用方，由 `history.py`
+> 既有的 `MAX_ATTACHMENT_BYTES` 检查去 502，但**不落盘**）；`_prune` 只收**比 `ttl` 更旧**的东西，且成对的字节/侧车
+> 只有在两半都已陈旧时才一起退休（仍然年轻的临时文件可能属于正在跑的下载，而 `_store` 是先发侧车再发字节的，
+> 落在那个窗口里的 prune 会把新侧车连同旧字节一起删掉，留下没人背书的字节）——这一点由第二轮独立复审抓出后补的测试钉住；
+> 临时名追加 `uuid4().hex`；prune/store 路径上每个文件系统操作都被 `except OSError` 吞掉。`cache_directory`、TTL 语义、
+> 返回的字节、`Cache-Control: private, max-age=86400` 与洗过的 `Content-Disposition` 全部不变；`history.py` 只动了
+> 这一个调用点（多传 `max_bytes=MAX_ATTACHMENT_BYTES`）。新增测试文件 `backend/tests/test_lark_attachments.py`
+> （20 条），既有断言一字未改。
+
 - [x] **Step 4: 跑测试确认通过**
 
 Run: `cd backend && TEST_DATABASE_URL='postgresql+psycopg://testdeck:testdeck@127.0.0.1:5433/testdeck_test' .venv/bin/python -m pytest tests/test_lark_history.py -q`

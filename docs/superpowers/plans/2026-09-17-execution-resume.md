@@ -110,6 +110,21 @@ Expected: FAIL — `KeyError: 'latest_result'`
 
 确认 `groups.py` 顶部已导入 `func` 与 `Attempt`（`func` 在 `group_progress` 所在的 `app/execution.py` 里用过；`groups.py` 若没有就从 `sqlalchemy` 补 `func`，从 `app.models` 补 `Attempt`）。
 
+> **实现偏差（2026-09-17，独立复审后的加固）**：上面的片段只筛 `Attempt.state == "committed"`，
+> **没有 `group_id` 谓词**——`latest_sequences` 于是把整库每一条 committed attempt 按
+> `group_case_id` 分组，`GET /groups/{id}/cases` 为了一个组读全表。返回的映射本身是对的
+> （一个 `group_case_id` 只属于一个组），所以既有测试
+> `test_groups_api.py::test_each_case_carries_its_own_latest_result` 改动前后都过、看不出差别；
+> 差别只在发出的语句里。落地时给子查询补上
+> `.join(GroupCase, Attempt.group_case_id == GroupCase.id)` 与 `GroupCase.group_id == group_id`，
+> 与 `group_progress`（`app/execution.py:292`）同形；返回值与语义未变（每个用例仍是它自己
+> 最高序号的 committed 结果，没有的仍是 `None`）。
+>
+> 回归测试放在 `backend/tests/test_lark_provision.py::test_the_latest_result_read_stays_inside_the_group`：
+> 本次改动的写入范围只放开了两个 Lark 测试模块，`test_groups_api.py` 不在其中，所以这条只能
+> 落在允许的文件里。它断言两件事——返回值仍是每个用例自己最新那条结果，以及这一次
+> `GET /groups/{id}/cases` 发出的语句里必须带 `group_cases.group_id`（删掉谓词即失败）。
+
 - [x] **Step 4: 跑测试确认通过**
 
 Run: `cd backend && TEST_DATABASE_URL='postgresql+psycopg://testdeck:testdeck@127.0.0.1:5433/testdeck_test' .venv/bin/python -m pytest tests/test_groups_api.py -q`
@@ -284,6 +299,14 @@ export function allTested(cases: GroupCase[]): boolean {
   return cases.length > 0 && cases.every(isDone);
 }
 ```
+
+> **实现偏差（2026-09-17，独立复审后的加固）**：上面片段的签名是
+> `startIndexFor(cases, rememberedCode)`，跨组保护写在 `Execution.tsx` 的调用点
+> （`remembered?.groupId === groupId ? remembered.code : null`），运行时行为是对的。
+> 落地时改为 `startIndexFor(cases, cursor, groupId)`，**把这条规则移进函数**：
+> 行为完全不变，但写在调用点的守卫无法被单测覆盖，写在函数里的可以。
+> 因此 `executionCursor.test.ts` 从 5 个测试变成 6 个——多出的一条正是
+> 「忽略属于其它组的光标」（这个文件里原来**没有任何测试能覆盖那条 groupId 判断**）。
 
 - [x] **Step 5: 跑测试确认通过**
 

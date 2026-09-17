@@ -267,6 +267,23 @@ def _rebuild_counts(db: Session, group_id: UUID) -> dict[str, int]:
 
 确认 `provision.py` 已导入 `Attempt`、`GroupCase`、`func`（`from app.models import Group` 那一行附近补全）。
 
+> **实现偏差（2026-09-17，独立复审后的加固）**：上面的实现片段数的是 committed 的 `Attempt`，
+> 而重建真正再写一遍的工作单位是入队的那条 `SyncJob`：`reset_jobs_for_rebuilt_table`
+> （`backend/app/lark/outbox.py:553`）只 UPDATE 已存在的 job、从不 INSERT，所以有两类
+> committed attempt 永远不会被重写、却会被这个片段数进来——reconcile 从表里采纳的行
+> （`backend/app/lark/reconcile.py:272` 置 `source="reconcile"`，而 `enqueue_attempt_job`
+> （`outbox.py:101`）明确拒绝非 `execution` 的行），以及目标表尚未确认时提交的 attempt
+> （`outbox.py:110`）。同一组里一条正常执行 + 一条对照采纳的行，片段给出
+> `{"execution": 2, "bug": 1}`，而重建只会再写一条：这个数字被用来「先说清楚要重写多少条」，
+> 多报就废掉了它唯一的作用。落地时改成 `SyncJob` join `Attempt` join `GroupCase`、限定本组、
+> 保留 committed 守卫，函数名与返回形状不变。
+>
+> Step 1 的那条既有测试**不需要改，也没有改**：`provision_group` fixture 的 `confirmed_at`
+> 非空（`tests/test_lark_provision.py:48`），两条 attempt 都经 `POST /attempts` 正常入队，所以
+> 「计 job」与「计 attempt」在它那条数据上给出同一个 `{"execution": 2, "bug": 1}`——它继续钉住
+> 真实行为，断言一字未动。能分辨两种口径的是新增的回归测试
+> `test_the_rebuild_count_only_counts_the_rows_a_rebuild_will_re_file`（把计数换回 attempt 即失败）。
+
 - [x] **Step 4: 跑测试确认通过**
 
 Run: `cd backend && TEST_DATABASE_URL='postgresql+psycopg://testdeck:testdeck@127.0.0.1:5433/testdeck_test' .venv/bin/python -m pytest tests/test_lark_provision.py -q`
