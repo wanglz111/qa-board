@@ -7,6 +7,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.auth import require_admin
@@ -35,7 +36,7 @@ from app.lark.target import (
     serialize_target,
     target_for,
 )
-from app.models import Group
+from app.models import Attempt, Group, GroupCase
 
 
 router = APIRouter(prefix="/api", dependencies=[Depends(require_admin)])
@@ -334,6 +335,9 @@ def read_provision_plan(
         views[role] = _view_state(listed_views)
     return {
         "roles": roles,
+        # 重建之前先说清楚它会重写多少条：一次重建 = 新建一张表 + 把这些行
+        # 全部再写一遍（含截图上传）。
+        "rebuild": _rebuild_counts(db, group_id),
         # A header that already exists with the wrong type is reported here
         # instead of being invented or silently rewritten: it may already hold
         # data, so converting it stays the administrator's decision.
@@ -772,6 +776,25 @@ def rebuild_table(
         "requeued": requeued,
         "schema_errors": state["schema_errors"],
         "target": serialize_target(locked),
+    }
+
+
+def _rebuild_counts(db: Session, group_id: UUID) -> dict[str, int]:
+    """How many rows a rebuild of each role would write again.
+
+    Every committed result of the group is re-filed into the execution table;
+    only the failed ones raise a defect row.
+    """
+
+    committed = (
+        select(func.count(Attempt.id))
+        .join(GroupCase, Attempt.group_case_id == GroupCase.id)
+        .where(GroupCase.group_id == group_id, Attempt.state == "committed")
+    )
+    failed = committed.where(Attempt.result == "不通过")
+    return {
+        "execution": int(db.scalar(committed) or 0),
+        "bug": int(db.scalar(failed) or 0),
     }
 
 

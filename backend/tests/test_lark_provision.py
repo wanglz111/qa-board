@@ -19,7 +19,7 @@ from app.models import Attempt, Group, GroupCase, LarkTarget, SyncJob
 
 
 @pytest.fixture
-def provision_group(lark_fake, db_session, imported_group) -> Group:
+def provision_group(lark_fake, db_session, imported_group, add_case) -> Group:
     """A group bound to the standard two-base target, poised for provisioning.
 
     ``imported_group`` deliberately has no stored ``LarkTarget`` (see
@@ -28,9 +28,14 @@ def provision_group(lark_fake, db_session, imported_group) -> Group:
     execution table also starts with a single header, which is the situation the
     endpoint exists for. It is a plain fixture rather than an autouse one so the
     binding stays visible in every test that depends on it.
+
+    A second case is added because the rebuild counts have to be able to differ
+    between the roles: one pass and one fail makes the execution count 2 and the
+    defect count 1.
     """
 
     lark_fake.fields = [{"field_name": "用例", "type": 1}]
+    add_case(imported_group.id, code="B-002", title="登录失败提示")
     db_session.add(
         LarkTarget(
             group_id=imported_group.id,
@@ -1345,3 +1350,33 @@ def test_rebuilding_a_table_reports_a_field_read_failure(
     # its collaborator seat far more often than for any other reason.
     assert "协作者" in response.json()["detail"]
     assert lark_fake.created_tables == []
+
+
+def test_the_plan_says_how_many_rows_a_rebuild_would_rewrite(
+    lark_fake, authenticated_client, provision_group
+):
+    cases = authenticated_client.get(f"/api/groups/{provision_group.id}/cases").json()
+    codes = [case["code"] for case in cases][:2]
+    assert len(codes) == 2, "这个 fixture 需要至少两条用例"
+
+    first = authenticated_client.post(
+        f"/api/groups/{provision_group.id}/cases/{codes[0]}/attempts",
+        json={"result": "通过", "idempotency_key": "rebuild-count-1"},
+    )
+    assert first.status_code == 201, first.text
+    second = authenticated_client.post(
+        f"/api/groups/{provision_group.id}/cases/{codes[1]}/attempts",
+        json={
+            "result": "不通过",
+            "note": "登录按钮没反应",
+            "idempotency_key": "rebuild-count-2",
+        },
+    )
+    assert second.status_code == 201, second.text
+
+    plan = authenticated_client.get(
+        f"/api/groups/{provision_group.id}/lark/provision"
+    ).json()
+
+    # 执行表重写每一条本地结果；缺陷表只重写「不通过」的那一条。
+    assert plan["rebuild"] == {"execution": 2, "bug": 1}
