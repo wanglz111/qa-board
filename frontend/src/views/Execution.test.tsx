@@ -1172,7 +1172,11 @@ function gridCases() {
   return [
     testCase("c1", "第一条", null, "B-001", "通过"),
     testCase("c2", "第二条", null, "B-002", null),
-    testCase("c3", "第三条", null, "B-003", "未执行")
+    testCase("c3", "第三条", null, "B-003", "未执行"),
+    // 不通过 is here so no term of `{done}/{total} · ✓{passed} ✗{failed} ○{untested}`
+    // can be replaced by a constant and still render this line: without a failed
+    // row, ✗ is pinned by nothing at all.
+    testCase("c4", "第四条", null, "B-004", "不通过")
   ];
 }
 
@@ -1194,9 +1198,12 @@ it("shows one square per case with its own colour", async () => {
   // untested row — the titles below are the ones actually on screen.
   await screen.findByText("第二条");
   const found = squares();
-  expect(found).toHaveLength(3);
-  expect(found.map(tonesOf)).toEqual([["passed"], ["untested"], ["skipped"]]);
-  expect(screen.getByText("通过 1 · 不通过 0 · 跳过 1 · 未测 1")).toBeVisible();
+  expect(found).toHaveLength(4);
+  expect(found.map(tonesOf)).toEqual([["passed"], ["untested"], ["skipped"], ["failed"]]);
+  // Both renderings of the one array: the sidebar legend and the desk line the
+  // PiP window carries.
+  expect(screen.getByText("通过 1 · 不通过 1 · 跳过 1 · 未测 1")).toBeVisible();
+  expect(screen.getByText("3/4 · ✓1 ✗1 ○1")).toBeVisible();
 });
 
 it("jumps to a case by clicking its square", async () => {
@@ -1218,20 +1225,26 @@ it("shows the running counts in the desk so the PiP window carries them", async 
       // `done` from ✓/✗ alone still renders a plausible line, so without it the
       // rule this test exists for would go unpinned.
       testCase("c2", "第二条", null, "B-002", "未执行"),
-      testCase("c3", "第三条", null, "B-003", null)
+      testCase("c3", "第三条", null, "B-003", null),
+      // And a 不通过 row, or `✗{failed}` can be a constant and still pass.
+      testCase("c4", "第四条", null, "B-004", "不通过")
     ]
   });
 
-  // 未执行 is a decision, so it is done: 2/3, with one row left untested.
+  // 未执行 is a decision, so it is done: 3/4, with one row left untested and one
+  // failure among the finished rows.
   await screen.findByText("第三条");
-  const line = screen.getByText("2/3 · ✓1 ✗0 ○1");
+  const line = screen.getByText("3/4 · ✓1 ✗1 ○1");
   const desk = document.querySelector(".execution-desk");
   // The text alone would also be satisfied by the sidebar, which `usePiP` leaves
   // in the main window — only this node travels into the small window.
   expect(desk).not.toBeNull();
   expect(desk?.contains(line)).toBe(true);
-  expect(desk?.textContent).toContain("2/3 · ✓1 ✗0 ○1");
-  expect(line).toHaveAttribute("title", "通过 1 · 不通过 0 · 跳过 1 · 未测 1");
+  expect(desk?.textContent).toContain("3/4 · ✓1 ✗1 ○1");
+  expect(line).toHaveAttribute("title", "通过 1 · 不通过 1 · 跳过 1 · 未测 1");
+  expect(line).toHaveAttribute("aria-label", "已测 3 / 4：通过 1，不通过 1，跳过 1，未测 1");
+  // The sidebar legend is the other rendering of the same numbers.
+  expect(screen.getByText("通过 1 · 不通过 1 · 跳过 1 · 未测 1")).toBeVisible();
 });
 
 it("keeps a half-typed note when the current case's own square is clicked", async () => {

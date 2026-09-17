@@ -13,6 +13,7 @@ import type {
   SubmitPayload,
   SyncStatus
 } from "../api";
+import { toneOf, type Tone } from "../caseTone";
 import { CaseDetail } from "../components/CaseDetail";
 import { CaseGrid } from "../components/CaseGrid";
 import { GroupSelector } from "../components/GroupSelector";
@@ -488,19 +489,16 @@ export function ExecutionView({
 
   const activeCase = cases[caseIndex];
   // The sidebar grid and the desk's progress line are two renderings of the same
-  // array, so both read these names rather than counting for themselves.
+  // array, so both read `toneOf` rather than counting for themselves: one
+  // classification means the two renderings agree for *any* input — including a
+  // row the server omits `latest_result` from — and the four numbers stay a
+  // partition of `cases` by construction.
+  const counts: Record<Tone, number> = { passed: 0, failed: 0, skipped: 0, untested: 0 };
+  for (const item of cases) counts[toneOf(item.latest_result)] += 1;
+  const { passed, failed, skipped, untested } = counts;
   // 「未执行」 is a decision — the operator looked and said so — hence `done`, but
   // it is neither ✓ nor ✗.
-  const passed = cases.filter((item) => item.latest_result === "通过").length;
-  const failed = cases.filter((item) => item.latest_result === "不通过").length;
-  const skipped = cases.filter((item) => item.latest_result === "未执行").length;
   const done = passed + failed + skipped;
-  // The complement of `done`, not a fourth filter. `CaseGrid` calls a case 未测
-  // exactly when it carries none of the three results above, so deriving the
-  // number makes the two renderings agree for *any* input — including a row the
-  // server omits `latest_result` from — and keeps `done + untested` the total by
-  // construction rather than by the array's type.
-  const untested = cases.length - done;
 
   return (
     <section className="workspace-section execution-layout" aria-labelledby="execution-title">
