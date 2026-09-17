@@ -332,3 +332,34 @@ Cloudflare 侧只需 `testdeck.gleaftex.com` 的 A 记录指向 `43.167.241.33`�
 | 容器日志（api / worker） | 无 error / traceback |
 
 回滚：`cd /home/ubuntu/testdeck && ./deploy.sh v0.1.5`（本次无 schema 变更，可直接回滚）。
+
+## 15. 这次交付做了什么（v0.1.7）
+
+对着线上看板提出的三件事：表头类型与列序、截图链路、`【自动提】`。
+
+- 把 `main` 推进到 `537ad51` 并打了 `v0.1.7`：**自动生成的表头与参考表对齐**。参考表用 `.env` 里的应用凭证 live 探测过（2026-09-17）：
+
+  | 角色 | 参考表 | 表头（按列序） |
+  | --- | --- | --- |
+  | 执行 | `tblHQfoGkECqrsBZ`（测试流程记录） | `用例`(文本) `结果`(单选：通过/不通过/阻塞/未执行) `优先级`(单选：P0-P3) `负责人`(文本) `截图`(附件) `控制台`(文本) `报告人`(文本) `日期`(DateTime `yyyy/MM/dd`) |
+  | 缺陷 | `tblbiGnPAOh8ilsl`（bug 报告） | `问题描述`(文本) `进展状态`(单选：待修复/修复中/待验收/验收不通过/验收通过，待上线/已上线/需求确认/无效 bug/暂不处理) `跟进人`(人员) `优先级`(单选：P0/P1/P2) `截图`(附件) `反馈人`(人员) `反馈时间`(DateTime) `备注`(文本) |
+
+  新建数据表现在按这张表的列序创建（`用例`/`问题描述` 在第一列，即主列），不再按字母序；`结果`/`优先级`/`进展状态` 是单选且选项名逐字一致，`反馈人`/`跟进人` 是人员列，`截图` 是附件列。已经存在但类型不对的列由管理员在「Lark 检查 → 修正表头类型」显式转换（列序与主列无法通过 API 修改，这一类表要用 v0.1.8 的「重建数据表」）。
+- **截图链路打通**：结果保存后浏览器把图片 POST 到 `/api/attempts/<id>/screenshots`，worker 用 `drive/v1/medias/upload_all`（`parent_type=bitable_image`，`parent_node` 取该记录所在多维表格的 app_token）换成 `file_token`，再写进 `截图` 列的 `[{"file_token": …}]`；执行历史里也能直接看到缩略图（`attempt` 载荷带上本组截图）。写行前有一个 15 秒的「等证据」窗口，每张图片落盘都会把它往后推，所以先保存结果、再传图片的常规操作不会丢掉附件。
+  之前「传了图片哪都看不到」的直接原因是 **worker 容器没挂 `/data` 卷**：图片是 api 写进 `screenshots` 卷的，只有 worker 需要把它们读出来上传，而它看不到这些文件，附件列因此永远是空的。`compose.yaml`、`deploy/server/docker-compose.yml` 和服务器上的 `docker-compose.yml` 都补了这一个卷。
+- `【自动提】` 不再出现：写入端把它从缺陷 `备注` 里去掉了（现在是「由用例 &lt;编号&gt; 提交（结果：&lt;结果&gt;）」），读取端会把开头的 `【…】` 标签剥掉再解析用例编号，所以早先带前缀的旧行既匹配得上、页面上也不会再显示这个徽标。
+- 本地验证：后端 `339 passed`，前端 `123 passed`（16 文件）+ `npm run build` 通过。
+- 服务器执行 `./deploy.sh v0.1.7`：`.env` 备份为 `.env.bak-20260917-153833`，api / worker / web 全部换成 `ghcr.io/wanglz111/qa-board-*:v0.1.7`（两个镜像构建于 `2026-09-17T07:37Z`）。
+
+升级后的实测结果（真实域名 + 真实 Lark 数据）：
+
+| 检查 | 结果 |
+| --- | --- |
+| `docker compose ps` | api（healthy）、worker、web 都是 `ghcr.io/wanglz111/qa-board-*:v0.1.7` |
+| api / worker 卷 | 两个容器都挂着 `testdeck_screenshots:/data` |
+| `GET /api/groups/<id>/cases/B-005/lark-history` | 旧缺陷 `description` 已是「B-005 发售阶段期次表与名额公式\n…」，不再带 `【自动提】` |
+| 执行表新行 `recvvsF3Lnv8k5` | `截图` 列有真实附件（`file_token` + 下载 url），`用例` 是不带 `-R…` 的干净标题 |
+| 缺陷表新行 `recvvsF4igbpV5` | `备注` = 「由用例 B-005 提交（结果：不通过）\n…」，`截图` 列有附件，`反馈人` 是人员列（open_id） |
+| 旧行（v0.1.6 及更早写的） | 仍是旧内容：`问题描述` 带 `【自动提】`、没有附件、`用例` 带 `-R…` 后缀 |
+
+回滚：`cd /home/ubuntu/testdeck && ./deploy.sh v0.1.6`（本次无 schema 变更，可直接回滚）。
