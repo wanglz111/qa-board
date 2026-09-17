@@ -189,7 +189,15 @@ export function ExecutionView({
     const requestId = ++caseRequest.current;
     setSelectedGroupId(groupId);
     setCases([]);
+    // `loadedGroup` is the authority the save guard reads, and the list it stands
+    // for is gone from this line on — so it has to go now, not after the load
+    // below. `loadCases` takes a round-trip, and one round-trip of truth lag is
+    // enough for a save still in flight to repaint this group's cases under the
+    // new selection and, by moving a case, abort the very load meant to replace
+    // them.
+    loadedGroup.current = null;
     setCaseIndex(0);
+    caseIndexRef.current = 0;
     setAttempts([]);
     setReserved(null);
     setImages([]);
