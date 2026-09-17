@@ -1,5 +1,7 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
 
+import { toneOf } from "../src/caseTone";
+
 const CASE = {
   id: "case-1",
   code: "B-001",
@@ -20,6 +22,16 @@ const CASE = {
   latest_result: null,
   reference_assets: []
 };
+
+// The PiP window carries the desk's progress line, so its expected text is
+// derived from the same fixture the desk renders rather than typed by hand: one
+// case, nobody has run it, so nothing is done and the one row is untested.
+const PIP_CASES = [CASE];
+const PIP_COUNTS = { passed: 0, failed: 0, skipped: 0, untested: 0 };
+for (const item of PIP_CASES) PIP_COUNTS[toneOf(item.latest_result)] += 1;
+const PIP_PROGRESS =
+  `${PIP_COUNTS.passed + PIP_COUNTS.failed + PIP_COUNTS.skipped}/${PIP_CASES.length}` +
+  ` · ✓${PIP_COUNTS.passed} ✗${PIP_COUNTS.failed} ○${PIP_COUNTS.untested}`;
 
 async function mockApi(page: Page) {
   await page.route("**/api/**", async (route: Route) => {
@@ -189,6 +201,13 @@ test("picture-in-picture opens when supported and degrades visibly when not", as
   const pipPage = await pipPagePromise;
   await pipPage.setViewportSize({ width: 420, height: 760 });
   await expect(pipPage.getByRole("button", { name: "关闭画中画" })).toBeVisible();
+  // The sidebar grid stays behind in the main window, so the counts have to
+  // travel with the desk: the progress line is inside the surface that moved.
+  await expect(pipPage.locator(".desk-progress")).toBeVisible();
+  await expect(pipPage.locator(".desk-progress")).toHaveText(PIP_PROGRESS);
+  expect(
+    await pipPage.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)
+  ).toBe(true);
   await pipPage.getByRole("button", { name: "通过", exact: true }).click();
   await expect(pipPage.getByRole("button", { name: "通过", exact: true })).toHaveAttribute(
     "aria-pressed",
