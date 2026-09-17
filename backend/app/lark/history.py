@@ -11,8 +11,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.auth import require_admin
+from app.config import settings
 from app.db import get_db
 from app.lark import cache as lark_cache
+from app.lark.attachments import cache_directory, cached_download
 from app.lark.client import LarkClient, LarkError, get_lark_client
 from app.lark.fields import (
     DATE_FIELD_CANDIDATES,
@@ -447,7 +449,11 @@ def legacy_attachment(
         raise HTTPException(status_code=404, detail="Attachment not found")
 
     try:
-        content, content_type = client.download_media(file_token)
+        content, content_type = cached_download(
+            client,
+            file_token,
+            directory=cache_directory(settings.upload_dir),
+        )
     except LarkError as error:
         raise HTTPException(status_code=502, detail=str(error)) from None
     if len(content) > MAX_ATTACHMENT_BYTES:
@@ -461,7 +467,11 @@ def legacy_attachment(
         # Never echo an upstream content type straight into the browser.
         media_type=declared if declared in ALLOWED_ATTACHMENT_TYPES else "application/octet-stream",
         headers={
-            "Cache-Control": "private, no-store",
+            # The token names one immutable file, so the browser may keep the
+            # picture instead of re-fetching it on every panel render. The
+            # directive stays ``private``: this is one operator's evidence, not
+            # something a shared cache may hand out.
+            "Cache-Control": "private, max-age=86400",
             "X-Content-Type-Options": "nosniff",
             "Content-Disposition": f'attachment; filename="{filename}"',
         },

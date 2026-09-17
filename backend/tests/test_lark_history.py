@@ -1,8 +1,25 @@
+from dataclasses import replace
 from uuid import UUID
 
 import pytest
 
+from app.config import settings
+from app.lark import history as lark_history_module
 from app.lark.history import match_bugs, parse_case_reference
+
+
+@pytest.fixture(autouse=True)
+def isolated_attachment_cache(tmp_path, monkeypatch):
+    """Give every test its own on-disk attachment cache.
+
+    ``legacy_attachment`` caches each download beside ``settings.upload_dir``,
+    which the suite leaves at its relative default. Shared, one test's cached
+    picture would answer the next test's fetch — stale bytes (or a stale 200
+    where a 502 is expected) for the very token the next test sets up.
+    """
+
+    patched = replace(settings, upload_dir=str(tmp_path / "uploads"))
+    monkeypatch.setattr(lark_history_module, "settings", patched)
 
 
 def test_old_b001_is_not_b001_retest_and_adapter_never_writes(lark_fake):
@@ -186,7 +203,7 @@ def test_legacy_attachment_proxy_is_private_and_hides_the_token(
 
     assert response.status_code == 200
     assert response.content == b"old-png-bytes"
-    assert response.headers["cache-control"] == "private, no-store"
+    assert response.headers["cache-control"] == "private, max-age=86400"
     assert "secret-file-token" not in response.text
     assert "secret-file-token" not in str(response.headers)
     assert (
@@ -954,3 +971,64 @@ def test_a_poll_with_work_in_flight_keeps_the_snapshot(
     assert response.status_code == 200, response.text
     assert not lark_fake.record_requests
     assert [record["record_id"] for record in response.json()["original"]] == ["old1"]
+
+
+def test_the_same_legacy_attachment_is_downloaded_once(
+    authenticated_client, lark_fake, confirmed_group
+):
+    lark_fake.media["file-old"] = (b"\x89PNG\r\n\x1a\n", "image/png")
+    lark_fake.records = [
+        {
+            "record_id": "old1",
+            "fields": {
+                "用例": "B-001 Login",
+                "结果": "不通过",
+                "截图": [
+                    {"file_token": "file-old", "name": "shot.png", "type": "image/png"}
+                ],
+            },
+        }
+    ]
+    body = authenticated_client.get(
+        f"/api/groups/{confirmed_group.id}/cases/B-001/lark-history"
+    ).json()
+    ref_id = body["original"][0]["ref_id"]
+    lark_fake.requests.clear()
+
+    first = authenticated_client.get(f"/api/lark/history/{ref_id}/attachments/0")
+    second = authenticated_client.get(f"/api/lark/history/{ref_id}/attachments/0")
+
+    assert first.status_code == 200, first.text
+    assert first.content == b"\x89PNG\r\n\x1a\n"
+    assert second.content == first.content
+    downloads = [
+        request["path"]
+        for request in lark_fake.requests
+        if "/medias/" in request["path"] and request["path"].endswith("/download")
+    ]
+    assert downloads == ["/open-apis/drive/v1/medias/file-old/download"]
+    assert first.headers["cache-control"] == "private, max-age=86400"
+
+
+def test_a_lapsed_attachment_cache_entry_is_fetched_again(lark_fake, tmp_path):
+    from app.lark.attachments import cached_download
+
+    directory = tmp_path / "lark-attachments"
+    lark_fake.media["file-old"] = (b"one", "image/png")
+    assert cached_download(lark_fake.client, "file-old", directory=directory) == (
+        b"one",
+        "image/png",
+    )
+
+    # A token's bytes never change, so inside the TTL the disk copy answers;
+    # once the entry lapses the picture is re-downloaded rather than trusted
+    # forever.
+    lark_fake.media["file-old"] = (b"two", "image/png")
+    assert cached_download(lark_fake.client, "file-old", directory=directory) == (
+        b"one",
+        "image/png",
+    )
+    assert cached_download(lark_fake.client, "file-old", directory=directory, ttl=0) == (
+        b"two",
+        "image/png",
+    )
