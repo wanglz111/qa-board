@@ -308,7 +308,13 @@ export function ExecutionView({
       const attempt = reserved && commitReserved
         ? await commitReserved(reserved.id, payload)
         : await submit(savedGroupId, saved.code, payload);
-      setLastAttemptId(attempt.id);
+      // The retry id is a case-scoped thing: it is the id 重试上传截图 would
+      // upload the files on screen into. `showCase` retires it on the way out, so
+      // a save that lands after the operator moved must not hand it back —
+      // otherwise the next case's attachments get filed against this attempt.
+      if (loadedGroup.current === savedGroupId && caseRequest.current === savedVisit) {
+        setLastAttemptId(attempt.id);
+      }
       setReserved(null);
       const history = await loadAttempts(savedGroupId, saved.code);
       // The panel under the case on screen must show *that* case's history: a
@@ -361,7 +367,13 @@ export function ExecutionView({
       // A failed upload keeps the attachments: the reset below only clears the
       // form's own four fields, so the file stays on screen for 重试上传截图 and
       // the retry still names this attempt — the desk does not move on either.
-      if (uploaded) setImages([]);
+      // A *successful* upload clears them, but only on the visit the save belongs
+      // to: clearing them after the operator moved would throw away the
+      // attachments they have meanwhile added for the case now on screen —
+      // evidence they believe is attached, lost without a word.
+      if (loadedGroup.current === savedGroupId && caseRequest.current === savedVisit) {
+        if (uploaded) setImages([]);
+      }
       // One guard for both effects. `save()` outlives a case switch (it takes
       // several awaits while the ←/→ buttons stay clickable), so by now the form
       // on screen may belong to a *different* case: clearing it would throw away

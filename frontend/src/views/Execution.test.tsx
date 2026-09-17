@@ -995,3 +995,110 @@ it("leaves the desk alone when a save lands after the operator walked away and c
   expect(screen.queryByText("第二条")).not.toBeInTheDocument();
   expect(screen.getByLabelText("失败说明")).toHaveValue("回到第一条补的话");
 });
+
+it("does not re-arm a retry for the previous case when a save outlives the move", async () => {
+  const pendingSave = deferred<Attempt>();
+  const submit = vi.fn<(groupId: string, code: string, payload: SubmitPayload) => Promise<Attempt>>();
+  submit.mockReturnValue(pendingSave.promise);
+  // The failure is what makes the trap visible: a failed upload leaves the
+  // attachments on screen next to an error status, which is exactly the pair
+  // OutcomeForm renders 重试上传截图 for.
+  const uploadScreenshot = vi
+    .fn<(attemptId: string, file: File) => Promise<Screenshot>>()
+    .mockRejectedValue(new Error("上传失败"));
+  renderExecution({
+    initialGroupId: "0918-id",
+    submit,
+    uploadScreenshot,
+    loadCases: async () => [
+      testCase("c1", "第一条", null, "B-001", null),
+      testCase("c2", "第二条", null, "B-002", null)
+    ]
+  });
+
+  await screen.findByText("第一条");
+  await userEvent.click(screen.getByRole("button", { name: "通过" }));
+  await userEvent.upload(
+    screen.getByLabelText("上传截图"),
+    new File(["png"], "b001.png", { type: "image/png" })
+  );
+  await userEvent.click(screen.getByRole("button", { name: /保存结果/ }));
+
+  // The operator does not wait for the save: they walk to 第二条 while it is
+  // still in flight. `showCase` retires the retry id it was offered for.
+  await userEvent.click(screen.getByRole("button", { name: "下一条用例" }));
+  expect(await screen.findByText("第二条")).toBeVisible();
+
+  await act(async () => {
+    pendingSave.resolve(committed("attempt-1", "B-001", "通过", null));
+    await pendingSave.promise;
+  });
+  // The save's own upload failed and its error status is deliberately unguarded,
+  // so it lands on the case the operator is on — that is where the button comes
+  // from, not from anything the desk did for 第二条.
+  expect(await screen.findByText(/结果已保存到本地，但截图上传失败/)).toBeVisible();
+  expect(uploadScreenshot).toHaveBeenCalledWith(
+    "attempt-1",
+    expect.objectContaining({ name: "b001.png" })
+  );
+
+  await userEvent.upload(
+    screen.getByLabelText("上传截图"),
+    new File(["png"], "b002.png", { type: "image/png" })
+  );
+  const retry = screen.getByRole("button", { name: /重试上传截图/ });
+  expect(retry).toBeVisible();
+  await userEvent.click(retry);
+
+  // The button is offered by the error status and the attachment, but the id it
+  // would upload into belongs to 第一条's attempt — and `showCase` already
+  // retired it. The click must be inert rather than file 第二条's evidence
+  // against B-001: the save's own b001.png upload is the only call this test
+  // expects, and never one carrying b002.png.
+  expect(uploadScreenshot).toHaveBeenCalledTimes(1);
+  expect(uploadScreenshot).not.toHaveBeenCalledWith(
+    "attempt-1",
+    expect.objectContaining({ name: "b002.png" })
+  );
+});
+
+it("keeps the attachments the operator added while a save was in flight", async () => {
+  const pendingSave = deferred<Attempt>();
+  const submit = vi.fn<(groupId: string, code: string, payload: SubmitPayload) => Promise<Attempt>>();
+  submit.mockReturnValue(pendingSave.promise);
+  renderExecution({
+    initialGroupId: "0918-id",
+    submit,
+    loadCases: async () => [
+      testCase("c1", "第一条", null, "B-001", null),
+      testCase("c2", "第二条", null, "B-002", null)
+    ]
+  });
+
+  await screen.findByText("第一条");
+  await userEvent.click(screen.getByRole("button", { name: "通过" }));
+  // No screenshot is attached to 第一条, so the save's own upload step has
+  // nothing to send and succeeds — the path that clears `images`.
+  await userEvent.click(screen.getByRole("button", { name: /保存结果/ }));
+
+  await userEvent.click(screen.getByRole("button", { name: "下一条用例" }));
+  expect(await screen.findByText("第二条")).toBeVisible();
+  // The evidence for the case now on screen, attached while the previous case's
+  // save is still on the wire. Nothing has been stored for it yet.
+  await userEvent.upload(
+    screen.getByLabelText("上传截图"),
+    new File(["png"], "b002.png", { type: "image/png" })
+  );
+  expect(screen.getByText("b002.png")).toBeVisible();
+
+  await act(async () => {
+    pendingSave.resolve(committed("attempt-1", "B-001", "通过", null));
+    await pendingSave.promise;
+  });
+  await waitFor(() => expect(screen.getByText(/已保存到本地/)).toBeVisible());
+
+  // The save cleared its own case's attachments, and this is not its case: the
+  // chip for the file the operator just attached must survive, or they submit
+  // 第二条 believing the screenshot is on it.
+  expect(screen.getByText("b002.png")).toBeVisible();
+});
