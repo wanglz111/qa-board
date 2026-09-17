@@ -63,7 +63,7 @@ def test_the_token_is_exchanged_once_and_renewed_only_when_it_lapses(lark_fake):
 
 def test_a_refused_token_is_replaced_once_and_the_read_is_retried(lark_fake):
     client = lark_fake.client
-    lark_fake.unauthorized_once = True
+    lark_fake.token_revoked_once = True
     lark_fake.requests.clear()
 
     tables = client.list_tables("app-exec")
@@ -119,7 +119,58 @@ def test_a_ttl_longer_than_the_documented_one_is_capped(lark_fake):
     client.list_tables("app-exec")
 
     remaining = client._token_expires_at - time.monotonic()
+    # The token must be alive and clamped: a value that fell back to the
+    # default would still be alive, so the upper bound alone would not prove
+    # the huge value was really clamped rather than ignored.
+    assert remaining > 6000
     assert remaining <= (
         lark_client_module.DEFAULT_TOKEN_TTL_SECONDS
         - lark_client_module.TOKEN_EXPIRY_MARGIN_SECONDS
     )
+
+
+def test_a_refused_token_does_not_stop_a_write(lark_fake):
+    client = lark_fake.client
+    lark_fake.token_revoked_once = True
+    lark_fake.requests.clear()
+
+    record = client.create_record("app-exec", "tbl-runs", {"用例": "B-001"})
+
+    assert record["record_id"] == "new-1"
+    # One exchange before the refusal, one after the token was dropped.
+    assert len([r for r in lark_fake.requests if r["path"] == TOKEN_PATH]) == 2
+
+
+def test_a_real_authentication_failure_on_a_write_surfaces(lark_fake):
+    client = lark_fake.client
+    lark_fake.unauthorized = True
+    lark_fake.requests.clear()
+
+    with pytest.raises(LarkError):
+        client.create_record("app-exec", "tbl-runs", {"用例": "B-001"})
+
+    assert len([r for r in lark_fake.requests if r["path"] == TOKEN_PATH]) == 2
+
+
+def test_a_refused_token_does_not_stop_an_attachment_download(lark_fake):
+    client = lark_fake.client
+    lark_fake.media["file-1"] = (b"shot", "image/png")
+    lark_fake.token_revoked_once = True
+    lark_fake.requests.clear()
+
+    content, mime = client.download_media("file-1")
+
+    assert (content, mime) == (b"shot", "image/png")
+    assert len([r for r in lark_fake.requests if r["path"] == TOKEN_PATH]) == 2
+
+
+def test_a_refused_token_exchange_surfaces_without_looping(lark_fake):
+    client = lark_fake.client
+    lark_fake.token_unauthorized = True
+    lark_fake.requests.clear()
+
+    with pytest.raises(LarkError):
+        client.list_tables("app-exec")
+
+    # There is no token to re-buy, so the exchange is attempted exactly once.
+    assert len([r for r in lark_fake.requests if r["path"] == TOKEN_PATH]) == 1

@@ -94,6 +94,18 @@ def _permission_hint(status: int | None, message: str) -> str:
     return ""
 
 
+def _is_token_refusal(status: int | None) -> bool:
+    """Whether Lark refused a call because the cached token is no longer good.
+
+    Only HTTP 401 is enumerated: the live API's invalid-token code is not
+    verifiable from here, so no numeric code is guessed. A 403 stays a
+    permission problem — this codebase answers it with ``WRITE_PERMISSION_HINT``,
+    and dropping the token for it would only buy a pointless exchange.
+    """
+
+    return status == 401
+
+
 def build_lark_client(
     config: Settings | None = None,
     transport: httpx.BaseTransport | None = None,
@@ -205,7 +217,12 @@ class LarkClient:
             return self._token
 
     def _forget_token(self) -> None:
-        """Drop the cached token so the next call really exchanges a new one."""
+        """Drop the cached token so the next call really exchanges a new one.
+
+        Accepted race: two callers refused at the same moment can each drop the
+        token, so one rotation can buy one extra token. It is bounded by the
+        number of concurrently refused calls and yields no wrong result.
+        """
 
         with self._token_lock:
             self._token = None
@@ -259,12 +276,7 @@ class LarkClient:
             )
             response.raise_for_status()
         except httpx.HTTPStatusError as error:
-            # A 401 is the only token refusal this code can pin down: the live
-            # API's invalid-token code is not verifiable from here, so no
-            # numeric code is guessed. A 403 stays a permission problem — this
-            # codebase answers it with ``WRITE_PERMISSION_HINT``, and dropping
-            # the token for it would only buy a pointless exchange.
-            if authenticated and error.response.status_code == 401:
+            if authenticated and _is_token_refusal(error.response.status_code):
                 raise _TokenRefused("Lark refused the token (HTTP 401)") from None
             raise LarkError(f"Lark request failed: {type(error).__name__}") from None
         except httpx.HTTPError as error:
@@ -299,8 +311,46 @@ class LarkClient:
         own ``msg``: the request body (which can hold record values) and the
         credentials never reach the message. A response that carries no ``data``
         object is returned as-is, exactly like ``_send`` does.
+
+        Like a read, a write re-buys a refused token once: a 401 is answered
+        before Lark processes the request, so re-sending the body cannot create
+        a second record.
         """
 
+        try:
+            return self._post_once(
+                path,
+                method=method,
+                action=action,
+                json=json,
+                data=data,
+                files=files,
+                timeout=timeout,
+            )
+        except _TokenRefused:
+            # Exactly one retry; a second refusal is a real one.
+            self._forget_token()
+            return self._post_once(
+                path,
+                method=method,
+                action=action,
+                json=json,
+                data=data,
+                files=files,
+                timeout=timeout,
+            )
+
+    def _post_once(
+        self,
+        path: str,
+        *,
+        method: str,
+        action: str,
+        json: dict[str, Any] | None,
+        data: dict[str, Any] | None,
+        files: dict[str, Any] | None,
+        timeout: float | None,
+    ) -> dict[str, Any]:
         headers = {"Authorization": f"Bearer {self._token_value()}"}
         self.calls.append(LarkCall(method=method, path=path))
         try:
@@ -333,10 +383,13 @@ class LarkClient:
             if message:
                 detail += f"：{message}"
             suffix = f" HTTP {status}" if status is not None else ""
-            raise LarkError(
+            refusal = (
                 f"Lark {action} failed{suffix}: {type(error).__name__}{detail}"
                 f"{_permission_hint(status, message)}"
-            ) from None
+            )
+            if _is_token_refusal(status):
+                raise _TokenRefused(refusal) from None
+            raise LarkError(refusal) from None
         try:
             payload = response.json()
         except ValueError:
@@ -408,8 +461,19 @@ class LarkClient:
         return self._paginate(f"/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records")
 
     def download_media(self, file_token: str) -> tuple[bytes, str]:
-        """Fetch one Lark attachment by token, resolved server-side only."""
+        """Fetch one Lark attachment by token, resolved server-side only.
 
+        A GET is safe to repeat, so a refused token is re-bought and the
+        download retried exactly once.
+        """
+
+        try:
+            return self._download_media_once(file_token)
+        except _TokenRefused:
+            self._forget_token()
+            return self._download_media_once(file_token)
+
+    def _download_media_once(self, file_token: str) -> tuple[bytes, str]:
         path = f"/open-apis/drive/v1/medias/{file_token}/download"
         self.calls.append(LarkCall(method="GET", path=path))
         try:
@@ -417,6 +481,11 @@ class LarkClient:
                 path, headers={"Authorization": f"Bearer {self._token_value()}"}
             )
             response.raise_for_status()
+        except httpx.HTTPStatusError as error:
+            refusal = f"Lark attachment download failed: {type(error).__name__}"
+            if _is_token_refusal(error.response.status_code):
+                raise _TokenRefused(refusal) from None
+            raise LarkError(refusal) from None
         except httpx.HTTPError as error:
             raise LarkError(f"Lark attachment download failed: {type(error).__name__}") from None
         return response.content, response.headers.get("content-type", "application/octet-stream")

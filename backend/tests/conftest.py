@@ -257,10 +257,17 @@ class FakeLark:
         ]
         self.wiki_nodes: dict[str, dict[str, Any]] = {}
         self.wiki_error = False
-        # An authenticated request Lark refuses with HTTP 401. ``unauthorized``
-        # refuses every one of them, ``unauthorized_once`` only the first.
+        # A token Lark refuses with HTTP 401. ``unauthorized`` refuses every
+        # authenticated call; ``token_revoked_once`` revokes the token the
+        # first refused call carried, so only a re-bought one gets through —
+        # the app-secret rotation this double simulates.
         self.unauthorized = False
-        self.unauthorized_once = False
+        self.token_revoked_once = False
+        self.revoked_token: str | None = None
+        # The token exchange itself answering 401: there is no token to re-buy.
+        self.token_unauthorized = False
+        # Every exchange mints a new value, the way a real rotation would.
+        self.token_serial = 0
         # What the token exchange answers for ``expire``; None keeps the body
         # exactly as Lark's response looked before this switch existed.
         self.token_expire: int | str | None = None
@@ -437,13 +444,19 @@ class FakeLark:
     def handle(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
         self.requests.append({"method": request.method, "path": path})
-        if request.headers.get("Authorization") and (
-            self.unauthorized or self.unauthorized_once
-        ):
-            self.unauthorized_once = False
-            # The code stays generic: the live invalid-token code is not
-            # verifiable from here, and the client must not key off it anyway.
-            return httpx.Response(401, json={"code": 1, "msg": "invalid access token"})
+        authorization = request.headers.get("Authorization")
+        if authorization:
+            carried = authorization.removeprefix("Bearer ")
+            revoked = self.revoked_token
+            if self.unauthorized or (
+                self.token_revoked_once and (revoked is None or revoked == carried)
+            ):
+                # The first refusal names the revoked token; the client has to
+                # present a re-bought one to get through.
+                self.revoked_token = carried
+                # The code stays generic: the live invalid-token code is not
+                # verifiable from here, and the client must not key off it.
+                return httpx.Response(401, json={"code": 1, "msg": "invalid access token"})
         if request.method in ("PUT", "PATCH", "DELETE"):
             # The one mutation this app is allowed to make is a deliberate
             # header repair; every row stays read-only, exactly like live Lark.
@@ -455,7 +468,10 @@ class FakeLark:
                 self.put_calls.append(path)
             return httpx.Response(405, json={"code": 1, "msg": "legacy rows are read-only"})
         if path == "/open-apis/auth/v3/tenant_access_token/internal":
-            data: dict[str, Any] = {"tenant_access_token": "fake-token"}
+            if self.token_unauthorized:
+                return httpx.Response(401, json={"code": 1, "msg": "invalid app credentials"})
+            self.token_serial += 1
+            data: dict[str, Any] = {"tenant_access_token": f"fake-token-{self.token_serial}"}
             if self.token_expire is not None:
                 data["expire"] = self.token_expire
             return httpx.Response(200, json={"code": 0, "data": data})
