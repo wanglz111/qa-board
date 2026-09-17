@@ -23,6 +23,7 @@ import {
   type SaveInput,
   type SaveStatus
 } from "../components/OutcomeForm";
+import { allTested, readCursor, startIndexFor, writeCursor } from "../executionCursor";
 import { dispatchCaseKey, useCaseKeys, type CaseKeyHandlers } from "../useCaseKeys";
 import { usePiP } from "../usePiP";
 
@@ -152,7 +153,13 @@ export function ExecutionView({
       .then((result) => {
         if (cancelled) return;
         setGroups(result);
-        const preferred = result.find((group) => group.id === initialGroupId) ?? result[0];
+        // Reopening the page should land on the group the operator was working
+        // in, not on whichever group the server lists first.
+        const rememberedGroup = readCursor()?.groupId ?? null;
+        const preferred =
+          result.find((group) => group.id === initialGroupId) ??
+          result.find((group) => group.id === rememberedGroup) ??
+          result[0];
         if (preferred) void selectGroup(preferred.id);
       })
       .catch((reason) => !cancelled && setFailure(message(reason)))
@@ -183,9 +190,15 @@ export function ExecutionView({
       const result = await loadCases(groupId);
       if (requestId !== caseRequest.current) return;
       setCases(result);
-      const first = result[0];
-      if (first) {
-        const history = await loadAttempts(groupId, first.code);
+      // Resume where the operator left off, else at the first case nobody has
+      // run. This is the whole point of the page: coming back after a break
+      // must not mean re-reading the first row of the group.
+      const start = startIndexFor(result, readCursor(), groupId);
+      setCaseIndex(start);
+      const current = result[start];
+      if (current) {
+        writeCursor({ groupId, code: current.code });
+        const history = await loadAttempts(groupId, current.code);
         if (requestId === caseRequest.current) setAttempts(history);
       }
     } catch (reason) {
@@ -200,6 +213,7 @@ export function ExecutionView({
     if (!target || !selectedGroupId) return;
     const requestId = ++caseRequest.current;
     setCaseIndex(index);
+    writeCursor({ groupId: selectedGroupId, code: target.code });
     setAttempts([]);
     setReserved(null);
     setImages([]);
@@ -235,9 +249,11 @@ export function ExecutionView({
   }
 
   async function save(input: SaveInput) {
-    const current = cases[caseIndex];
-    if (!current || !selectedGroupId) return;
-    const signature = JSON.stringify([current.code, input.result, input.note, input.consoleText, reserved?.id ?? null]);
+    // The case this save belongs to, snapshotted so the state updater below can
+    // keep the conventional `current` name for the list it receives.
+    const saved = cases[caseIndex];
+    if (!saved || !selectedGroupId) return;
+    const signature = JSON.stringify([saved.code, input.result, input.note, input.consoleText, reserved?.id ?? null]);
     const payload: SubmitPayload = {
       result: input.result,
       note: input.note,
@@ -247,13 +263,20 @@ export function ExecutionView({
     setSubmitting(true);
     setStatus(null);
     try {
-      const saved = reserved && commitReserved
+      const attempt = reserved && commitReserved
         ? await commitReserved(reserved.id, payload)
-        : await submit(selectedGroupId, current.code, payload);
-      setLastAttemptId(saved.id);
+        : await submit(selectedGroupId, saved.code, payload);
+      setLastAttemptId(attempt.id);
       setReserved(null);
-      setAttempts(await loadAttempts(selectedGroupId, current.code));
+      setAttempts(await loadAttempts(selectedGroupId, saved.code));
       await refreshProgress(selectedGroupId);
+      // The cases were loaded once. Without this the operator who just recorded
+      // the last result would not see 本组已全部测过 until they reloaded.
+      setCases((current) =>
+        current.map((item) =>
+          item.code === saved.code ? { ...item, latest_result: input.result } : item
+        )
+      );
       let confirmed = sync?.confirmed ?? false;
       if (loadSync) {
         try {
@@ -264,7 +287,7 @@ export function ExecutionView({
           // The badge keeps its previous value; the save itself already succeeded.
         }
       }
-      const uploaded = await uploadAll(saved.id, images);
+      const uploaded = await uploadAll(attempt.id, images);
       setStatus(
         uploaded
           ? {
@@ -395,6 +418,11 @@ export function ExecutionView({
         {failure ? <p className="inline-status error" role="alert">{failure}</p> : null}
         {activeCase ? (
           <>
+            {/* Landing on the last row of a finished group is not the operator's
+                answer to "what is left?" — say it out loud. */}
+            {allTested(cases) ? (
+              <p className="inline-status saved" role="status">本组已全部测过</p>
+            ) : null}
             <CaseDetail
               testCase={activeCase}
               position={caseIndex + 1}

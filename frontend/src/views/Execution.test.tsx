@@ -27,10 +27,16 @@ function group(id: string, name: string, sourceName: string): Group {
   };
 }
 
-function testCase(id: string, title: string, expected: string | null = null): GroupCase {
+function testCase(
+  id: string,
+  title: string,
+  expected: string | null = null,
+  code = "B-001",
+  latestResult: GroupCase["latest_result"] = null
+): GroupCase {
   return {
     id,
-    code: "B-001",
+    code,
     position: 1,
     title,
     module: "账户",
@@ -43,10 +49,14 @@ function testCase(id: string, title: string, expected: string | null = null): Gr
     expect_absent: [],
     visual_check: "text_and_visual",
     prototype_note: null,
-    latest_result: null,
-    reference_assets: []
+    reference_assets: [],
+    latest_result: latestResult
   };
 }
+
+beforeEach(() => {
+  window.localStorage.clear();
+});
 
 function committed(id: string, label: string, result: Attempt["result"], note: string | null): Attempt {
   return {
@@ -321,4 +331,80 @@ it("does not submit or switch cases while a prototype image is zoomed", async ()
   expect(submit).not.toHaveBeenCalled();
   expect(screen.getByRole("dialog", { name: "节点发售" })).toBeVisible();
   expect(screen.getByText("管理员登录")).toBeVisible();
+});
+
+it("opens on the first case nobody has run, not on the first row", async () => {
+  renderExecution({
+    initialGroupId: "0918-id",
+    loadCases: async () => [
+      testCase("c1", "第一条", null, "B-001", "通过"),
+      testCase("c2", "第二条", null, "B-002", null),
+      testCase("c3", "第三条", null, "B-003", null)
+    ]
+  });
+
+  expect(await screen.findByText("第二条")).toBeVisible();
+  expect(screen.queryByText("第一条")).not.toBeInTheDocument();
+});
+
+it("returns to the case that was being looked at", async () => {
+  window.localStorage.setItem(
+    "testdeck.execution.cursor",
+    JSON.stringify({ groupId: "0918-id", code: "B-003" })
+  );
+  renderExecution({
+    initialGroupId: "0918-id",
+    loadCases: async () => [
+      testCase("c1", "第一条", null, "B-001", "通过"),
+      testCase("c2", "第二条", null, "B-002", "通过"),
+      testCase("c3", "第三条", null, "B-003", null)
+    ]
+  });
+
+  expect(await screen.findByText("第三条")).toBeVisible();
+});
+
+it("says so when the whole group has been run", async () => {
+  renderExecution({
+    initialGroupId: "0918-id",
+    loadCases: async () => [
+      testCase("c1", "第一条", null, "B-001", "通过"),
+      testCase("c2", "第二条", null, "B-002", "未执行")
+    ]
+  });
+
+  expect(await screen.findByText("本组已全部测过")).toBeVisible();
+});
+
+it("remembers the case once it is opened", async () => {
+  renderExecution({
+    initialGroupId: "0918-id",
+    loadCases: async () => [
+      testCase("c1", "第一条", null, "B-001", "通过"),
+      testCase("c2", "第二条", null, "B-002", null)
+    ]
+  });
+
+  await screen.findByText("第二条");
+  expect(window.localStorage.getItem("testdeck.execution.cursor")).toBe(
+    JSON.stringify({ groupId: "0918-id", code: "B-002" })
+  );
+});
+
+it("announces the finish in the very session that finishes the group", async () => {
+  // The cases are loaded once; without patching the saved case's own result the
+  // banner cannot appear until a reload, which is the moment it is for.
+  renderExecution({
+    initialGroupId: "0918-id",
+    loadCases: async () => [
+      testCase("c1", "第一条", null, "B-001", "通过"),
+      testCase("c2", "第二条", null, "B-002", null)
+    ]
+  });
+
+  await screen.findByText("第二条");
+  await userEvent.click(screen.getByRole("button", { name: "通过" }));
+  await userEvent.click(await screen.findByRole("button", { name: /保存结果/ }));
+
+  expect(await screen.findByText("本组已全部测过")).toBeVisible();
 });

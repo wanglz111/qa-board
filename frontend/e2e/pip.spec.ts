@@ -15,6 +15,9 @@ const CASE = {
   expect_absent: [],
   visual_check: "text_and_visual",
   prototype_note: null,
+  // Left unrun on purpose: the desk must open on the first case nobody has run,
+  // which is the branch a group of only-finished cases never reaches.
+  latest_result: null,
   reference_assets: []
 };
 

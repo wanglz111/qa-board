@@ -40,6 +40,7 @@ async function mockApi(page: Page) {
             expect_absent: [],
             visual_check: "text_and_visual",
             prototype_note: null,
+            latest_result: "不通过",
             reference_assets: []
           }
         ]
