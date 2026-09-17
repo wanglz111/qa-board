@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from typing import Any
 
 import pytest
 from sqlalchemy import select
@@ -12,6 +13,7 @@ from app.lark.provision import (
     provision_plan,
     rebuilt_table_name,
     retype_plan,
+    schema_order,
 )
 from app.models import Attempt, Group, GroupCase, LarkTarget, SyncJob
 
@@ -1175,3 +1177,65 @@ def test_rebuilding_a_table_reports_a_refused_creation(
     # Nothing was replaced, so the approved target is still the approved one.
     assert stored is not None and stored.execution_table_id == "tbl-runs"
     assert stored.confirmed_at is not None
+
+
+def _reference_layout(role: str) -> list[dict[str, Any]]:
+    """The headers a table this tool just built would answer with."""
+
+    return [
+        {
+            "field_id": f"fld-{index}",
+            "field_name": name,
+            "type": ROLE_SCHEMA[role][name].type_id,
+            # Lark reports which column is the primary one, and the order alone
+            # cannot tell: 用例 first is exactly what makes the layout right.
+            "is_primary": index == 0,
+        }
+        for index, name in enumerate(schema_order(role))
+    ]
+
+
+def test_rebuilding_a_table_already_in_the_reference_layout_is_refused(
+    lark_fake, authenticated_client, provision_group
+):
+    lark_fake.fields = _reference_layout("execution")
+
+    response = authenticated_client.post(
+        f"/api/groups/{provision_group.id}/lark/provision/rebuild",
+        json={"role": "execution", "acknowledge": True},
+    )
+
+    assert response.status_code == 409, response.text
+    assert "已经是参考表头" in response.json()["detail"]
+    # Nothing was created: a refusal must not leave a spare table behind.
+    assert lark_fake.created_tables == []
+
+
+def test_force_rebuilds_a_table_that_already_looks_right(
+    lark_fake, authenticated_client, provision_group
+):
+    lark_fake.fields = _reference_layout("execution")
+
+    response = authenticated_client.post(
+        f"/api/groups/{provision_group.id}/lark/provision/rebuild",
+        json={"role": "execution", "acknowledge": True, "force": True},
+    )
+
+    assert response.status_code == 200, response.text
+    assert lark_fake.created_tables
+
+
+def test_a_table_whose_headers_are_in_the_wrong_order_still_rebuilds(
+    lark_fake, authenticated_client, provision_group
+):
+    """The case the feature exists for: 优先级 first, everything else off."""
+
+    rows = _reference_layout("execution")
+    lark_fake.fields = [rows[2], rows[0], *rows[1:2], *rows[3:]]
+
+    response = authenticated_client.post(
+        f"/api/groups/{provision_group.id}/lark/provision/rebuild",
+        json={"role": "execution", "acknowledge": True},
+    )
+
+    assert response.status_code == 200, response.text

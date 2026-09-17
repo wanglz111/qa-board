@@ -580,6 +580,31 @@ class ProvisionTableRequest(BaseModel):
 class RebuildTableRequest(BaseModel):
     role: str
     acknowledge: bool = False
+    # 表头已经正确时重建是白建一张表、白写一遍全部记录，所以默认拒绝。
+    # 确实要一张干净的新表时，管理员显式越过这道闸。
+    force: bool = False
+
+
+def layout_matches(fields: Iterable[dict[str, Any]], role: str) -> bool:
+    """Whether a table already carries the reference headers.
+
+    Rebuilding such a table builds an identical one and rewrites every row of
+    the role for nothing — which is exactly what a second click on 重建 does.
+    The order alone is not enough: 用例 first is what makes the layout right,
+    and Lark reports that as the primary flag on the first column.
+    """
+
+    rows = list(fields)
+    order = schema_order(role)
+    if [str(field.get("field_name") or "") for field in rows] != order:
+        return False
+    if not rows or not rows[0].get("is_primary"):
+        # Without the primary flag we cannot claim the layout is right, and a
+        # refusal based on a guess would be worse than letting it run.
+        return False
+    return all(
+        ROLE_SCHEMA[role][name].matches(field) for name, field in zip(order, rows)
+    )
 
 
 def rebuilt_table_name(name: str) -> str:
@@ -651,6 +676,21 @@ def rebuild_table(
         raise HTTPException(
             status_code=409,
             detail=f"Lark 中找不到 {table_id} 这张数据表，请重新读取目标表",
+        )
+
+    try:
+        live_fields = client.list_fields(base_token, table_id)
+    except LarkError as error:
+        raise HTTPException(
+            status_code=409, detail=f"读取数据表字段失败：{error}"
+        ) from None
+    if not payload.force and layout_matches(live_fields, payload.role):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "这张表已经是参考表头（列序、主列与类型都对），重建只会新建一张一样的表"
+                "并把全部记录重写一遍；如果确实要一张干净的新表，请勾选「强制重建」"
+            ),
         )
 
     new_name = rebuilt_table_name(current_name)
