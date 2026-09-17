@@ -257,6 +257,13 @@ class FakeLark:
         ]
         self.wiki_nodes: dict[str, dict[str, Any]] = {}
         self.wiki_error = False
+        # An authenticated request Lark refuses with HTTP 401. ``unauthorized``
+        # refuses every one of them, ``unauthorized_once`` only the first.
+        self.unauthorized = False
+        self.unauthorized_once = False
+        # What the token exchange answers for ``expire``; None keeps the body
+        # exactly as Lark's response looked before this switch existed.
+        self.token_expire: int | str | None = None
         self.wiki_url = "https://tenant.larksuite.com/wiki/node-1?table=tbl-runs&view=vew-main"
         # Every base the double knows: name plus its (table_id, table_name) pairs.
         # `app-token` is the legacy base the history and outbox suites read.
@@ -430,6 +437,13 @@ class FakeLark:
     def handle(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
         self.requests.append({"method": request.method, "path": path})
+        if request.headers.get("Authorization") and (
+            self.unauthorized or self.unauthorized_once
+        ):
+            self.unauthorized_once = False
+            # The code stays generic: the live invalid-token code is not
+            # verifiable from here, and the client must not key off it anyway.
+            return httpx.Response(401, json={"code": 1, "msg": "invalid access token"})
         if request.method in ("PUT", "PATCH", "DELETE"):
             # The one mutation this app is allowed to make is a deliberate
             # header repair; every row stays read-only, exactly like live Lark.
@@ -441,7 +455,10 @@ class FakeLark:
                 self.put_calls.append(path)
             return httpx.Response(405, json={"code": 1, "msg": "legacy rows are read-only"})
         if path == "/open-apis/auth/v3/tenant_access_token/internal":
-            return httpx.Response(200, json={"code": 0, "data": {"tenant_access_token": "fake-token"}})
+            data: dict[str, Any] = {"tenant_access_token": "fake-token"}
+            if self.token_expire is not None:
+                data["expire"] = self.token_expire
+            return httpx.Response(200, json={"code": 0, "data": data})
         if path == "/open-apis/drive/v1/medias/upload_all":
             return self._upload_media(request)
         if path == "/open-apis/wiki/v2/spaces/get_node":
@@ -635,6 +652,17 @@ class FakeLark:
                 return httpx.Response(404, json={"code": 1, "msg": "unsupported base"})
             return httpx.Response(200, json={"code": 0, "data": {"app": {"name": base[0]}}})
         return httpx.Response(404, json={"code": 1, "msg": "unsupported path"})
+
+
+@pytest.fixture(autouse=True)
+def clean_lark_state():
+    """No shared client survives from one test into the next."""
+
+    import app.lark.client as lark_client_module
+
+    lark_client_module.reset_shared_client()
+    yield
+    lark_client_module.reset_shared_client()
 
 
 @pytest.fixture

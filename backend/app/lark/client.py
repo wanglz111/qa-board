@@ -19,8 +19,11 @@ PAGE_SIZE = 500
 # hours when Lark omits ``expire``.
 TOKEN_EXPIRY_MARGIN_SECONDS = 300
 DEFAULT_TOKEN_TTL_SECONDS = 7200
-# The process keeps one client for its whole life, so the call log has to be
-# bounded; the audit only ever reads the tail.
+# The process keeps one client for its whole life, so an unbounded call log
+# would grow for as long as the process runs. The bound never bites today
+# because every request-path test injects a fresh ``FakeLark``; a future test
+# that audits a long-lived shared client should assert against the double's
+# own unbounded request list instead.
 CALL_LOG_LIMIT = 1000
 
 # Only these methods are ever allowed to touch Lark records. The record audit in
@@ -34,6 +37,15 @@ class LarkError(RuntimeError):
 
 class LarkTimeout(LarkError):
     """The write may or may not have reached Lark: never retried blindly."""
+
+
+class _TokenRefused(LarkError):
+    """An authenticated call came back HTTP 401: Lark rejected the token.
+
+    Private, so ``_send`` can tell a stale token apart from any other refusal
+    and re-exchange it once; a caller sees a plain ``LarkError`` if the retry
+    is refused as well.
+    """
 
 
 # A write the app is not allowed to make is answered with HTTP 401/403 (or an
@@ -181,13 +193,54 @@ class LarkClient:
                 ttl = int(payload.get("expire") or DEFAULT_TOKEN_TTL_SECONDS)
             except (TypeError, ValueError):
                 ttl = DEFAULT_TOKEN_TTL_SECONDS
+            # Lark's unit is seconds; anything bigger than the documented two
+            # hours (milliseconds, a bogus number) would pin the token for the
+            # whole process lifetime, which is the failure this cache exists to
+            # avoid. Never trust a longer life than the documented one.
+            ttl = min(ttl, DEFAULT_TOKEN_TTL_SECONDS)
             self._token = str(token)
             self._token_expires_at = time.monotonic() + max(
                 ttl - TOKEN_EXPIRY_MARGIN_SECONDS, 60
             )
             return self._token
 
+    def _forget_token(self) -> None:
+        """Drop the cached token so the next call really exchanges a new one."""
+
+        with self._token_lock:
+            self._token = None
+            self._token_expires_at = 0.0
+
     def _send(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        json: dict[str, Any] | None = None,
+        authenticated: bool = True,
+    ) -> dict[str, Any]:
+        """One read, re-buying the token once when Lark refuses it.
+
+        A tenant token can be revoked before its deadline (an administrator
+        rotating the app secret, for example), and the process now reuses a
+        token until then. Re-exchanging once on a refusal keeps that cache from
+        turning a revoked token into an outage that only a restart clears.
+        """
+
+        try:
+            return self._send_once(
+                method, path, params=params, json=json, authenticated=authenticated
+            )
+        except _TokenRefused:
+            # Exactly one retry: if the fresh token is refused too, the refusal
+            # is real and has to reach the caller instead of looping.
+            self._forget_token()
+            return self._send_once(
+                method, path, params=params, json=json, authenticated=authenticated
+            )
+
+    def _send_once(
         self,
         method: str,
         path: str,
@@ -205,6 +258,15 @@ class LarkClient:
                 method, path, params=params, json=json, headers=headers
             )
             response.raise_for_status()
+        except httpx.HTTPStatusError as error:
+            # A 401 is the only token refusal this code can pin down: the live
+            # API's invalid-token code is not verifiable from here, so no
+            # numeric code is guessed. A 403 stays a permission problem — this
+            # codebase answers it with ``WRITE_PERMISSION_HINT``, and dropping
+            # the token for it would only buy a pointless exchange.
+            if authenticated and error.response.status_code == 401:
+                raise _TokenRefused("Lark refused the token (HTTP 401)") from None
+            raise LarkError(f"Lark request failed: {type(error).__name__}") from None
         except httpx.HTTPError as error:
             # urllib-style messages can embed the request URL; keep only the class.
             raise LarkError(f"Lark request failed: {type(error).__name__}") from None
