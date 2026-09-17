@@ -34,6 +34,7 @@ backups/
 # Local tooling
 .DS_Store
 .codegraph/
+.dsh-project-memory/
 
 # Local review work logs (deliverable plans live in docs/superpowers/plans/)
 /task_plan.md
