@@ -1458,3 +1458,52 @@ def test_a_reserved_retest_is_not_counted_as_a_rebuild_row(
     # The reservation has no result yet: it is not one of the rows a rebuild
     # writes again.
     assert plan["rebuild"] == {"execution": 2, "bug": 1}
+
+
+def test_the_plan_promises_only_the_rows_the_rebuild_will_re_file(
+    lark_fake, authenticated_client, provision_group, db_session
+):
+    """The number the dialog shows must equal the rebuild's own requeued count.
+
+    Recording a round before choosing the Lark table is the ordinary order of
+    work, and the confirmation gate holds those rows back: no SyncJob exists
+    for them, so a rebuild resets nothing and writes nothing. The plan has to
+    say 0 there rather than promise a write the confirmation deliberately
+    withheld.
+    """
+
+    target = db_session.scalar(
+        select(LarkTarget).where(LarkTarget.group_id == provision_group.id)
+    )
+    assert target is not None
+    # The state before the group's first approval: results are committed
+    # locally, but the write gate has not let any job through yet.
+    target.confirmed_at = None
+    db_session.commit()
+
+    submitted = authenticated_client.post(
+        f"/api/groups/{provision_group.id}/cases/B-001/attempts",
+        json={
+            "result": "不通过",
+            "note": "先记结果，后配表",
+            "idempotency_key": "pre-confirmation-count",
+        },
+    )
+    assert submitted.status_code == 201, submitted.text
+
+    # The administrator confirms the same target afterwards. Confirming does
+    # not mint the jobs of rows that were already committed without one.
+    target.confirmed_at = datetime.now(timezone.utc)
+    db_session.commit()
+
+    plan = authenticated_client.get(
+        f"/api/groups/{provision_group.id}/lark/provision"
+    ).json()
+    rebuilt = authenticated_client.post(
+        f"/api/groups/{provision_group.id}/lark/provision/rebuild",
+        json={"role": "execution", "acknowledge": True},
+    ).json()
+
+    assert rebuilt["requeued"] == 0, rebuilt
+    assert plan["rebuild"] == {"execution": 0, "bug": 0}
+    assert plan["rebuild"]["execution"] == rebuilt["requeued"]

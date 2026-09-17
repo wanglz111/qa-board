@@ -36,7 +36,7 @@ from app.lark.target import (
     serialize_target,
     target_for,
 )
-from app.models import Attempt, Group, GroupCase
+from app.models import Attempt, Group, GroupCase, SyncJob
 
 
 router = APIRouter(prefix="/api", dependencies=[Depends(require_admin)])
@@ -780,33 +780,31 @@ def rebuild_table(
 
 
 def _rebuild_counts(db: Session, group_id: UUID) -> dict[str, int]:
-    """How many rows a rebuild of each role would write again.
+    """How many rows a rebuild of each role will re-file.
 
-    Every committed result of the group is re-filed into the execution table;
-    only the failed ones raise a defect row.
+    Counted over ``SyncJob``, not over attempts: ``reset_jobs_for_rebuilt_table``
+    is an update of the jobs that exist and never inserts one, so a job is the
+    exact unit of work this number promises, and the dialog equals the
+    rebuild's own ``requeued`` count. An attempt committed before the group's
+    target was confirmed never got a job, and a row adopted from the table
+    (``source="reconcile"``) must never get one, so neither is a row this
+    rebuild will write.
 
-    "Result" means an execution-sourced attempt, the same set
-    ``enqueue_group_attempts`` queues: a row adopted from the table
-    (``source="reconcile"``) must never be written back, so counting it would
-    promise a write the rebuild will not make. The number still has one known
-    bound on the high side: an execution attempt committed before the group's
-    target was confirmed never got a ``SyncJob``, and a rebuild re-files jobs
-    rather than attempts, so such pre-confirmation history is counted here but
-    not written. Exact parity would join against ``SyncJob`` instead.
+    ``Attempt.state`` is kept as the record's own claim that it carries a
+    result. The two paths that mint jobs, ``enqueue_attempt_job`` and
+    ``enqueue_group_attempts``, already require ``source="execution"``, so that
+    filter would say nothing a job does not.
     """
 
-    committed = (
-        select(func.count(Attempt.id))
+    queued = (
+        select(func.count(SyncJob.id))
+        .join(Attempt, SyncJob.attempt_id == Attempt.id)
         .join(GroupCase, Attempt.group_case_id == GroupCase.id)
-        .where(
-            GroupCase.group_id == group_id,
-            Attempt.state == "committed",
-            Attempt.source == "execution",
-        )
+        .where(GroupCase.group_id == group_id, Attempt.state == "committed")
     )
-    failed = committed.where(Attempt.result == "不通过")
+    failed = queued.where(Attempt.result == "不通过")
     return {
-        "execution": int(db.scalar(committed) or 0),
+        "execution": int(db.scalar(queued) or 0),
         "bug": int(db.scalar(failed) or 0),
     }
 
