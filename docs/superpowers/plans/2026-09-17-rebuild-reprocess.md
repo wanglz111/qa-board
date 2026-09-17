@@ -251,6 +251,12 @@ def _rebuild_counts(db: Session, group_id: UUID) -> dict[str, int]:
     }
 ```
 
+> **评审后已改——这里数的是「attempt」而不是「job」，会多报。** 重建实际只 requeue **已有 `SyncJob`** 的行
+> （`reset_jobs_for_rebuilt_table` 是 `UPDATE sync_jobs`，从不插入），而 `enqueue_attempt_job` 要求目标已确认；
+> 于是「目标确认之前提交的结果」会被弹窗承诺、却一条也不会写。正确做法是按 `SyncJob → Attempt → GroupCase`
+> 数 job（与本仓库 `sync_counts` 的写法一致），这样这个数字与重建返回的 `requeued` **恒等**；并补一条
+> 断言 `plan["rebuild"]["execution"] == rebuild(...)["requeued"]` 的 parity 测试钉住它。
+
 `read_provision_plan` 的返回里加一行（放在 `"roles": roles,` 之后即可）：
 
 ```python
