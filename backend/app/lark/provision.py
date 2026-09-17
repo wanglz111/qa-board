@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.auth import require_admin
 from app.db import get_db
+from app.execution import _drop_lark_snapshot
 from app.lark.client import LarkClient, LarkError, get_lark_client
 from app.lark.fields import (
     BUG_PRIORITY_OPTIONS,
@@ -451,6 +452,7 @@ def provision_fields(
         # A structure change invalidates the earlier write approval.
         locked.confirmed_at = None
     db.commit()
+    _drop_lark_snapshot(db, group_id)
     db.refresh(locked)
     return {
         "created_fields": created,
@@ -545,6 +547,7 @@ def retype_fields(
     if retyped:
         locked.confirmed_at = None
     db.commit()
+    _drop_lark_snapshot(db, group_id)
     db.refresh(locked)
     return {
         "retyped_fields": retyped,
@@ -699,6 +702,7 @@ def rebuild_table(
         db, group_id, role=payload.role, fingerprint=draft.fingerprint
     )
     db.commit()
+    _drop_lark_snapshot(db, group_id)
     db.refresh(locked)
     return {
         "role": payload.role,

@@ -11,13 +11,17 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.auth import require_admin
+from app.config import settings
 from app.db import get_db
+from app.lark import cache as lark_cache
+from app.lark.attachments import cache_directory, cached_download
 from app.lark.client import LarkClient, LarkError, get_lark_client
 from app.lark.fields import (
     DATE_FIELD_CANDIDATES,
     DESCRIPTION_FIELDS,
     LINK_FIELDS,
 )
+from app.lark.names import read_target_names
 from app.lark.target import TargetDraft, read_draft_state, target_for
 from app.models import GroupCase, LarkHistoryRef, LarkTarget
 
@@ -337,11 +341,17 @@ def case_lark_history(
     if target is None:
         return _unavailable_history(code, ["该组尚未选择 Lark 表"], "该组尚未选择 Lark 表")
 
-    state = read_target_state(client, target)
+    state = read_target_names(client, target)
     if state["read_errors"]:
         return _unavailable_history(code, state["read_errors"], "Lark 目标表不可读")
 
-    records = client.list_records(target.execution_base_token, target.execution_table_id)
+    records = lark_cache.read_records(
+        target.execution_base_token,
+        target.execution_table_id,
+        lambda: client.list_records(
+            target.execution_base_token, target.execution_table_id
+        ),
+    )
     history = history_for(records, code)
     case_history = history.original + history.retests
     references = {
@@ -355,7 +365,11 @@ def case_lark_history(
         for record in case_history
     }
     bugs = match_bugs(
-        client.list_records(target.bug_base_token, target.bug_table_id),
+        lark_cache.read_records(
+            target.bug_base_token,
+            target.bug_table_id,
+            lambda: client.list_records(target.bug_base_token, target.bug_table_id),
+        ),
         code,
     )
     db.commit()
@@ -457,7 +471,11 @@ def legacy_attachment(
         raise HTTPException(status_code=404, detail="Attachment not found")
 
     try:
-        content, content_type = client.download_media(file_token)
+        content, content_type = cached_download(
+            client,
+            file_token,
+            directory=cache_directory(settings.upload_dir),
+        )
     except LarkError as error:
         raise HTTPException(status_code=502, detail=str(error)) from None
     if len(content) > MAX_ATTACHMENT_BYTES:
@@ -471,7 +489,9 @@ def legacy_attachment(
         # Never echo an upstream content type straight into the browser.
         media_type=declared if declared in ALLOWED_ATTACHMENT_TYPES else "application/octet-stream",
         headers={
-            "Cache-Control": "private, no-store",
+            # The token and the bytes behind it never change, so the browser may
+            # keep this picture instead of asking for it on every case switch.
+            "Cache-Control": "private, max-age=86400",
             "X-Content-Type-Options": "nosniff",
             "Content-Disposition": f'attachment; filename="{filename}"',
         },

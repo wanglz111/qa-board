@@ -11,7 +11,8 @@ from sqlalchemy.orm import Session
 
 from app.auth import require_admin
 from app.db import get_db
-from app.execution import allocate_attempt
+from app.execution import _drop_lark_snapshot, allocate_attempt
+from app.lark import cache as lark_cache
 from app.lark.client import LarkClient, LarkError, get_lark_client
 from app.lark.history import parse_case_reference, record_case_text, record_fields
 from app.lark.target import target_for
@@ -204,8 +205,12 @@ def read_reconcile(
         read_errors.append("该组尚未选择 Lark 表")
     else:
         try:
-            remote = client.list_records(
-                target.execution_base_token, target.execution_table_id
+            remote = lark_cache.read_records(
+                target.execution_base_token,
+                target.execution_table_id,
+                lambda: client.list_records(
+                    target.execution_base_token, target.execution_table_id
+                ),
             )
             source_table_name = target.execution_table_name
         except LarkError as error:
@@ -331,6 +336,8 @@ def _apply_decisions(
         mark.remote_record_id = (row["remote"] or {}).get("record_id")
         db.add(mark)
     db.commit()
+    # Adopted rows are local copies of the table; the cached read is now behind.
+    _drop_lark_snapshot(db, group_id)
     return {"pulled": pulled, "kept": kept, "skipped": skipped}
 
 

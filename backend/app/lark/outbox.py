@@ -421,6 +421,15 @@ def read_sync(group_id: UUID, db: Annotated[Session, Depends(get_db)]) -> dict[s
         )
     )
     counts = sync_counts(db, group_id)
+    if counts["queued"] == 0:
+        # Nothing is queued, so whatever the page cached before the worker ran
+        # is now known to be out of date. The page re-reads the panel right after
+        # this call, which is exactly when a stale snapshot would show up.
+        from app.lark import cache as lark_cache
+
+        target = target_for(db, group_id)
+        if target is not None:
+            lark_cache.invalidate_target(target)
     return {
         "confirmed": confirmed,
         "pending_attempts": int(pending_attempts or 0),

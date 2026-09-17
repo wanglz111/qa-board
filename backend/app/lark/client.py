@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import threading
+import time
+from collections import deque
 from dataclasses import dataclass
 from typing import Any
 
@@ -10,6 +13,15 @@ from app.config import Settings, settings as global_settings
 
 TOKEN_PATH = "/open-apis/auth/v3/tenant_access_token/internal"
 PAGE_SIZE = 500
+
+# A tenant token is good for two hours. Renew inside the margin so a long-
+# running worker never races the expiry, and fall back to the documented two
+# hours when Lark omits ``expire``.
+TOKEN_EXPIRY_MARGIN_SECONDS = 300
+DEFAULT_TOKEN_TTL_SECONDS = 7200
+# The process keeps one client for its whole life, so the call log has to be
+# bounded; the audit only ever reads the tail.
+CALL_LOG_LIMIT = 1000
 
 # Only these methods are ever allowed to touch Lark records. The record audit in
 # tests asserts that no legacy row is created, updated or deleted.
@@ -83,8 +95,34 @@ def build_lark_client(
     )
 
 
+_shared_client: LarkClient | None = None
+_shared_lock = threading.Lock()
+
+
 def get_lark_client() -> LarkClient:
-    return build_lark_client()
+    """The process's one client, so a token and a connection pool are reused.
+
+    Reading a group costs several calls in a row, and every one of them used to
+    open a connection and exchange a fresh tenant token. One client per process
+    removes both; ``_token_value`` renews the token when it lapses.
+    """
+
+    global _shared_client
+    if _shared_client is None:
+        with _shared_lock:
+            if _shared_client is None:
+                _shared_client = build_lark_client()
+    return _shared_client
+
+
+def reset_shared_client() -> None:
+    """Drop the process client. Tests use it; no runtime path should need to."""
+
+    global _shared_client
+    with _shared_lock:
+        if _shared_client is not None:
+            _shared_client.close()
+        _shared_client = None
 
 
 class LarkClient:
@@ -106,8 +144,10 @@ class LarkClient:
         self.base_url = base_url.rstrip("/")
         self.app_id = app_id
         self.app_secret = app_secret
-        self.calls: list[LarkCall] = []
+        self.calls: deque[LarkCall] = deque(maxlen=CALL_LOG_LIMIT)
         self._token: str | None = None
+        self._token_expires_at = 0.0
+        self._token_lock = threading.Lock()
         self._client = httpx.Client(
             base_url=self.base_url, transport=transport, timeout=timeout
         )
@@ -122,7 +162,12 @@ class LarkClient:
     def _token_value(self) -> str:
         if not self.app_id or not self.app_secret:
             raise LarkError("Lark credentials are not configured")
-        if self._token is None:
+        if self._token is not None and time.monotonic() < self._token_expires_at:
+            return self._token
+        with self._token_lock:
+            # Another thread may have renewed it while this one waited.
+            if self._token is not None and time.monotonic() < self._token_expires_at:
+                return self._token
             payload = self._send(
                 "POST",
                 TOKEN_PATH,
@@ -132,8 +177,15 @@ class LarkClient:
             token = payload.get("tenant_access_token")
             if not token:
                 raise LarkError("Lark token exchange returned no token")
+            try:
+                ttl = int(payload.get("expire") or DEFAULT_TOKEN_TTL_SECONDS)
+            except (TypeError, ValueError):
+                ttl = DEFAULT_TOKEN_TTL_SECONDS
             self._token = str(token)
-        return self._token
+            self._token_expires_at = time.monotonic() + max(
+                ttl - TOKEN_EXPIRY_MARGIN_SECONDS, 60
+            )
+            return self._token
 
     def _send(
         self,

@@ -590,3 +590,35 @@ def test_a_table_must_exist_in_the_base_the_payload_names(
             LarkTargetRevision.group_id == imported_group.id
         )
     ) is None
+
+
+def test_reading_a_target_in_one_base_reads_that_base_once(
+    lark_fake, authenticated_client, confirmed_group, db_session
+):
+    """Both roles in one base: the base metadata and its table list are read once.
+
+    The shared ``confirmed_group`` fixture keeps its two roles in two different
+    bases (``app-exec`` and ``app-bug``), where this cannot be observed: two
+    distinct bases are each asked for exactly once with or without the
+    optimisation. The stored target is re-pointed at a single base — both tables
+    live in ``app-exec`` — so this really is the same-base case the change is
+    about.
+    """
+
+    target = db_session.scalar(
+        select(LarkTarget).where(LarkTarget.group_id == confirmed_group.id)
+    )
+    target.bug_base_token = "app-exec"
+    target.bug_base_name = "执行库"
+    target.bug_table_id = "tbl-bugs"
+    target.bug_table_name = "缺陷记录"
+    db_session.commit()
+
+    lark_fake.requests.clear()
+
+    response = authenticated_client.get(f"/api/groups/{confirmed_group.id}/lark/target")
+
+    assert response.status_code == 200, response.text
+    paths = [request["path"] for request in lark_fake.requests]
+    assert paths.count("/open-apis/bitable/v1/apps/app-exec") == 1
+    assert paths.count("/open-apis/bitable/v1/apps/app-exec/tables") == 1

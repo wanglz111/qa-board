@@ -40,7 +40,7 @@
 - Modify: `backend/app/lark/client.py`
 - Test: `backend/tests/test_lark_client.py`（新建）
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 新建 `backend/tests/test_lark_client.py`：
 
@@ -102,12 +102,12 @@ def test_the_token_is_exchanged_once_and_renewed_only_when_it_lapses(lark_fake):
     assert len([r for r in lark_fake.requests if r["path"] == token_path]) == 2
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cd backend && TEST_DATABASE_URL='postgresql+psycopg://testdeck:testdeck@127.0.0.1:5433/testdeck_test' .venv/bin/python -m pytest tests/test_lark_client.py -q`
 Expected: FAIL — `module 'app.lark.client' has no attribute 'reset_shared_client'`；第三个测试还会因为 token 每次重取而失败。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `backend/app/lark/client.py` 顶部 imports 换成：
 
@@ -212,12 +212,12 @@ def reset_shared_client() -> None:
             return self._token
 ```
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `cd backend && TEST_DATABASE_URL='postgresql+psycopg://testdeck:testdeck@127.0.0.1:5433/testdeck_test' .venv/bin/python -m pytest tests/test_lark_client.py -q`
 Expected: PASS（3 passed）
 
-- [ ] **Step 5: 跑全套确认没有回归**
+- [x] **Step 5: 跑全套确认没有回归**
 
 Run: `cd backend && TEST_DATABASE_URL='postgresql+psycopg://testdeck:testdeck@127.0.0.1:5433/testdeck_test' .venv/bin/python -m pytest -q`
 Expected: PASS（以 347 passed 为基线）
@@ -239,9 +239,11 @@ git commit -m "perf(lark): reuse one client and renew the token instead of re-bu
 - Modify: `backend/app/lark/target.py`（`read_draft_state`）
 - Test: `backend/tests/test_lark_target.py`（追加）
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 在 `backend/tests/test_lark_target.py` 末尾追加：
+
+> **执行偏差（agent A）:** `confirmed_group` fixture 的两个角色其实落在**两个** base（`app-exec` + `app-bug`），照抄片段会让断言在实现前就通过（两个不同的 base 各读一次本来就等于 1）。按计划里那句「若实测不是同一个 base，就改成按实际 base token 断言，并在注释里写明它是「同 base」用例」，测试在断言前把存储的 target 改成两个角色同在一个 base（`app-exec` 的 `tbl-runs` + `tbl-bugs`），并在 docstring 里写明这是「同 base」用例。观察到的失败计数确实是 2。
 
 ```python
 def test_reading_a_target_in_one_base_reads_that_base_once(
@@ -261,12 +263,12 @@ def test_reading_a_target_in_one_base_reads_that_base_once(
 
 > 先确认 `confirmed_group` fixture 的两个角色都在 `app-exec`（`tests/conftest.py` 的 `bases` 与 target 构造）。若实测不是同一个 base，就改成按实际 base token 断言，并在注释里写明它是「同 base」用例。
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cd backend && TEST_DATABASE_URL='postgresql+psycopg://testdeck:testdeck@127.0.0.1:5433/testdeck_test' .venv/bin/python -m pytest "tests/test_lark_target.py::test_reading_a_target_in_one_base_reads_that_base_once" -q`
 Expected: FAIL — 计数为 2。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `backend/app/lark/target.py` 的 `read_draft_state` 开头：
 
@@ -293,10 +295,10 @@ def read_draft_state(client: LarkClient, draft: TargetDraft) -> dict[str, Any]:
 
 （其余行，从 `execution_table_name = _table_name(...)` 到函数结尾，保持不变。）
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `cd backend && TEST_DATABASE_URL='postgresql+psycopg://testdeck:testdeck@127.0.0.1:5433/testdeck_test' .venv/bin/python -m pytest tests/test_lark_target.py -q`
-Expected: PASS
+Expected: PASS（29 passed）
 
 - [ ] **Step 5: 提交**
 
@@ -316,7 +318,7 @@ git commit -m "perf(lark): read one base once when both roles live in it"
 - Modify: `backend/app/lark/history.py`（`case_lark_history`）
 - Test: `backend/tests/test_lark_history.py`（追加）
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 在 `backend/tests/test_lark_history.py` 末尾追加：
 
@@ -349,12 +351,12 @@ def test_opening_one_case_reads_each_table_once_and_no_fields(
     assert body["bug_table_name"] == "缺陷记录"
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cd backend && TEST_DATABASE_URL='postgresql+psycopg://testdeck:testdeck@127.0.0.1:5433/testdeck_test' .venv/bin/python -m pytest "tests/test_lark_history.py::test_opening_one_case_reads_each_table_once_and_no_fields" -q`
 Expected: FAIL — GET 清单里出现两条 `/fields`。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 新建 `backend/app/lark/names.py`：
 
@@ -442,12 +444,12 @@ def read_target_names(client: LarkClient, target: Any) -> dict[str, Any]:
 并在 `history.py` 顶部加 `from app.lark.names import read_target_names`。
 `read_target_state` 必须保留：`GET /lark/target` 仍然需要 fields 来算 `schema_errors` 与指纹。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `cd backend && TEST_DATABASE_URL='postgresql+psycopg://testdeck:testdeck@127.0.0.1:5433/testdeck_test' .venv/bin/python -m pytest tests/test_lark_history.py -q`
 Expected: PASS
 
-- [ ] **Step 5: 更新会被这次改动打破的既有测试**
+- [x] **Step 5: 更新会被这次改动打破的既有测试**
 
 `tests/test_lark_history.py::test_case_history_endpoint_reports_a_target_that_cannot_be_read` 现在靠
 `lark_fake.fields_error = True` 制造「目标表读不了」。新的历史路径不读 fields，所以这个开关不再能触发它——
@@ -471,10 +473,10 @@ Expected: PASS
 然后把那条测试的 `lark_fake.fields_error = True` 换成 `lark_fake.bases_error = True`，
 其余断言（`available is False`、`read_errors` 非空、没有读 records）保持不变——它们描述的正是这次要保住的契约。
 
-- [ ] **Step 6: 跑全套**
+- [x] **Step 6: 跑全套**
 
 Run: `cd backend && TEST_DATABASE_URL='postgresql+psycopg://testdeck:testdeck@127.0.0.1:5433/testdeck_test' .venv/bin/python -m pytest -q`
-Expected: PASS。若某个旧测试断言了历史面板的完整请求清单，按新清单更新**断言**，不要为了迁就旧断言把 fields 读加回去。
+Expected: PASS（实测 353 passed；其中 1 个是同一仓库并行工作的另一个 agent 新增的测试）。若某个旧测试断言了历史面板的完整请求清单，按新清单更新**断言**，不要为了迁就旧断言把 fields 读加回去。
 
 - [ ] **Step 7: 提交**
 
@@ -494,7 +496,7 @@ git commit -m "perf(lark): read a case's table names without reading the schema"
 - Test: `backend/tests/test_lark_cache.py`（新建）
 - Modify: `backend/tests/conftest.py`（autouse 清理）
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 新建 `backend/tests/test_lark_cache.py`：
 
@@ -565,12 +567,12 @@ def test_the_cached_list_is_not_handed_out_for_mutation():
     assert lark_cache.read_records("app-exec", "tbl-runs", lambda: []) == stored
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cd backend && TEST_DATABASE_URL='postgresql+psycopg://testdeck:testdeck@127.0.0.1:5433/testdeck_test' .venv/bin/python -m pytest tests/test_lark_cache.py -q`
-Expected: FAIL — `ModuleNotFoundError: No module named 'app.lark.cache'`
+Expected: FAIL — `ModuleNotFoundError: No module named 'app.lark.cache'`（实测为 collection 期 `ImportError while importing test module`）
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 新建 `backend/app/lark/cache.py`：
 
@@ -644,12 +646,17 @@ def clear() -> None:
         _entries.clear()
 ```
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `cd backend && TEST_DATABASE_URL='postgresql+psycopg://testdeck:testdeck@127.0.0.1:5433/testdeck_test' .venv/bin/python -m pytest tests/test_lark_cache.py -q`
 Expected: PASS（4 passed）
 
-- [ ] **Step 5: 让测试之间互不污染**
+- [x] **Step 5: 让测试之间互不污染**
+
+> **执行偏差（agent A）:** 该 fixture 另外把 `app.lark.history.settings.upload_dir` 指向 `tmp_path`。Task 6 的附件落盘缓存会跨测试（乃至跨 session）留下 `lark-attachments/<token>`，既有测试
+> `test_legacy_attachment_reports_unavailable_lark_object`、`test_legacy_attachment_denied_by_lark_is_reported_without_leaks`、
+> `test_attachment_proxy_sets_nosniff_and_a_safe_content_type` 会因为读到上一轮缓存的文件而拿到 200 而不是 502，新测试自己也会因磁盘残留而失败；
+> 同时它会在 checkout 里生成未被 gitignore 的 `backend/lark-attachments/`。重定向到 `tmp_path` 后每个测试都是干净的缓存，且不再写进仓库。
 
 在 `backend/tests/conftest.py` 的 `lark_fake` fixture 之前加：
 
@@ -686,7 +693,7 @@ git commit -m "feat(lark): snapshot a table's records for a minute instead of re
 - Modify: 复测路由与 `/groups/{id}/sync` 所在文件
 - Test: `backend/tests/test_lark_history.py`（追加）
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 在 `backend/tests/test_lark_history.py` 末尾追加：
 
@@ -749,12 +756,16 @@ def test_submitting_a_result_drops_the_snapshot(
     assert [record["record_id"] for record in body["original"]] == ["mine"]
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cd backend && TEST_DATABASE_URL='postgresql+psycopg://testdeck:testdeck@127.0.0.1:5433/testdeck_test' .venv/bin/python -m pytest tests/test_lark_history.py -q`
 Expected: 两个新测试 FAIL（还没接快照；第二个读到的是旧快照）。
 
-- [ ] **Step 3: 实现**
+> **执行偏差（agent A）:** 两点现场修正。
+> 1. `confirmed_group` 只有 `B-001`，片段里的 `B-002` 会 404；改用既有 `add_case` fixture 补一条 `B-002`。
+> 2. 顺序上必须先接读路径、再写失效，否则第二个测试在缓存还没接上时反而通过（没有缓存就没有「旧快照」）。因此实际观察顺序是：先只接 `history.py`/`reconcile.py` 的读路径 → 第二个测试以 `assert [] == ['mine']` 失败（正是计划预告的「第二个读到的是旧快照」）→ 再加 `_drop_lark_snapshot` 与各写入口。
+
+- [x] **Step 3: 实现**
 
 `backend/app/lark/history.py` 顶部加 `from app.lark import cache as lark_cache`，并把两次读取换成：
 
@@ -820,15 +831,15 @@ def _drop_lark_snapshot(db: Session, group_id: UUID) -> None:
 
 （`queued` 用该函数里已有的排队计数变量名。）
 
-- [ ] **Step 4: 跑相关测试**
+- [x] **Step 4: 跑相关测试**
 
 Run: `cd backend && TEST_DATABASE_URL='postgresql+psycopg://testdeck:testdeck@127.0.0.1:5433/testdeck_test' .venv/bin/python -m pytest tests/test_lark_history.py tests/test_lark_reconcile.py tests/test_execution.py tests/test_lark_target.py -q`
-Expected: PASS
+Expected: PASS（实测 86 passed）
 
-- [ ] **Step 5: 跑全套**
+- [x] **Step 5: 跑全套**
 
 Run: `cd backend && TEST_DATABASE_URL='postgresql+psycopg://testdeck:testdeck@127.0.0.1:5433/testdeck_test' .venv/bin/python -m pytest -q`
-Expected: PASS。断言「读了几次 records」的旧测试会因命中快照而变少，更新断言并注明它依赖快照。
+Expected: PASS（实测 359 passed）。断言「读了几次 records」的旧测试会因命中快照而变少，更新断言并注明它依赖快照——**本次没有任何旧断言因此需要改**，所有既有读次数断言都是在单个测试内读一次，未受影响。
 
 - [ ] **Step 6: 提交**
 
@@ -836,6 +847,10 @@ Expected: PASS。断言「读了几次 records」的旧测试会因命中快照�
 git add backend/app/lark/history.py backend/app/lark/reconcile.py backend/app/execution.py
 git commit -m "perf(lark): serve repeat reads from the snapshot and drop it on our own writes"
 ```
+
+> **执行偏差（agent A）:** `GET /groups/{group_id}/sync` 里没有名为 `queued` 的局部变量，排队计数来自 `counts = sync_counts(...)`，因此判断写成 `if counts["queued"] == 0:`。
+> 另外片段只点名 `provision*`/`target confirm/save`，实现落在：`reconcile._apply_decisions`、`target.save_target`、`target.confirm_target`（后两者用函数内延迟 import，因为 `app.execution` 经 outbox 反向依赖 `app.lark.target`，模块级 import 成环）、`provision.provision_fields`、`provision.retype_fields`、`provision.rebuild_table`。
+> `provision_table` 未加：它既不 commit 也不改本组 target，新建的表要等 `save_target` 指过去才会被读，而那条路径已经失效。
 
 ---
 
@@ -848,7 +863,7 @@ git commit -m "perf(lark): serve repeat reads from the snapshot and drop it on o
 - Modify: `backend/app/lark/history.py`（`legacy_attachment`）
 - Test: `backend/tests/test_lark_history.py`（追加）
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 在 `backend/tests/test_lark_history.py` 末尾追加：
 
@@ -890,12 +905,12 @@ def test_the_same_legacy_attachment_is_downloaded_once(
     assert first.headers["cache-control"] == "private, max-age=86400"
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cd backend && TEST_DATABASE_URL='postgresql+psycopg://testdeck:testdeck@127.0.0.1:5433/testdeck_test' .venv/bin/python -m pytest "tests/test_lark_history.py::test_the_same_legacy_attachment_is_downloaded_once" -q`
-Expected: FAIL — 下载两次，且 `cache-control` 是 `private, no-store`。
+Expected: FAIL — 下载两次，且 `cache-control` 是 `private, no-store`。（实测先撞到下载两次。）
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 新建 `backend/app/lark/attachments.py`：
 
@@ -969,15 +984,21 @@ def cached_download(
 `history.py` 需要 `from app.config import settings` 与
 `from app.lark.attachments import cache_directory, cached_download`。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `cd backend && TEST_DATABASE_URL='postgresql+psycopg://testdeck:testdeck@127.0.0.1:5433/testdeck_test' .venv/bin/python -m pytest tests/test_lark_history.py -q`
-Expected: PASS
+Expected: PASS（实测 22 passed）
 
-- [ ] **Step 5: 跑全套**
+> **执行偏差（agent A）:** 改响应头为 `private, max-age=86400` 会直接推翻既有断言
+> `tests/test_lark_history.py::test_legacy_attachment_proxy_is_private_and_hides_the_token` 里的
+> `assert response.headers["cache-control"] == "private, no-store"`。这是本步被明确要求的契约变更没有第二种可能，
+> 因此把它改成 `private, max-age=86400`（其余断言一字未动）；此处**超出了授权清单的字面范围**，已在报告里单列请复核。
+> 另：磁盘缓存的跨测试污染由 Task 4 Step 5 的 fixture 重定向到 `tmp_path` 解决（见该步偏差说明）。
+
+- [x] **Step 5: 跑全套**
 
 Run: `cd backend && TEST_DATABASE_URL='postgresql+psycopg://testdeck:testdeck@127.0.0.1:5433/testdeck_test' .venv/bin/python -m pytest -q`
-Expected: PASS
+Expected: PASS（实测 360 passed）
 
 - [ ] **Step 6: 提交**
 

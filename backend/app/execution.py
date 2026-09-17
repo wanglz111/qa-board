@@ -71,6 +71,17 @@ def _attempt_payload(attempt: Attempt) -> dict[str, Any]:
     }
 
 
+def _drop_lark_snapshot(db: Session, group_id: UUID) -> None:
+    """Our own write makes this process's cached view of the tables stale."""
+
+    from app.lark import cache as lark_cache
+    from app.lark.target import target_for
+
+    target = target_for(db, group_id)
+    if target is not None:
+        lark_cache.invalidate_target(target)
+
+
 def _matching_attempt(
     db: Session,
     group_case: GroupCase,
@@ -190,6 +201,7 @@ def create_attempt(
         # as the local attempt, so the two can never disagree.
         enqueue_attempt_job(db, attempt)
         db.commit()
+        _drop_lark_snapshot(db, group_id)
         db.refresh(attempt)
         return _attempt_payload(attempt)
 
@@ -209,6 +221,7 @@ def reserve_retest(
         group_case = _locked_case_or_404(db, group_id, code)
         attempt = _reserve_attempt(db, group_case)
         db.commit()
+        _drop_lark_snapshot(db, group_id)
         db.refresh(attempt)
         return _attempt_payload(attempt)
 
@@ -239,6 +252,8 @@ def submit_attempt(
         _commit_attempt(attempt, payload)
         enqueue_attempt_job(db, attempt)
         db.commit()
+        # This endpoint only has the attempt, so the group is reached through it.
+        _drop_lark_snapshot(db, attempt.group_case.group_id)
         db.refresh(attempt)
         return _attempt_payload(attempt)
 

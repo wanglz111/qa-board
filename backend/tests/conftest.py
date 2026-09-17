@@ -303,6 +303,9 @@ class FakeLark:
         self.media_unauthorized = False
         self.upload_error = False
         self.fields_error = False
+        # A base the app cannot read at all: metadata and the table listing
+        # both refuse, which is what an unreadable target looks like.
+        self.bases_error = False
         self.field_create_error = False
         self.client = LarkClient(
             base_url="https://open.feishu.test",
@@ -430,6 +433,8 @@ class FakeLark:
     def handle(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
         self.requests.append({"method": request.method, "path": path})
+        if self.bases_error and "/apps/" in path and "/tables/" not in path:
+            return httpx.Response(500, json={"code": 1, "msg": "base unavailable"})
         if request.method in ("PUT", "PATCH", "DELETE"):
             # The one mutation this app is allowed to make is a deliberate
             # header repair; every row stays read-only, exactly like live Lark.
@@ -635,6 +640,29 @@ class FakeLark:
                 return httpx.Response(404, json={"code": 1, "msg": "unsupported base"})
             return httpx.Response(200, json={"code": 0, "data": {"app": {"name": base[0]}}})
         return httpx.Response(404, json={"code": 1, "msg": "unsupported path"})
+
+
+@pytest.fixture(autouse=True)
+def clean_lark_state(tmp_path, monkeypatch):
+    """No snapshot, shared client or attachment file survives into the next test."""
+
+    import app.lark.cache as lark_cache
+    import app.lark.client as lark_client_module
+    import app.lark.history as lark_history
+
+    # The legacy-attachment disk cache outlives a test by design, so during the
+    # suite it is redirected per test: a file one test fetched must never answer
+    # another test's read, and the tests must not write into the checkout.
+    monkeypatch.setattr(
+        lark_history,
+        "settings",
+        replace(settings, upload_dir=str(tmp_path / "uploads")),
+    )
+    lark_cache.clear()
+    lark_client_module.reset_shared_client()
+    yield
+    lark_cache.clear()
+    lark_client_module.reset_shared_client()
 
 
 @pytest.fixture
