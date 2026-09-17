@@ -163,3 +163,30 @@ def test_each_case_carries_its_own_latest_result(authenticated_client, csv_book)
     assert skipped.status_code == 201, skipped.text
     cases = authenticated_client.get(f"/api/groups/{group_id}/cases").json()
     assert {case["code"]: case["latest_result"] for case in cases}["B-003"] == "未执行"
+
+
+def test_latest_committed_attempt_wins_over_an_earlier_one(
+    authenticated_client, csv_book
+):
+    """A case run twice reports the newer result, not the first one."""
+
+    preview = preview_csv(authenticated_client, csv_book).json()
+    created = authenticated_client.post(
+        "/api/import/confirm",
+        json={"ticket_id": preview["ticket_id"], "name": "0918"},
+    ).json()
+    group_id = created["id"]
+
+    earlier = authenticated_client.post(
+        f"/api/groups/{group_id}/cases/B-002/attempts",
+        json={"result": "未执行", "idempotency_key": "cursor-latest-1"},
+    )
+    assert earlier.status_code == 201, earlier.text
+    latest = authenticated_client.post(
+        f"/api/groups/{group_id}/cases/B-002/attempts",
+        json={"result": "通过", "idempotency_key": "cursor-latest-2"},
+    )
+    assert latest.status_code == 201, latest.text
+
+    cases = authenticated_client.get(f"/api/groups/{group_id}/cases").json()
+    assert {case["code"]: case["latest_result"] for case in cases}["B-002"] == "通过"
