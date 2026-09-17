@@ -297,6 +297,68 @@ it("reserves a retest label before committing it", async () => {
   expect(commitReserved).toHaveBeenCalledWith("attempt-retest", expect.objectContaining({ result: "通过" }));
 });
 
+it("keeps a reservation made while a save was in flight", async () => {
+  const reserved: Attempt = {
+    id: "attempt-retest",
+    label: "B-001-R0918-a1b2c3-01",
+    sequence: 2,
+    state: "started",
+    result: null,
+    note: null,
+    console_text: null,
+    source: "execution",
+    created_at: "2026-09-16T10:00:00Z",
+    screenshots: []
+  };
+  const reserveRetest = vi.fn().mockResolvedValue(reserved);
+  const commitReserved = vi
+    .fn()
+    .mockResolvedValue({ ...reserved, state: "committed", result: "通过" });
+  const pendingSave = deferred<Attempt>();
+  const submit = vi.fn<(groupId: string, code: string, payload: SubmitPayload) => Promise<Attempt>>();
+  submit.mockReturnValue(pendingSave.promise);
+  renderExecution({
+    initialGroupId: "0918-id",
+    submit,
+    reserveRetest,
+    commitReserved,
+    loadLegacyHistory: async () => EMPTY_LEGACY
+  });
+
+  await screen.findByText("管理员登录");
+  await userEvent.click(screen.getByRole("button", { name: "通过" }));
+  await userEvent.click(screen.getByRole("button", { name: /保存结果/ }));
+
+  // The save is on the wire and the legacy panel's 复测（新标签…）button carries
+  // no `disabled`, so the operator reserves a retest right now — the save they
+  // are waiting on knows nothing about this reservation.
+  await userEvent.click(await screen.findByRole("button", { name: /复测/ }));
+  expect(await screen.findByText(/已预留重测 B-001-R0918-a1b2c3-01/)).toBeVisible();
+
+  await act(async () => {
+    pendingSave.resolve(committed("attempt-1", "B-001", "通过", null));
+    await pendingSave.promise;
+  });
+  await waitFor(() => expect(screen.getByText(/已保存到本地/)).toBeVisible());
+
+  // The reservation made during the flight belongs to the operator, not to the
+  // save: a save that retires "whichever reservation is current" wipes it here,
+  // orphaning the reserved label. Asserted on the panel's own 已预留 line — the
+  // save's confirmation has meanwhile replaced the status text.
+  expect(screen.getByText("已预留 B-001-R0918-a1b2c3-01")).toBeVisible();
+
+  // And the next save must commit that reservation rather than submit an
+  // original attempt under it.
+  await userEvent.click(screen.getByRole("button", { name: "通过" }));
+  await userEvent.click(screen.getByRole("button", { name: /保存结果/ }));
+
+  expect(commitReserved).toHaveBeenCalledWith(
+    "attempt-retest",
+    expect.objectContaining({ result: "通过" })
+  );
+  expect(submit).toHaveBeenCalledTimes(1);
+});
+
 it("drops a retest reservation that lands after the desk moved", async () => {
   const pendingReserve = deferred<Attempt>();
   const reserved: Attempt = {

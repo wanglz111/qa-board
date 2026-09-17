@@ -315,7 +315,12 @@ export function ExecutionView({
       if (loadedGroup.current === savedGroupId && caseRequest.current === savedVisit) {
         setLastAttemptId(attempt.id);
       }
-      setReserved(null);
+      // Retire only the reservation this save consumed. A reservation the
+      // operator made while this save was in flight (the legacy 复测 button has
+      // no `disabled`) is theirs: clearing it would orphan the reserved label
+      // and make the next save submit an original attempt instead of committing
+      // the retest.
+      setReserved((current) => (current?.id === reserved?.id ? null : current));
       const history = await loadAttempts(savedGroupId, saved.code);
       // The panel under the case on screen must show *that* case's history: a
       // save that landed while the operator pressed ←/→ would otherwise paint the
