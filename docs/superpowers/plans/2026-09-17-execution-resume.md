@@ -133,6 +133,12 @@ git commit -m "feat(execution): report each case's own latest result"
 
 把「起点是哪一条」抽成纯函数，先单测再接线。
 
+> **签名以模块为准（评审后已改）**：本节代码块里写的是两参数版
+> `startIndexFor(cases, rememberedCode)`。评审指出组归属的比较藏在调用点、任何单测都够不着，
+> 而这个仓库会反复重导同一份用例书（`B-003` 在每个组里都存在），所以最终签名是
+> `startIndexFor(cases, cursor: Cursor | null, groupId: string)`——不属于该组的游标一律忽略，
+> 并有一条「忽略别的组的游标」的测试。`cursor.ts` 本身是权威，下面代码块仅作历史记录。
+
 **Files:**
 - Modify: `frontend/src/api.ts`（`GroupCase` 类型）
 - Create: `frontend/src/executionCursor.ts`
@@ -496,14 +502,15 @@ import { allTested, readCursor, startIndexFor, writeCursor } from "../executionC
 成功后把当前这一行就地更新：
 
 ```tsx
+      // ``saved`` is the case being submitted — rename the existing
+      // ``const current = cases[caseIndex]`` at the top of ``save()`` to it, so
+      // the state updater below can keep the conventional ``current`` name.
       setCases((current) =>
         current.map((item) =>
-          item.code === current0.code ? { ...item, latest_result: input.result } : item
+          item.code === saved.code ? { ...item, latest_result: input.result } : item
         )
       );
 ```
-
-（`current0` 就是 `save()` 开头那个 `const current = cases[caseIndex]`，改名以免和外层 `current` 撞。）
 对应测试：把**最后一个**用例提交掉，然后断言「本组已全部测过」出现——不能只喂一个已经完整的数组。
 
 **e2e 的桩也要补 `latest_result`**：`frontend/e2e/execution.spec.ts`、`legacy.spec.ts`、`pip.spec.ts`
