@@ -75,6 +75,10 @@ export type GroupCase = PreviewCase & {
   expect_absent: string[];
   visual_check: string;
   prototype_note: string | null;
+  // The latest committed result for this case, or null when nobody has run it.
+  // 「未执行」 is a result too: a case the operator deliberately skipped is not
+  // an untested one.
+  latest_result: AttemptResult | null;
   reference_assets: ReferenceAsset[];
 };
 

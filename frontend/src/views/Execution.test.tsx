@@ -43,6 +43,7 @@ function testCase(id: string, title: string, expected: string | null = null): Gr
     expect_absent: [],
     visual_check: "text_and_visual",
     prototype_note: null,
+    latest_result: null,
     reference_assets: []
   };
 }
