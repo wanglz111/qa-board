@@ -482,7 +482,13 @@ def read_target_names(client: LarkClient, target: Any) -> dict[str, Any]:
 ```
 
 并在 `history.py` 顶部加 `from app.lark.names import read_target_names`。
-`read_target_state` 必须保留：`GET /lark/target` 仍然需要 fields 来算 `schema_errors` 与指纹。
+然后把 `history.py` 自己那份 `read_target_state` 包装函数删掉：这一步之后没有任何调用方了
+（`GET /lark/target`、保存路径与 provision 用的是 `target.py` 的 `read_draft_state`——那是**另一个**
+函数，仍然需要 fields 来算 `schema_errors` 与指纹，不能删）。顺手清掉 `history.py` 因此不再用到的
+import（`read_draft_state`、`TargetDraft`），并确认没有测试引用被删的函数。
+
+> 第一版计划在这里写的是「保留 `read_target_state`」，那是把两个同名概念看混了：真正服务
+> `GET /lark/target` 的是 `target.read_draft_state`。实现者按字面保留了它，评审与控制器一起确认它已成死代码。
 
 - [ ] **Step 4: 跑测试确认通过**
 
