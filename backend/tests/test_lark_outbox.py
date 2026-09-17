@@ -20,7 +20,12 @@ from app.lark.outbox import (
     run_job,
 )
 from app.lark.target import target_for
-from app.lark.write import bug_fields, execution_fields, record_matches_execution
+from app.lark.write import (
+    bug_fields,
+    clip_steps,
+    execution_fields,
+    record_matches_execution,
+)
 from app.models import Attempt, GroupCase, LarkTarget, Screenshot, SyncJob
 from app.worker import build_gateway, process_one_job, run_once
 
@@ -121,11 +126,11 @@ def test_old_records_and_bugs_are_never_updated(fake_lark, confirmed_group, fail
     )
     created = fake_lark.created_records[-1]
     assert created["fields"]["进展状态"] == "待修复"
-    # The defect row names the case and nothing else: the internal marker this
-    # tool used to prepend is gone from new writes.
-    assert created["fields"]["问题描述"].startswith("B-001")
+    # The defect row carries the operator's own words and nothing else: the
+    # case code moved into the remark, and the internal marker is gone for good.
+    assert created["fields"]["问题描述"] == "绑定未触发"
+    assert "B-001" not in created["fields"]["问题描述"]
     assert "【" not in created["fields"]["问题描述"]
-    assert "绑定未触发" in created["fields"]["问题描述"]
 
 
 def test_the_run_row_fills_owner_and_reporter_from_the_deployment(failed_attempt):
@@ -145,7 +150,7 @@ def test_the_run_row_fills_owner_and_reporter_from_the_deployment(failed_attempt
 
 
 def test_the_defect_remark_names_the_case_and_drops_the_marker(failed_attempt):
-    """备注 carries the case/result line and the console, with no 【自动提】 badge."""
+    """备注 names the case, labels the console, and keeps the result out of it."""
 
     fields = bug_fields(
         failed_attempt,
@@ -154,10 +159,102 @@ def test_the_defect_remark_names_the_case_and_drops_the_marker(failed_attempt):
         attachments=[],
     )
 
-    assert fields["备注"].startswith("由用例 B-001 提交（结果：不通过）")
+    assert fields["备注"].splitlines()[0] == "用例：B-001 管理员登录"
     assert "wallet.bind timeout" in fields["备注"]
+    assert "控制台：" in fields["备注"]
+    # This case carries no steps, so the guard on the line is visible here.
+    assert "步骤：" not in fields["备注"]
+    # The defect table itself answers "with what result": every row in it is a
+    # failure, so the result is a column, never a sentence.
+    assert "结果：" not in fields["备注"]
+    assert "不通过" not in fields["备注"]
+    # Every other column the writer fills has its own home, so none of them may
+    # reappear as prose in either text field.
+    for column in ("优先级", "进展状态", "反馈时间", "反馈人", "截图"):
+        assert column not in fields["问题描述"]
+        assert column not in fields["备注"]
     assert "【自动提】" not in fields["备注"]
     assert "【" not in fields["问题描述"]
+
+
+def test_the_defect_remark_carries_the_clipped_steps(failed_attempt):
+    """The case's steps join the remark so a reader can reproduce the failure."""
+
+    case = failed_attempt.group_case
+    case.steps = "\n".join(f"{index:02d}-" + "x" * 7 for index in range(1, 13))
+
+    fields = bug_fields(failed_attempt, case, reporter="Max", attachments=[])
+
+    assert fields["备注"].splitlines()[1].startswith("步骤：01-")
+    assert "…（完整步骤见用例 B-001）" in fields["备注"]
+
+
+def test_clip_steps_leaves_a_short_value_alone():
+    steps = "1. 打开登录页\n2. 点击登录"
+
+    assert clip_steps(steps, "B-001") == steps
+    assert "…（完整步骤见用例 B-001）" not in clip_steps(steps, "B-001")
+
+
+def test_clip_steps_keeps_a_value_that_is_exactly_the_limit():
+    steps = "步" * 100
+
+    assert clip_steps(steps, "B-001") == steps
+
+
+def test_clip_steps_cuts_on_a_line_boundary_and_points_at_the_case():
+    steps = "\n".join(f"{index:02d}-" + "x" * 7 for index in range(1, 13))
+    pointer = "…（完整步骤见用例 B-001）"
+
+    clipped = clip_steps(steps, "B-001", limit=45)
+
+    # Four whole ten-character lines fit in 45; a fifth would not, and half of
+    # one is worse than none. Spelled out rather than re-sliced, so the expected
+    # prefix does not come from the same primitive the implementation uses.
+    prefix = "01-xxxxxxx\n02-xxxxxxx\n03-xxxxxxx\n04-xxxxxxx"
+    assert clipped == prefix + pointer
+    # The pointer tells the reader where the rest lives, so it is not itself
+    # paid for out of the limit.
+    assert len(prefix) <= 45 < len(clipped)
+
+
+def test_clip_steps_hard_cuts_a_first_line_longer_than_the_limit():
+    steps = "y" * 50 + "\nsecond line"
+
+    clipped = clip_steps(steps, "B-001", limit=20)
+
+    # One line longer than the limit has no boundary to cut on.
+    assert clipped == "y" * 20 + "…（完整步骤见用例 B-001）"
+
+
+def test_clip_steps_has_nothing_to_say_about_an_absent_value():
+    assert clip_steps(None, "B-001") is None
+    assert clip_steps("", "B-001") is None
+    assert clip_steps("  \n ", "B-001") is None
+
+
+def test_a_failure_without_a_note_still_ships_a_description(failed_attempt):
+    """The API refuses a note-less failure; the row must still never be blank."""
+
+    for note in (None, "", "   "):
+        attempt = Attempt(
+            group_case=failed_attempt.group_case,
+            label="B-001",
+            sequence=2,
+            state="committed",
+            result="不通过",
+            note=note,
+            # Never flushed, so the column default has not run yet.
+            created_at=datetime.now(timezone.utc),
+            idempotency_key=f"note-less-{note!r}",
+        )
+
+        fields = bug_fields(
+            attempt, failed_attempt.group_case, reporter="Max", attachments=[]
+        )
+
+        assert fields["问题描述"] == "B-001 管理员登录"
+        assert fields["备注"].startswith("用例：B-001 管理员登录")
 
 
 def test_a_person_typed_run_column_is_filled_with_an_id_or_left_out(failed_attempt):
@@ -305,7 +402,8 @@ def test_failed_retest_keeps_internal_label_out_of_both_lark_tables(
 
     execution, bug = fake_lark.created_records
     assert execution["fields"]["用例"] == "B-001 管理员登录"
-    assert bug["fields"]["问题描述"] == "B-001 管理员登录\n登录接口返回 500"
+    assert bug["fields"]["问题描述"] == "登录接口返回 500"
+    assert bug["fields"]["备注"].startswith("用例：B-001 管理员登录")
     assert "Rgroup-4e98c0-01" not in str(fake_lark.created_records)
 
 

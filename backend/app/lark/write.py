@@ -14,6 +14,32 @@ OPEN_BUG_STATUS = "待修复"
 # fallback the hand-run table uses. The defect table has no P3 at all, so a P3
 # case is filed as P2 there.
 DEFAULT_PRIORITY = "P2"
+# A defect row carries the first slice of the steps so a reader can judge what
+# was being done, and a pointer back to the case for the rest: writing all of it
+# buries the report, writing none of it makes the defect unreproducible.
+STEP_CLIP_LIMIT = 100
+STEP_CLIP_NOTE = "…（完整步骤见用例 {code}）"
+
+
+def clip_steps(steps: str | None, code: str, limit: int = STEP_CLIP_LIMIT) -> str | None:
+    """The steps a defect row carries: a whole-line prefix plus where to read the rest."""
+
+    text = (steps or "").strip()
+    if not text:
+        return None
+    if len(text) <= limit:
+        return text
+    # Cut on a line boundary so no step is left half-written; a single line longer
+    # than the limit has no boundary to cut on and is clipped outright.
+    prefix = ""
+    for line in text.splitlines():
+        candidate = f"{prefix}\n{line}" if prefix else line
+        if len(candidate) > limit:
+            break
+        prefix = candidate
+    if not prefix:
+        prefix = text[:limit]
+    return f"{prefix}{STEP_CLIP_NOTE.format(code=code)}"
 
 
 class LarkWriteGateway(Protocol):
@@ -112,16 +138,20 @@ def bug_fields(
     person_fields: set[str] | None = None,
 ) -> dict[str, Any]:
     note = (attempt.note or "").strip()
-    description = f"{case.code} {case.title}"
-    if note:
-        description = f"{description}\n{note}"
-    # 备注 carries what the description does not: which case raised the defect,
-    # with what result, then the console tail. The internal 【自动提】 marker this
-    # tool used to prepend is gone from it.
-    remark = f"由用例 {case.code} 提交（结果：{attempt.result or ''}）"
+    # The defect table itself answers "with what result": only a failure opens a
+    # row here, so repeating 结果 would be noise. 问题描述 keeps the operator's own
+    # words and nothing else; the fallback is unreachable through the API (a failed
+    # result requires a note) and exists only so no row ships with an empty
+    # description.
+    description = note or f"{case.code} {case.title}"
+    lines = [f"用例：{case.code} {case.title}"]
+    steps = clip_steps(case.steps, case.code)
+    if steps:
+        lines.append(f"步骤：{steps}")
     console = attempt.console_text or ""
     if console:
-        remark = f"{remark}\n{console}"
+        lines.append(f"控制台：{console}")
+    remark = "\n".join(lines)
     fields: dict[str, Any] = {
         "问题描述": description,
         "进展状态": OPEN_BUG_STATUS,
