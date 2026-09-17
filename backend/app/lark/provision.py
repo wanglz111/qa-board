@@ -663,8 +663,8 @@ def rebuild_table(
         ),
         bug_table_id=new_table_id if payload.role == "bug" else target.bug_table_id,
     )
-    # Read before the lock, exactly like the save path: six Lark requests do not
-    # belong inside a transaction that holds a row lock.
+    # Read before the lock, exactly like the save path: up to six Lark requests
+    # do not belong inside a transaction that holds a row lock.
     try:
         state = read_draft_state(client, draft)
     except LarkError as error:

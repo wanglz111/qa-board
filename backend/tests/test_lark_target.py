@@ -608,12 +608,33 @@ def test_reading_a_target_in_one_base_reads_that_base_once(
     target.bug_base_name = "执行库"
     target.bug_table_id = "tbl-bugs"
     target.bug_table_name = "缺陷记录"
+    # Keep the row in a shape the app itself could have written: the stored
+    # fingerprint has to describe the same four parts as the columns.
+    target.target_fingerprint = lark_target.TargetDraft(
+        "app-exec", "tbl-runs", None, "app-exec", "tbl-bugs"
+    ).fingerprint
     db_session.commit()
     lark_fake.requests.clear()
 
     response = authenticated_client.get(f"/api/groups/{confirmed_group.id}/lark/target")
 
     assert response.status_code == 200, response.text
+    # A duplicate call avoided is not enough: the bug side has to describe the
+    # base and table the target points at, not the execution side's listing.
+    live = response.json()["live"]
+    assert live["bug_base_name"] == "执行库"
+    assert live["bug_table_name"] == "缺陷记录"
     paths = [request["path"] for request in lark_fake.requests]
     assert paths.count("/open-apis/bitable/v1/apps/app-exec") == 1
     assert paths.count("/open-apis/bitable/v1/apps/app-exec/tables") == 1
+
+    # The memo lasts one read only. A later read must fetch the base again, or a
+    # rebuild would keep serving the table listing taken before it created the
+    # new table.
+    lark_fake.requests.clear()
+    again = authenticated_client.get(f"/api/groups/{confirmed_group.id}/lark/target")
+
+    assert again.status_code == 200, again.text
+    again_paths = [request["path"] for request in lark_fake.requests]
+    assert again_paths.count("/open-apis/bitable/v1/apps/app-exec") == 1
+    assert again_paths.count("/open-apis/bitable/v1/apps/app-exec/tables") == 1
