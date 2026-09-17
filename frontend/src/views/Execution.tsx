@@ -62,6 +62,15 @@ function message(reason: unknown) {
   return reason instanceof Error ? reason.message : "保存失败";
 }
 
+// A read is not trusted to have the shape its type promises: an unmocked
+// `/api/groups/:id/cases` answers `{}`, and a non-array that reaches the render
+// body throws while the grid counts iterate it — React then unmounts the whole
+// tree and the operator gets a blank page. Anything that is not a list degrades
+// to the empty state the desk already knows how to show.
+function asCaseList(value: unknown): GroupCase[] {
+  return Array.isArray(value) ? (value as GroupCase[]) : [];
+}
+
 // The worker drains its outbox every few seconds, so a badge read once per save
 // would claim work is still waiting long after the row reached Lark.
 const SYNC_POLL_MS = 3000;
@@ -213,7 +222,9 @@ export function ExecutionView({
       .catch(() => undefined);
     void loadSync?.(groupId).then(setSync).catch(() => undefined);
     try {
-      const result = await loadCases(groupId);
+      // Guarded here, before the value is stored or counted: everything below
+      // (the start index, the progress line, the grid) reads this same list.
+      const result = asCaseList(await loadCases(groupId));
       if (requestId !== caseRequest.current) return;
       setCases(result);
       loadedGroup.current = groupId;
@@ -341,7 +352,7 @@ export function ExecutionView({
       const updated = cases.map((item) =>
         item.code === saved.code ? { ...item, latest_result: attempt.result } : item
       );
-      if (loadedGroup.current === savedGroupId) setCases(updated);
+      if (loadedGroup.current === savedGroupId) setCases(asCaseList(updated));
       let confirmed = sync?.confirmed ?? false;
       if (loadSync) {
         try {

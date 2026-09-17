@@ -131,7 +131,13 @@ async function mockApi(page: Page, state: LegacyState) {
             result: "通过",
             note: null,
             console_text: null,
-            created_at: "2026-09-16T11:00:00Z"
+            source: "execution",
+            created_at: "2026-09-16T11:00:00Z",
+            // Both are required by `Attempt` and read while the row renders
+            // (`History` tests `attempt.source` and counts `screenshots`): a
+            // mocked run without them unmounts the whole page instead of
+            // showing one history row.
+            screenshots: []
           }
         ]
       });

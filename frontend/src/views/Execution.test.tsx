@@ -169,6 +169,21 @@ it("shows only the selected group's case and asks for a failure note", async () 
   expect(screen.getByLabelText("失败说明")).toBeRequired();
 });
 
+it("degrades to the empty state instead of unmounting when the case list is not an array", async () => {
+  renderExecution({
+    initialGroupId: "0918-id",
+    // The API helper answers a route nobody mocked with `{}`. The type says
+    // `GroupCase[]`, the wire says otherwise, and the desk has to survive the
+    // read: counting that object used to throw and blank the whole page.
+    loadCases: async () => ({}) as unknown as GroupCase[]
+  });
+
+  expect(await screen.findByText("该测试组暂无用例")).toBeVisible();
+  // The tree is still alive around it — an unmount would take these with it.
+  expect(screen.getByRole("heading", { name: "测试组" })).toBeVisible();
+  expect(screen.getByText("Sprint 0918")).toBeVisible();
+});
+
 it("counts the queue that is still waiting, not every local result, and re-reads the table once it drains", async () => {
   vi.useFakeTimers();
   try {
