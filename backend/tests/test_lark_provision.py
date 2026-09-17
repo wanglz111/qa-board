@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from typing import Any
 
 import pytest
 from sqlalchemy import select
@@ -12,6 +13,7 @@ from app.lark.provision import (
     provision_plan,
     rebuilt_table_name,
     retype_plan,
+    schema_order,
 )
 from app.models import Attempt, Group, GroupCase, LarkTarget, SyncJob
 
@@ -1175,3 +1177,100 @@ def test_rebuilding_a_table_reports_a_refused_creation(
     # Nothing was replaced, so the approved target is still the approved one.
     assert stored is not None and stored.execution_table_id == "tbl-runs"
     assert stored.confirmed_at is not None
+
+
+def _reference_layout(role: str) -> list[dict[str, Any]]:
+    """The headers a table this tool just built would answer with."""
+
+    return [
+        {
+            "field_id": f"fld-{index}",
+            "field_name": name,
+            "type": ROLE_SCHEMA[role][name].type_id,
+            # Lark reports which column is the primary one, and the order alone
+            # cannot tell: 用例 first is exactly what makes the layout right.
+            "is_primary": index == 0,
+        }
+        for index, name in enumerate(schema_order(role))
+    ]
+
+
+def test_rebuilding_a_table_already_in_the_reference_layout_is_refused(
+    lark_fake, authenticated_client, provision_group
+):
+    lark_fake.fields = _reference_layout("execution")
+
+    response = authenticated_client.post(
+        f"/api/groups/{provision_group.id}/lark/provision/rebuild",
+        json={"role": "execution", "acknowledge": True},
+    )
+
+    assert response.status_code == 409, response.text
+    assert "已经是参考表头" in response.json()["detail"]
+    # Nothing was created: a refusal must not leave a spare table behind.
+    assert lark_fake.created_tables == []
+
+
+def test_force_rebuilds_a_table_that_already_looks_right(
+    lark_fake, authenticated_client, provision_group
+):
+    lark_fake.fields = _reference_layout("execution")
+
+    response = authenticated_client.post(
+        f"/api/groups/{provision_group.id}/lark/provision/rebuild",
+        json={"role": "execution", "acknowledge": True, "force": True},
+    )
+
+    assert response.status_code == 200, response.text
+    assert lark_fake.created_tables
+
+
+def test_a_table_whose_headers_are_in_the_wrong_order_still_rebuilds(
+    lark_fake, authenticated_client, provision_group
+):
+    """The case the feature exists for: 优先级 first, everything else off."""
+
+    rows = _reference_layout("execution")
+    lark_fake.fields = [rows[2], rows[0], *rows[1:2], *rows[3:]]
+
+    response = authenticated_client.post(
+        f"/api/groups/{provision_group.id}/lark/provision/rebuild",
+        json={"role": "execution", "acknowledge": True},
+    )
+
+    assert response.status_code == 200, response.text
+
+
+def test_the_plan_says_how_many_rows_a_rebuild_would_rewrite(
+    lark_fake, authenticated_client, provision_group, add_case
+):
+    # 实现偏差（计划 Step 1 的片段假设 fixture 自带两条用例）：``provision_group`` 用的
+    # ``imported_group`` 只有一条 ``B-001``（实测 ``assert 1 == 2``），所以这里用套件既有的
+    # ``add_case`` fixture 补上第二条，让「执行表 2 条 / 缺陷表 1 条」的断言有真实数据可算。
+    add_case(provision_group.id, code="B-002", title="钱包绑定")
+
+    cases = authenticated_client.get(f"/api/groups/{provision_group.id}/cases").json()
+    codes = [case["code"] for case in cases][:2]
+    assert len(codes) == 2, "这个 fixture 需要至少两条用例"
+
+    first = authenticated_client.post(
+        f"/api/groups/{provision_group.id}/cases/{codes[0]}/attempts",
+        json={"result": "通过", "idempotency_key": "rebuild-count-1"},
+    )
+    assert first.status_code == 201, first.text
+    second = authenticated_client.post(
+        f"/api/groups/{provision_group.id}/cases/{codes[1]}/attempts",
+        json={
+            "result": "不通过",
+            "note": "登录按钮没反应",
+            "idempotency_key": "rebuild-count-2",
+        },
+    )
+    assert second.status_code == 201, second.text
+
+    plan = authenticated_client.get(
+        f"/api/groups/{provision_group.id}/lark/provision"
+    ).json()
+
+    # 执行表重写每一条本地结果；缺陷表只重写「不通过」的那一条。
+    assert plan["rebuild"] == {"execution": 2, "bug": 1}

@@ -30,7 +30,7 @@
 - Modify: `backend/app/lark/provision.py`
 - Test: `backend/tests/test_lark_provision.py`
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 在 `backend/tests/test_lark_provision.py` 末尾追加：
 
@@ -105,12 +105,12 @@ from typing import Any
 from app.lark.provision import ROLE_SCHEMA, schema_order
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cd backend && TEST_DATABASE_URL='postgresql+psycopg://testdeck:testdeck@127.0.0.1:5433/testdeck_test' .venv/bin/python -m pytest tests/test_lark_provision.py -q -k reference_layout -k "refused or force or wrong_order"`
 Expected: FAIL — 第一个测试拿到 200（现在不看布局就重建），也没有 `force` 字段。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `backend/app/lark/provision.py` 里 `rebuilt_table_name` 之前加：
 
@@ -167,7 +167,7 @@ class RebuildTableRequest(BaseModel):
         )
 ```
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `cd backend && TEST_DATABASE_URL='postgresql+psycopg://testdeck:testdeck@127.0.0.1:5433/testdeck_test' .venv/bin/python -m pytest tests/test_lark_provision.py -q`
 Expected: PASS。既有重建测试用的是 `provision_group`（表里只有一列 `用例`）或自己设定的字段，`layout_matches` 对它们为假，所以不会被误拦；若某个既有测试恰好构造了完整布局，就在它的请求里加 `"force": True` 并注明原因。
@@ -187,7 +187,7 @@ git commit -m "fix(lark): refuse to rebuild a table that already has the referen
 - Modify: `backend/app/lark/provision.py`（`read_provision_plan`）
 - Test: `backend/tests/test_lark_provision.py`
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 在 `backend/tests/test_lark_provision.py` 末尾追加：
 
@@ -222,12 +222,18 @@ def test_the_plan_says_how_many_rows_a_rebuild_would_rewrite(
     assert plan["rebuild"] == {"execution": 2, "bug": 1}
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+> **实现偏差（2026-09-17，执行者记录）**：上面的测试片段假设 `provision_group` 自带至少两条用例，
+> 实际它用的 `imported_group` 只有一条 `B-001`（实测 `AssertionError: 这个 fixture 需要至少两条用例
+> / assert 1 == 2 / where 1 = len(['B-001'])`）。落地时在测试签名里加上套件既有的 `add_case` fixture
+> （`tests/conftest.py:205`）并 `add_case(provision_group.id, code="B-002", title="钱包绑定")`，让
+> 「执行表 2 条 / 缺陷表 1 条」的断言有真实数据可算。除此之外断言与请求体照抄片段，未改动任何既有断言。
+
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cd backend && TEST_DATABASE_URL='postgresql+psycopg://testdeck:testdeck@127.0.0.1:5433/testdeck_test' .venv/bin/python -m pytest "tests/test_lark_provision.py::test_the_plan_says_how_many_rows_a_rebuild_would_rewrite" -q`
 Expected: FAIL — `KeyError: 'rebuild'`
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `backend/app/lark/provision.py` 加一个计数函数（放在 `rebuild_table` 之后）：
 
@@ -261,7 +267,7 @@ def _rebuild_counts(db: Session, group_id: UUID) -> dict[str, int]:
 
 确认 `provision.py` 已导入 `Attempt`、`GroupCase`、`func`（`from app.models import Group` 那一行附近补全）。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `cd backend && TEST_DATABASE_URL='postgresql+psycopg://testdeck:testdeck@127.0.0.1:5433/testdeck_test' .venv/bin/python -m pytest tests/test_lark_provision.py -q`
 Expected: PASS
