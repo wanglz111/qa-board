@@ -378,3 +378,119 @@ it("resets the view choice when the dialog is closed and opened again", async ()
   // The rows are reseeded on every open, and the view choice goes with them.
   expect(screen.getByRole("checkbox", { name: "同时创建 TestDeck 视图" })).not.toBeChecked();
 });
+
+const RETYPE_PLAN = {
+  roles: { execution: [], bug: [] },
+  retype: {
+    execution: [
+      {
+        name: "优先级",
+        type: 3,
+        type_name: "single_select",
+        field_id: "fld-prio",
+        current_type: 1,
+        current_type_name: "text",
+        properties: {}
+      }
+    ],
+    bug: []
+  }
+};
+
+it("offers to convert a header that already exists with the wrong type", async () => {
+  const retype = vi.fn().mockResolvedValue({ retyped_fields: ["优先级"], schema_errors: [] });
+  const loadPlan = vi.fn().mockResolvedValueOnce(RETYPE_PLAN).mockResolvedValue(COMPLETE);
+  const { onChanged } = renderSetup({ retype, loadPlan });
+
+  expect(await screen.findByText(/1 个表头类型不对/)).toBeVisible();
+  await userEvent.click(screen.getByRole("button", { name: "修正表头类型" }));
+
+  const dialog = await screen.findByRole("dialog");
+  expect(dialog).toHaveTextContent("优先级");
+  // The administrator sees both the wrong type and the one it will become.
+  expect(dialog).toHaveTextContent("text → single_select");
+  expect(retype).not.toHaveBeenCalled();
+
+  await userEvent.click(screen.getByRole("button", { name: "修正这些表头" }));
+
+  expect(retype).toHaveBeenCalledWith("g1", {
+    role: "execution",
+    field_names: ["优先级"],
+    acknowledge: true
+  });
+  // A real type change clears the write approval, so the page re-reads it.
+  expect(onChanged).toHaveBeenCalledTimes(1);
+  expect(await screen.findByText("已修正 1 个表头，请重新确认写入")).toBeVisible();
+  expect(await screen.findByText("表头完整")).toBeVisible();
+});
+
+it("sends only the headers the administrator left ticked for repair", async () => {
+  const plan = {
+    roles: { execution: [], bug: [] },
+    retype: {
+      execution: [
+        ...RETYPE_PLAN.retype.execution,
+        {
+          name: "结果",
+          type: 3,
+          type_name: "single_select",
+          field_id: "fld-result",
+          current_type: 1,
+          current_type_name: "text",
+          properties: {}
+        }
+      ],
+      bug: []
+    }
+  };
+  const retype = vi.fn().mockResolvedValue({ retyped_fields: [], schema_errors: [] });
+  renderSetup({ retype, loadPlan: vi.fn().mockResolvedValue(plan) });
+
+  await userEvent.click(await screen.findByRole("button", { name: "修正表头类型" }));
+  await userEvent.click(screen.getByRole("checkbox", { name: "修正表头「结果」" }));
+  await userEvent.click(screen.getByRole("button", { name: "修正这些表头" }));
+
+  expect(retype).toHaveBeenCalledTimes(1);
+  expect(retype).toHaveBeenCalledWith(
+    "g1",
+    expect.objectContaining({ role: "execution", field_names: ["优先级"] })
+  );
+});
+
+it("keeps the approval when nothing actually needed repair", async () => {
+  const retype = vi.fn().mockResolvedValue({ retyped_fields: [], schema_errors: [] });
+  const loadPlan = vi.fn().mockResolvedValueOnce(RETYPE_PLAN).mockResolvedValue(COMPLETE);
+  const { onChanged } = renderSetup({ retype, loadPlan });
+
+  await userEvent.click(await screen.findByRole("button", { name: "修正表头类型" }));
+  await userEvent.click(screen.getByRole("button", { name: "修正这些表头" }));
+
+  expect(await screen.findByText("没有需要修正的表头")).toBeVisible();
+  expect(onChanged).not.toHaveBeenCalled();
+});
+
+it("reports a refused repair with the headers it did convert", async () => {
+  const detail = {
+    reason: "provision_failed",
+    message: "修正表头类型失败：没有权限",
+    created_fields: ["优先级"]
+  };
+  const retype = vi.fn().mockRejectedValue(new ApiError(409, detail));
+  const { onChanged } = renderSetup({ retype, loadPlan: vi.fn().mockResolvedValue(RETYPE_PLAN) });
+
+  await userEvent.click(await screen.findByRole("button", { name: "修正表头类型" }));
+  await userEvent.click(screen.getByRole("button", { name: "修正这些表头" }));
+
+  const dialog = screen.getByRole("dialog");
+  expect(dialog).toHaveTextContent("修正表头类型失败：没有权限");
+  expect(dialog).toHaveTextContent("已修正 1 个表头，请重新确认写入");
+  expect(onChanged).toHaveBeenCalledTimes(1);
+});
+
+it("hides the repair command when the page cannot repair a table", async () => {
+  renderSetup({ loadPlan: vi.fn().mockResolvedValue(RETYPE_PLAN) });
+
+  // Without a bound repair call the panel may not promise one.
+  await screen.findByText("表头完整");
+  expect(screen.queryByRole("button", { name: "修正表头类型" })).not.toBeInTheDocument();
+});

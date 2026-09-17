@@ -4,12 +4,16 @@ from datetime import datetime, timezone
 from typing import Any, Protocol
 
 from app.lark.client import LarkClient
+from app.lark.fields import BUG_PRIORITY_OPTIONS, RUN_PRIORITY_OPTIONS
 from app.models import Attempt, GroupCase
 
 
-# New bugs carry this marker so nobody mistakes them for a legacy defect thread.
-AUTO_BUG_MARKER = "【自动提】"
 OPEN_BUG_STATUS = "待修复"
+# Every case lands in a bucket: a case whose own priority is missing, or names
+# something the table's option list does not carry, is filed as P2 — the same
+# fallback the hand-run table uses. The defect table has no P3 at all, so a P3
+# case is filed as P2 there.
+DEFAULT_PRIORITY = "P2"
 
 
 class LarkWriteGateway(Protocol):
@@ -21,6 +25,10 @@ class LarkWriteGateway(Protocol):
 
     def find_execution_ids(self, fields: dict[str, Any]) -> list[str]: ...
 
+    def upload_attachment(
+        self, file_name: str, content: bytes, mime: str, *, role: str
+    ) -> str: ...
+
 
 def _milliseconds(value: datetime) -> int:
     if value.tzinfo is None:
@@ -28,32 +36,77 @@ def _milliseconds(value: datetime) -> int:
     return int(value.timestamp() * 1000)
 
 
-def execution_fields(attempt: Attempt, case: GroupCase, reporter: str) -> dict[str, Any]:
+def _priority(value: str | None, options: tuple[str, ...]) -> str:
+    text = (value or "").strip()
+    return text if text in options else DEFAULT_PRIORITY
+
+
+def _attachment_value(file_tokens: list[str]) -> list[dict[str, str]]:
+    """The shape a Lark attachment column holds: one token per file."""
+
+    return [{"file_token": token} for token in file_tokens]
+
+
+def execution_fields(
+    attempt: Attempt,
+    case: GroupCase,
+    *,
+    owner: str,
+    reporter: str,
+    attachments: list[str] | None = None,
+) -> dict[str, Any]:
     return {
         "用例": f"{case.code} {case.title}",
         "结果": attempt.result or "",
-        "优先级": case.priority or "",
-        "负责人": reporter,
+        "优先级": _priority(case.priority, RUN_PRIORITY_OPTIONS),
+        # 负责人 and 报告人 are two separate plain-text columns: the hand-run
+        # rows file the case under the deployment's owner (待指派) and name the
+        # reporter, rather than repeating one address in both.
+        "负责人": owner,
         "报告人": reporter,
         "日期": _milliseconds(attempt.created_at),
-        "截图": [],
+        # A run with no screenshot writes an empty attachment list: the column
+        # is attachment-typed in every table this tool builds.
+        "截图": _attachment_value(attachments or []),
         "控制台": attempt.console_text or "",
     }
 
 
-def bug_fields(attempt: Attempt, case: GroupCase, reporter: str) -> dict[str, Any]:
+def bug_fields(
+    attempt: Attempt,
+    case: GroupCase,
+    *,
+    reporter: str,
+    attachments: list[str] | None = None,
+    reporter_id: str | None = None,
+) -> dict[str, Any]:
     note = (attempt.note or "").strip()
-    description = f"{AUTO_BUG_MARKER}{case.code} {case.title}"
+    description = f"{case.code} {case.title}"
     if note:
         description = f"{description}\n{note}"
-    return {
+    # 备注 carries what the description does not: which case raised the defect,
+    # with what result, then the console tail. The internal 【自动提】 marker this
+    # tool used to prepend is gone from it.
+    remark = f"由用例 {case.code} 提交（结果：{attempt.result or ''}）"
+    console = attempt.console_text or ""
+    if console:
+        remark = f"{remark}\n{console}"
+    fields: dict[str, Any] = {
         "问题描述": description,
         "进展状态": OPEN_BUG_STATUS,
-        "优先级": case.priority or "",
+        "优先级": _priority(case.priority, BUG_PRIORITY_OPTIONS),
         "反馈时间": _milliseconds(attempt.created_at),
-        "备注": attempt.console_text or "",
-        "反馈人": reporter,
+        "备注": remark,
+        "截图": _attachment_value(attachments or []),
     }
+    # 反馈人 is a person column in the verified schema, and a person column only
+    # accepts an open_id. Without one configured the field stays out of the
+    # request, so a text-typed legacy column keeps the reporter it always had.
+    if reporter_id:
+        fields["反馈人"] = [{"id": reporter_id}]
+    else:
+        fields["反馈人"] = reporter
+    return fields
 
 
 def record_matches_execution(record: dict[str, Any], expected: dict[str, Any]) -> bool:
@@ -105,3 +158,20 @@ class HttpLarkWriteGateway:
             for record in records
             if record.get("record_id") and record_matches_execution(record, fields)
         ]
+
+    def upload_attachment(
+        self, file_name: str, content: bytes, mime: str, *, role: str
+    ) -> str:
+        """Upload one screenshot into the base the record will live in.
+
+        A file token is only valid inside the base that minted it, so a defect
+        row living in another base gets its own upload of the same picture.
+        """
+
+        base_token = self.run_app_token if role == "execution" else self.bug_app_token
+        return self.client.upload_media(
+            file_name=file_name,
+            content=content,
+            mime=mime,
+            parent_node=base_token,
+        )

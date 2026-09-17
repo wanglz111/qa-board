@@ -3,6 +3,28 @@ from __future__ import annotations
 from typing import Any, Iterable
 
 
+# The option vocabulary of the tables this deployment has verified in Lark. It
+# is copied from the reference base the team already fills by hand, so a table
+# this tool generates is indistinguishable from one a person built.
+PASS_RESULT_OPTIONS = ("通过", "不通过", "阻塞", "未执行")
+RUN_PRIORITY_OPTIONS = ("P0", "P1", "P2", "P3")
+# The defect table has no P3: a P3 case is filed as P2, exactly like the
+# hand-run table does.
+BUG_PRIORITY_OPTIONS = ("P0", "P1", "P2")
+BUG_STATUS_OPTIONS = (
+    "待修复",
+    "修复中",
+    "待验收",
+    "验收不通过",
+    "验收通过，待上线",
+    "已上线",
+    "需求确认",
+    "无效 bug",
+    "暂不处理",
+)
+DATE_PROPERTY: dict[str, Any] = {"date_formatter": "yyyy/MM/dd", "auto_fill": False}
+PERSON_PROPERTY: dict[str, Any] = {"multiple": True}
+
 # Lark Bitable field type ids that this deployment has actually verified.
 FIELD_TYPE_NAMES: dict[int, str] = {
     1: "text",
@@ -39,10 +61,16 @@ REQUIRED_RUN_FIELD_TYPES: dict[str, tuple[int, ...]] = {
 REQUIRED_BUG_FIELD_TYPES: dict[str, tuple[int, ...]] = {
     "问题描述": (1,),
     "进展状态": (1, 3),
+    # 跟进人 is the assignee column the hand-built defect table carries; the
+    # writer leaves it empty, exactly like the reference rows do.
+    "跟进人": (1, 11),
     "优先级": (1, 3),
     "反馈时间": (5, 1001, 1002),
     "备注": (1,),
     "反馈人": (1, 11),
+    # The defect row carries the same evidence as the run row: a screenshot
+    # column the writer cannot fill is a defect report nobody can act on.
+    "截图": (17,),
 }
 
 DATE_FIELD_CANDIDATES = ("日期", "反馈时间", "执行时间", "修改时间")

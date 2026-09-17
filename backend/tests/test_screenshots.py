@@ -131,3 +131,35 @@ def test_empty_upload_is_rejected(authenticated_client, attempt_id, upload_dir):
 
     assert response.status_code == 400
     assert not list(upload_dir.iterdir())
+
+
+def test_an_attempt_payload_lists_its_screenshots(
+    authenticated_client, local_attempt, valid_png, upload_dir
+):
+    created = authenticated_client.post(
+        f"/api/attempts/{local_attempt.id}/screenshots",
+        files={"image": ("shot.png", valid_png, "image/png")},
+    )
+
+    assert created.status_code == 201
+    shot = created.json()
+    case = local_attempt.group_case
+    listing = authenticated_client.get(
+        f"/api/groups/{case.group_id}/cases/{case.code}/attempts"
+    )
+
+    assert listing.status_code == 200
+    attempts = listing.json()
+    assert len(attempts) == 1
+    # The row the executor submitted shows the evidence it was submitted with:
+    # the page renders a thumbnail from each entry.
+    assert attempts[0]["screenshots"] == [
+        {
+            "id": shot["id"],
+            "attempt_id": str(local_attempt.id),
+            "storage_key": shot["storage_key"],
+            "mime": "image/png",
+            "size_bytes": len(valid_png),
+            "created_at": shot["created_at"],
+        }
+    ]

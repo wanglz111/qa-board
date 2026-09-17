@@ -26,6 +26,12 @@ x-api-environment: &api-environment
   LARK_BASE_URL: ${LARK_BASE_URL:-https://open.larksuite.com}
   LARK_APP_ID: ${LARK_APP_ID:-}
   LARK_APP_SECRET: ${LARK_APP_SECRET:-}
+  # 负责人/报告人/反馈人 defaults. The run table's 负责人/报告人 are plain text
+  # and the defect table's 反馈人 is a person column, so a generated row carries
+  # these names exactly like a hand-run row instead of the sign-in address.
+  DEFAULT_OWNER: ${DEFAULT_OWNER:-待指派}
+  DEFAULT_REPORTER: ${DEFAULT_REPORTER:-}
+  DEFAULT_REPORTER_ID: ${DEFAULT_REPORTER_ID:-}
 
 services:
   db:
@@ -73,6 +79,11 @@ services:
     restart: unless-stopped
     command: ["python", "-m", "app.worker"]
     environment: *api-environment
+    # The worker is the one that reads the stored pictures back to attach them
+    # to the Lark row, so it needs the same volume the API writes them into.
+    # Without it every attachment list comes out empty.
+    volumes:
+      - screenshots:/data
     healthcheck:
       disable: true
     depends_on:

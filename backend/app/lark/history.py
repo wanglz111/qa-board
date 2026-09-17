@@ -204,9 +204,19 @@ def match_bugs(bug_records: list[dict[str, Any]], code: str) -> list[dict[str, A
         matches.append(
             {
                 "record_id": record.get("record_id"),
-                "description": next(
-                    (str(fields.get(name)) for name in DESCRIPTION_FIELDS if fields.get(name)),
+                # The label is stripped for the reader: a row this tool wrote
+                # before the marker was dropped still shows its case, not a
+                # 【自动提】 badge nobody asked for.
+                "description": LEADING_MARKER.sub(
                     "",
+                    next(
+                        (
+                            str(fields.get(name))
+                            for name in DESCRIPTION_FIELDS
+                            if fields.get(name)
+                        ),
+                        "",
+                    ),
                 ),
                 "status": fields.get("进展状态") or fields.get("状态"),
                 "priority": fields.get("优先级"),

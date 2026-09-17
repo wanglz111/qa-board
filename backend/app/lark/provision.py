@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Annotated, Any, Iterable
 from uuid import UUID
 
@@ -11,8 +12,14 @@ from app.auth import require_admin
 from app.db import get_db
 from app.lark.client import LarkClient, LarkError, get_lark_client
 from app.lark.fields import (
+    BUG_PRIORITY_OPTIONS,
+    BUG_STATUS_OPTIONS,
+    DATE_PROPERTY,
+    PASS_RESULT_OPTIONS,
+    PERSON_PROPERTY,
     REQUIRED_BUG_FIELD_TYPES,
     REQUIRED_RUN_FIELD_TYPES,
+    RUN_PRIORITY_OPTIONS,
     field_types,
     type_name,
 )
@@ -41,88 +48,207 @@ ROLE_REQUIRED = {
     "bug": REQUIRED_BUG_FIELD_TYPES,
 }
 
-# Every created header is a plain type the writer can already fill. 结果/优先级
-# stay text instead of single-select so no option vocabulary has to be guessed,
-# and 日期/截图 must be their real types or the writer cannot fill them.
-PROVISION_FIELD_TYPES: dict[str, int] = {
-    "用例": 1,
-    "结果": 1,
-    "优先级": 1,
-    "负责人": 1,
-    "报告人": 1,
-    "日期": 5,
-    "截图": 17,
-    "控制台": 1,
-    "问题描述": 1,
-    "进展状态": 1,
-    "反馈时间": 5,
-    "备注": 1,
-    "反馈人": 1,
+
+def _select(options: Iterable[str]) -> dict[str, Any]:
+    # The option ids are Lark's to mint: the create-field body only names them.
+    return {"options": [{"name": name} for name in options]}
+
+
+@dataclass(frozen=True)
+class FieldSpec:
+    """How one header has to be created, and what "already correct" means."""
+
+    type_id: int
+    # Named ``properties`` (not ``property``): a dataclass field called
+    # ``property`` would shadow the builtin inside this class body and break
+    # the ``type_name`` accessor below.
+    properties: dict[str, Any] | None = None
+
+    @property
+    def type_name(self) -> str:
+        return type_name(self.type_id)
+
+    def matches(self, existing: dict[str, Any]) -> bool:
+        """Whether a live header already is this header.
+
+        The type is the whole contract: Lark mints its own option ids and may
+        carry extra keys, so comparing properties would report a false
+        difference for a column that is already right.
+        """
+
+        return int(existing.get("type") or 0) == self.type_id
+
+
+# A header's type per role. 结果/优先级/进展状态 are single-select with the same
+# vocabulary a person picks from in Lark, 反馈人 is a person column, and 截图 is
+# an attachment. Leaving them text is what made the generated tables unreadable
+# next to the hand-built ones.
+#
+# The order is load-bearing: a new table is created from these headers in this
+# order, and it is the column order of the reference table the team fills by
+# hand (用例 first and primary, then the result, the priority, the owner, the
+# screenshot, the console, the reporter, the date / 问题描述 first and primary,
+# then the status, the assignee, the priority, the screenshot, the reporter,
+# the reported time, the remark). Sorting these names instead is what made the
+# generated headers come out 优先级/反馈人/反馈时间/… — nothing like the table
+# beside them.
+RUN_SCHEMA: dict[str, FieldSpec] = {
+    "用例": FieldSpec(1),
+    "结果": FieldSpec(3, _select(PASS_RESULT_OPTIONS)),
+    "优先级": FieldSpec(3, _select(RUN_PRIORITY_OPTIONS)),
+    "负责人": FieldSpec(1),
+    "截图": FieldSpec(17),
+    "控制台": FieldSpec(1),
+    "报告人": FieldSpec(1),
+    "日期": FieldSpec(5, DATE_PROPERTY),
+}
+
+BUG_SCHEMA: dict[str, FieldSpec] = {
+    "问题描述": FieldSpec(1),
+    "进展状态": FieldSpec(3, _select(BUG_STATUS_OPTIONS)),
+    "跟进人": FieldSpec(11, PERSON_PROPERTY),
+    "优先级": FieldSpec(3, _select(BUG_PRIORITY_OPTIONS)),
+    "截图": FieldSpec(17),
+    "反馈人": FieldSpec(11, PERSON_PROPERTY),
+    "反馈时间": FieldSpec(5, DATE_PROPERTY),
+    "备注": FieldSpec(1),
+}
+
+ROLE_SCHEMA: dict[str, dict[str, FieldSpec]] = {
+    "execution": RUN_SCHEMA,
+    "bug": BUG_SCHEMA,
 }
 
 
-def _properties(type_id: int) -> dict[str, Any]:
-    if type_id == 5:
-        return {"date_formatter": "yyyy/MM/dd", "auto_fill": False}
-    return {}
+def schema_order(role: str) -> list[str]:
+    """The required headers of one role, in the reference table's column order."""
+
+    required = ROLE_REQUIRED[role]
+    schema = ROLE_SCHEMA[role]
+    for name in sorted(required):
+        if name not in schema:
+            # A required header without a spec is a configuration bug: say so
+            # here instead of quietly leaving the column out of the plan.
+            raise RuntimeError(f"必填表头「{name}」没有配置字段类型")
+    return [name for name in schema if name in required]
+
+# The type each header is created with, flattened for the callers that only need
+# the id: the field guide, the tests and the loud configuration check.
+PROVISION_FIELD_TYPES: dict[str, int] = {
+    name: spec.type_id
+    for schema in ROLE_SCHEMA.values()
+    for name, spec in schema.items()
+}
 
 
-def _required_type(name: str) -> int:
-    """The type a required header has to be created with."""
+def _required_spec(role: str, name: str) -> FieldSpec:
+    """The spec a required header of this role has to be created from."""
 
-    type_id = PROVISION_FIELD_TYPES.get(name)
-    if type_id is None:
-        # A required header without a type entry is a configuration bug: say so
-        # here instead of failing with a bare KeyError.
+    spec = ROLE_SCHEMA[role].get(name)
+    if spec is None:
+        # A required header without a spec is a configuration bug: say so here
+        # instead of failing with a bare KeyError.
         raise RuntimeError(f"必填表头「{name}」没有配置字段类型")
-    return type_id
+    return spec
 
 
-def _planned_field(name: str) -> dict[str, Any]:
-    type_id = _required_type(name)
+def _planned_field(role: str, name: str) -> dict[str, Any]:
+    spec = _required_spec(role, name)
     return {
         "name": name,
-        "type": type_id,
-        "type_name": type_name(type_id),
-        "properties": _properties(type_id),
+        "type": spec.type_id,
+        "type_name": spec.type_name,
+        "properties": dict(spec.properties or {}),
     }
 
 
-def _table_field(name: str) -> dict[str, Any]:
-    type_id = _required_type(name)
+def _table_field(role: str, name: str) -> dict[str, Any]:
+    spec = _required_spec(role, name)
     return {
         "field_name": name,
-        "type": type_id,
+        "type": spec.type_id,
         # Text and attachment fields carry no extra property, and the field
         # guide writes those as null; an empty object is never sent in its place.
-        "property": _properties(type_id) or None,
+        "property": dict(spec.properties) if spec.properties else None,
     }
+
+
+def field_id_of(fields: Iterable[dict[str, Any]], name: str) -> str | None:
+    """The live field id of one header, so a repair can address it."""
+
+    for field in fields:
+        if str(field.get("field_name") or "") == name:
+            field_id = field.get("field_id")
+            return str(field_id) if field_id else None
+    return None
+
+
+def retype_plan(fields: Iterable[dict[str, Any]], role: str) -> list[dict[str, Any]]:
+    """The existing headers of this role that carry the wrong type.
+
+    A header this tool created as text before the schema was known is the case
+    this exists for: the column is real and may already hold data, so it is only
+    converted when an administrator asks for it.
+    """
+
+    rows = list(fields)
+    existing = {str(field.get("field_name")): field for field in rows}
+    repaired: list[dict[str, Any]] = []
+    for name in schema_order(role):
+        spec = ROLE_SCHEMA[role][name]
+        field = existing.get(name)
+        if field is None or spec.matches(field):
+            continue
+        current = int(field.get("type") or 0)
+        repaired.append(
+            {
+                "name": name,
+                "type": spec.type_id,
+                "type_name": spec.type_name,
+                "field_id": field_id_of(rows, name),
+                "current_type": current,
+                "current_type_name": type_name(current),
+                "properties": dict(spec.properties or {}),
+            }
+        )
+    return repaired
 
 
 def provision_plan(fields: Iterable[dict[str, Any]], role: str) -> list[dict[str, Any]]:
-    """The headers that would be added to one role's table, sorted by name.
+    """The headers that would be added to one role's table, in schema order.
 
     A header that already exists with any type is left alone: this never
     rewrites a column the administrator already uses.
     """
 
     existing = field_types(fields)
-    required = ROLE_REQUIRED[role]
     return [
-        _planned_field(name) for name in sorted(required) if name not in existing
+        _planned_field(role, name)
+        for name in schema_order(role)
+        if name not in existing
     ]
 
 
 def table_fields(role: str) -> list[dict[str, Any]]:
     """The full header set for a brand-new table of one role."""
 
-    return [_table_field(name) for name in sorted(ROLE_REQUIRED[role])]
+    return [_table_field(role, name) for name in schema_order(role)]
 
 
 def _role_table(target, role: str) -> tuple[str, str]:
     if role == "execution":
         return target.execution_base_token, target.execution_table_id
     return target.bug_base_token, target.bug_table_id
+
+
+def _target_draft(target) -> TargetDraft:
+    return TargetDraft(
+        execution_base_token=target.execution_base_token,
+        execution_table_id=target.execution_table_id,
+        execution_view_id=target.execution_view_id,
+        bug_base_token=target.bug_base_token,
+        bug_table_id=target.bug_table_id,
+    )
 
 
 def _require_group_target(db: Session, group_id: UUID):
@@ -191,14 +317,20 @@ def read_provision_plan(
 ) -> dict[str, Any]:
     target = _require_group_target(db, group_id)
     roles: dict[str, Any] = {}
+    repairs: dict[str, Any] = {}
     views: dict[str, Any] = {}
     for role in ("execution", "bug"):
         base_token, table_id = _role_table(target, role)
         fields, listed_views = _read_table_listings(client, base_token, table_id)
         roles[role] = provision_plan(fields, role)
+        repairs[role] = retype_plan(fields, role)
         views[role] = _view_state(listed_views)
     return {
         "roles": roles,
+        # A header that already exists with the wrong type is reported here
+        # instead of being invented or silently rewritten: it may already hold
+        # data, so converting it stays the administrator's decision.
+        "retype": repairs,
         # The plan says whether 「TestDeck」 already exists, so nobody is offered
         # a view that is already there.
         "views": views,
@@ -246,7 +378,12 @@ def provision_fields(
     created_view_id: str | None = None
     failure: str | None = None
     try:
-        for name in sorted(set(payload.field_names)):
+        # Created in schema order, so asking for several headers at once still
+        # leaves the table reading like the reference one.
+        requested = set(payload.field_names)
+        for name in schema_order(payload.role):
+            if name not in requested:
+                continue
             field = planned.get(name)
             if field is None:
                 # Already present or not part of this role's schema: never invent one.
@@ -315,6 +452,96 @@ def provision_fields(
             **_view_state(listed_views, created_view_id),
             "created": created_view_id is not None,
         },
+        "schema_errors": state["schema_errors"],
+        "target": serialize_target(locked),
+    }
+
+
+class RetypeFieldsRequest(BaseModel):
+    role: str
+    field_names: list[str]
+    acknowledge: bool = False
+
+
+@router.post("/groups/{group_id}/lark/provision/retype")
+def retype_fields(
+    group_id: UUID,
+    payload: RetypeFieldsRequest,
+    db: Annotated[Session, Depends(get_db)],
+    client: Annotated[LarkClient, Depends(get_lark_client)],
+) -> dict[str, Any]:
+    """Convert the approved headers that exist with the wrong type.
+
+    A column this tool created as plain text before the schema was known is the
+    case this exists for. It is never rewritten on its own: the live type is
+    re-read here, and only a header that really is wrong *and* was ticked is
+    converted. A run that changed anything clears the group's write approval,
+    exactly like creating a header does.
+    """
+
+    if not payload.acknowledge:
+        raise HTTPException(status_code=409, detail="需确认后才会修正表头类型")
+    if payload.role not in ROLE_REQUIRED:
+        raise HTTPException(status_code=422, detail="未知的表角色")
+    target = _require_group_target(db, group_id)
+    checked_fingerprint = target.target_fingerprint
+    base_token, table_id = _role_table(target, payload.role)
+    fields, _views = _read_table_listings(client, base_token, table_id)
+    planned = {field["name"]: field for field in retype_plan(fields, payload.role)}
+
+    retyped: list[str] = []
+    failure: str | None = None
+    try:
+        requested = set(payload.field_names)
+        for name in schema_order(payload.role):
+            if name not in requested:
+                continue
+            field = planned.get(name)
+            # A header that is already correct, or is not part of this role's
+            # schema, is never touched: only the plan may be acted on.
+            if field is None or not field.get("field_id"):
+                continue
+            client.update_field(
+                base_token,
+                table_id,
+                str(field["field_id"]),
+                name=name,
+                type_id=int(field["type"]),
+                properties=field.get("properties") or None,
+            )
+            retyped.append(name)
+    except LarkError as error:
+        failure = f"修正表头类型失败：{error}"
+
+    if failure is not None:
+        if retyped:
+            # Half-applied: the table really did change, so the approval that
+            # covered the older structure must not survive it.
+            _clear_invalidated_approval(db, group_id, checked_fingerprint)
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "reason": "provision_failed",
+                "message": failure,
+                "created_fields": retyped,
+            },
+        )
+
+    try:
+        state = read_draft_state(client, _target_draft(target))
+    except LarkError as error:
+        raise HTTPException(status_code=409, detail=f"读取目标表失败：{error}") from None
+
+    locked = locked_target_for(db, group_id)
+    if locked is None or locked.target_fingerprint != checked_fingerprint:
+        raise HTTPException(status_code=409, detail="目标表已变化，请重新读取后再修正表头")
+    locked.schema_fingerprint = state["schema_fingerprint"]
+    if retyped:
+        locked.confirmed_at = None
+    db.commit()
+    db.refresh(locked)
+    return {
+        "retyped_fields": retyped,
         "schema_errors": state["schema_errors"],
         "target": serialize_target(locked),
     }

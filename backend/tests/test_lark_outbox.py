@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from dataclasses import replace
 from uuid import uuid4
 from uuid import UUID
 
@@ -6,15 +7,20 @@ import pytest
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
+import app.lark.outbox as outbox_module
+import app.worker as worker_module
+from app.config import settings
 from app.lark.outbox import (
+    EVIDENCE_SETTLE_SECONDS,
     claim_next_job,
     enqueue_attempt_job,
+    hold_job_for_evidence,
     retry_failed_jobs,
     run_job,
 )
 from app.lark.target import target_for
-from app.lark.write import record_matches_execution
-from app.models import Attempt, GroupCase, LarkTarget, SyncJob
+from app.lark.write import bug_fields, execution_fields, record_matches_execution
+from app.models import Attempt, GroupCase, LarkTarget, Screenshot, SyncJob
 from app.worker import build_gateway, process_one_job, run_once
 
 
@@ -114,8 +120,43 @@ def test_old_records_and_bugs_are_never_updated(fake_lark, confirmed_group, fail
     )
     created = fake_lark.created_records[-1]
     assert created["fields"]["进展状态"] == "待修复"
-    assert created["fields"]["问题描述"].startswith("【自动提】B-001")
+    # The defect row names the case and nothing else: the internal marker this
+    # tool used to prepend is gone from new writes.
+    assert created["fields"]["问题描述"].startswith("B-001")
+    assert "【" not in created["fields"]["问题描述"]
     assert "绑定未触发" in created["fields"]["问题描述"]
+
+
+def test_the_run_row_fills_owner_and_reporter_from_the_deployment(failed_attempt):
+    """负责人 and 报告人 are the hand-run display names, not the sign-in address."""
+
+    fields = execution_fields(
+        failed_attempt,
+        failed_attempt.group_case,
+        owner="待指派",
+        reporter="Max",
+        attachments=[],
+    )
+
+    assert fields["负责人"] == "待指派"
+    assert fields["报告人"] == "Max"
+    assert fields["结果"] == "不通过"
+
+
+def test_the_defect_remark_names_the_case_and_drops_the_marker(failed_attempt):
+    """备注 carries the case/result line and the console, with no 【自动提】 badge."""
+
+    fields = bug_fields(
+        failed_attempt,
+        failed_attempt.group_case,
+        reporter="Max",
+        attachments=[],
+    )
+
+    assert fields["备注"].startswith("由用例 B-001 提交（结果：不通过）")
+    assert "wallet.bind timeout" in fields["备注"]
+    assert "【自动提】" not in fields["备注"]
+    assert "【" not in fields["问题描述"]
 
 
 def test_passing_attempt_creates_only_an_execution_record(
@@ -167,7 +208,7 @@ def test_failed_retest_keeps_internal_label_out_of_both_lark_tables(
 
     execution, bug = fake_lark.created_records
     assert execution["fields"]["用例"] == "B-001 管理员登录"
-    assert bug["fields"]["问题描述"].startswith("【自动提】B-001 管理员登录\n")
+    assert bug["fields"]["问题描述"] == "B-001 管理员登录\n登录接口返回 500"
     assert "Rgroup-4e98c0-01" not in str(fake_lark.created_records)
 
 
@@ -834,6 +875,10 @@ def test_run_once_gives_each_claimed_job_its_own_target(
     second = _job(db_session, other_attempt)
     first.created_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
     second.created_at = datetime(2026, 1, 2, tzinfo=timezone.utc)
+    # A freshly queued job waits for the evidence of its attempt; this test is
+    # about which target each claim uses, so both rows are long since due.
+    first.next_retry_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    second.next_retry_at = datetime(2026, 1, 2, tzinfo=timezone.utc)
     db_session.commit()
 
     # Without an injected factory the worker would build a real Lark client;
@@ -903,3 +948,278 @@ def test_run_once_parks_a_claimed_job_whose_target_cannot_be_resolved(
     assert job.retry_count == 0
     # Parked means parked: no claim, lease expiry, claim cycle.
     assert claim_next_job(db_session) is None
+
+
+@pytest.fixture
+def screenshot_store(upload_dir, monkeypatch):
+    """Point the outbox's storage root at a temp dir and seed one picture."""
+
+    patched = replace(settings, upload_dir=str(upload_dir))
+    monkeypatch.setattr(outbox_module, "settings", patched)
+    return upload_dir
+
+
+def _attach_screenshot(db_session, attempt, store, content: bytes, *, mime="image/png"):
+    storage_key = f"{uuid4().hex}.png"
+    (store / storage_key).write_bytes(content)
+    shot = Screenshot(
+        attempt_id=attempt.id,
+        storage_key=storage_key,
+        mime=mime,
+        size_bytes=len(content),
+    )
+    db_session.add(shot)
+    db_session.commit()
+    return shot
+
+
+def _request_index(fake_lark, path: str) -> int:
+    return next(
+        index
+        for index, request in enumerate(fake_lark.requests)
+        if request["path"] == path
+    )
+
+
+def test_screenshots_reach_the_row_as_attachments(
+    fake_lark, confirmed_group, failed_attempt, screenshot_store, db_session, valid_png
+):
+    _attach_screenshot(db_session, failed_attempt, screenshot_store, valid_png)
+
+    assert process_one_job(fake_lark, failed_attempt) == "synced"
+
+    # The picture is uploaded (once for each base the two rows live in) and the
+    # file token, not the local name, is what the 截图 column holds.
+    assert [item["parent_type"] for item in fake_lark.uploaded_media] == [
+        "bitable_image",
+        "bitable_image",
+    ]
+    tokens = [item["file_token"] for item in fake_lark.uploaded_media]
+    execution, bug = fake_lark.created_records
+    assert execution["fields"]["截图"] == [{"file_token": tokens[0]}]
+    assert bug["fields"]["截图"] == [{"file_token": tokens[1]}]
+    # A row is never created before its evidence is in place.
+    upload_at = _request_index(fake_lark, "/open-apis/drive/v1/medias/upload_all")
+    create_at = _request_index(
+        fake_lark, "/open-apis/bitable/v1/apps/app-token/tables/tbl-runs/records"
+    )
+    assert upload_at < create_at
+
+
+def test_a_defect_row_uploads_its_own_copy_into_the_bug_base(
+    fake_lark, confirmed_group, failed_attempt, screenshot_store, db_session, valid_png
+):
+    _attach_screenshot(db_session, failed_attempt, screenshot_store, valid_png)
+    gateway = build_gateway(
+        _stored_target(db_session, confirmed_group.id), fake_lark.client
+    )
+
+    assert process_one_job(gateway, failed_attempt) == "synced"
+
+    # A file token only exists inside the base that minted it, so the defect row
+    # in 缺陷库 gets its own upload of the same picture.
+    assert [item["parent_node"] for item in fake_lark.uploaded_media] == [
+        "app-exec",
+        "app-bug",
+    ]
+    tokens = [item["file_token"] for item in fake_lark.uploaded_media]
+    execution, bug = fake_lark.created_records
+    assert execution["fields"]["截图"] == [{"file_token": tokens[0]}]
+    assert bug["fields"]["截图"] == [{"file_token": tokens[1]}]
+
+
+def test_a_run_without_a_screenshot_writes_an_empty_attachment_cell(
+    fake_lark, confirmed_group, failed_attempt, screenshot_store, db_session
+):
+    assert process_one_job(fake_lark, failed_attempt) == "synced"
+
+    assert fake_lark.uploaded_media == []
+    execution, bug = fake_lark.created_records
+    assert execution["fields"]["截图"] == []
+    assert bug["fields"]["截图"] == []
+
+
+def test_an_upload_failure_keeps_the_job_queued_with_its_screenshot(
+    fake_lark, confirmed_group, failed_attempt, screenshot_store, db_session, valid_png
+):
+    _attach_screenshot(db_session, failed_attempt, screenshot_store, valid_png)
+    fake_lark.upload_error = True
+    now = datetime.now(timezone.utc)
+
+    state = process_one_job(fake_lark, failed_attempt, now=now)
+
+    assert state == "pending"
+    assert fake_lark.created_execution == 0 and fake_lark.created_bug == 0
+    job = _job(db_session, failed_attempt)
+    assert job.error_kind == "upload_screenshot_failed"
+    assert job.retry_count == 1
+    assert job.next_retry_at > now
+
+    # The retry, once uploads work again, posts the evidence it kept.
+    fake_lark.upload_error = False
+    assert process_one_job(fake_lark, failed_attempt) == "synced"
+    tokens = [item["file_token"] for item in fake_lark.uploaded_media]
+    assert tokens
+    assert fake_lark.created_records[0]["fields"]["截图"] == [{"file_token": tokens[0]}]
+
+
+def test_a_configured_reporter_id_fills_the_person_column(
+    fake_lark, confirmed_group, failed_attempt, screenshot_store, db_session, monkeypatch
+):
+    monkeypatch.setattr(
+        worker_module,
+        "settings",
+        replace(settings, default_reporter_id="ou_61dabbc372d72932a4f6d8c7afb9de75"),
+    )
+
+    assert process_one_job(fake_lark, failed_attempt) == "synced"
+
+    assert fake_lark.created_records[1]["fields"]["反馈人"] == [
+        {"id": "ou_61dabbc372d72932a4f6d8c7afb9de75"}
+    ]
+
+
+def test_a_freshly_queued_row_waits_for_the_evidence_of_its_attempt(
+    confirmed_group, failed_attempt, db_session
+):
+    """A row must not be written while its screenshots could still be uploading."""
+
+    enqueue_attempt_job(db_session, failed_attempt)
+    db_session.commit()
+
+    job = _job(db_session, failed_attempt)
+    now = datetime.now(timezone.utc)
+    due = job.next_retry_at
+    assert due is not None and due > now
+    # The browser uploads the evidence right after the result is saved, so a
+    # claim inside that window is held back rather than building a row without it.
+    assert claim_next_job(db_session, now=now) is None
+    assert claim_next_job(db_session, now=due + timedelta(seconds=1)) is not None
+
+
+def test_a_screenshot_that_lands_pushes_the_queued_write_back(
+    authenticated_client, confirmed_group, valid_png, upload_dir, db_session
+):
+    """Evidence that arrives late still belongs to the row being written."""
+
+    created = authenticated_client.post(
+        f"/api/groups/{confirmed_group.id}/cases/B-001/attempts",
+        json={"result": "通过", "idempotency_key": "evidence-settles-1"},
+    )
+    assert created.status_code == 201
+    attempt_id = UUID(created.json()["id"])
+    queued_due = db_session.scalar(
+        select(SyncJob.next_retry_at).where(SyncJob.attempt_id == attempt_id)
+    )
+    assert queued_due is not None
+
+    uploaded = authenticated_client.post(
+        f"/api/attempts/{attempt_id}/screenshots",
+        files={"image": ("shot.png", valid_png, "image/png")},
+    )
+
+    assert uploaded.status_code == 201
+    db_session.expire_all()
+    pushed_due = db_session.scalar(
+        select(SyncJob.next_retry_at).where(SyncJob.attempt_id == attempt_id)
+    )
+    assert pushed_due is not None and pushed_due > queued_due
+    assert pushed_due >= datetime.now(timezone.utc) + timedelta(
+        seconds=EVIDENCE_SETTLE_SECONDS - 1
+    )
+
+
+def test_a_screenshot_that_arrives_after_the_row_is_written_never_moves_it(
+    fake_lark, authenticated_client, confirmed_group, valid_png, upload_dir, db_session
+):
+    """Once the record exists the picture can no longer join it, so nothing moves."""
+
+    created = authenticated_client.post(
+        f"/api/groups/{confirmed_group.id}/cases/B-001/attempts",
+        json={"result": "通过", "idempotency_key": "evidence-too-late-1"},
+    )
+    assert created.status_code == 201
+    attempt = db_session.get(Attempt, UUID(created.json()["id"]))
+    assert process_one_job(fake_lark, attempt) == "synced"
+
+    uploaded = authenticated_client.post(
+        f"/api/attempts/{attempt.id}/screenshots",
+        files={"image": ("late.png", valid_png, "image/png")},
+    )
+
+    assert uploaded.status_code == 201
+    db_session.expire_all()
+    job = _job(db_session, attempt)
+    assert job.state == "synced"
+    assert job.next_retry_at is None
+    assert fake_lark.created_execution == 1
+def test_a_queued_row_waits_for_the_evidence_of_its_attempt(
+    fake_lark, confirmed_group, failed_attempt, db_session
+):
+    """A row is not written while its screenshots could still be uploading."""
+
+    now = datetime.now(timezone.utc)
+    enqueue_attempt_job(db_session, failed_attempt)
+    db_session.commit()
+
+    job = _job(db_session, failed_attempt)
+    assert job.next_retry_at > now
+    # The browser uploads the evidence only after the row is saved, so a claim
+    # in that window would build the row without it.
+    assert claim_next_job(db_session, now=now) is None
+
+    # Once the settle window has passed the row is claimable as usual.
+    due = job.next_retry_at + timedelta(seconds=1)
+    assert claim_next_job(db_session, now=due) is not None
+    db_session.rollback()
+
+
+def test_a_screenshot_pushes_the_queued_write_of_its_row_back(
+    authenticated_client, confirmed_group, db_session, valid_png, upload_dir
+):
+    """Evidence that lands after the enqueue still belongs to that row."""
+
+    created = authenticated_client.post(
+        f"/api/groups/{confirmed_group.id}/cases/B-001/attempts",
+        json={"result": "通过", "idempotency_key": "evidence-settles-1"},
+    )
+    assert created.status_code == 201
+    attempt = db_session.get(Attempt, UUID(created.json()["id"]))
+    queued_due = _job(db_session, attempt).next_retry_at
+    assert queued_due is not None
+
+    uploaded = authenticated_client.post(
+        f"/api/attempts/{attempt.id}/screenshots",
+        files={"image": ("shot.png", valid_png, "image/png")},
+    )
+    assert uploaded.status_code == 201
+
+    db_session.expire_all()
+    assert _job(db_session, attempt).next_retry_at > queued_due
+
+
+def test_a_screenshot_after_the_row_is_written_is_left_alone(
+    fake_lark,
+    authenticated_client,
+    confirmed_group,
+    failed_attempt,
+    screenshot_store,
+    db_session,
+    valid_png,
+    upload_dir,
+):
+    """A created row is never rescheduled by a picture that arrives too late."""
+
+    assert process_one_job(fake_lark, failed_attempt) == "synced"
+    job = _job(db_session, failed_attempt)
+    synced_state, synced_due = job.state, job.next_retry_at
+
+    uploaded = authenticated_client.post(
+        f"/api/attempts/{failed_attempt.id}/screenshots",
+        files={"image": ("late.png", valid_png, "image/png")},
+    )
+    assert uploaded.status_code == 201
+
+    db_session.expire_all()
+    job = _job(db_session, failed_attempt)
+    assert (job.state, job.next_retry_at) == (synced_state, synced_due)

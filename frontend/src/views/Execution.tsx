@@ -35,6 +35,7 @@ type Props = {
   reserveRetest?: (groupId: string, code: string) => Promise<Attempt>;
   commitReserved?: (attemptId: string, payload: SubmitPayload) => Promise<Attempt>;
   uploadScreenshot?: (attemptId: string, file: File) => Promise<Screenshot>;
+  screenshotUrl?: (screenshotId: string) => string;
   loadSync?: (groupId: string) => Promise<SyncStatus>;
   loadLegacyHistory?: (groupId: string, code: string) => Promise<LegacyHistoryData>;
   legacyAttachmentUrl?: (refId: string, index: number) => string;
@@ -71,6 +72,7 @@ export function ExecutionView({
   reserveRetest,
   commitReserved,
   uploadScreenshot,
+  screenshotUrl,
   loadSync,
   loadLegacyHistory,
   legacyAttachmentUrl,
@@ -404,7 +406,7 @@ export function ExecutionView({
             {loadingCase ? (
               <p className="inline-status"><LoaderCircle className="spin" size={16} />读取执行记录</p>
             ) : (
-              <History attempts={attempts} />
+              <History attempts={attempts} screenshotUrl={screenshotUrl} />
             )}
             {loadLegacyHistory && selectedGroupId && activeCase ? (
               <LegacyHistory
@@ -412,6 +414,7 @@ export function ExecutionView({
                 loadHistory={legacyLoader}
                 attachmentUrl={legacyAttachmentUrl}
                 attempts={attempts}
+                screenshotUrl={screenshotUrl}
                 onStartRetest={reserveRetest ? () => void startRetest() : undefined}
                 reservedLabel={reserved?.label ?? null}
                 reloadKey={legacyVersion}

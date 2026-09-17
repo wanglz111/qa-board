@@ -2,6 +2,9 @@ import type { Attempt } from "../api";
 
 type Props = {
   attempts: Attempt[];
+  // Where one stored screenshot's bytes live. Without it the row still shows
+  // the run, it just cannot show the picture.
+  screenshotUrl?: (screenshotId: string) => string;
 };
 
 const RESULT_CLASS: Record<string, string> = {
@@ -10,7 +13,7 @@ const RESULT_CLASS: Record<string, string> = {
   未执行: "result-skip"
 };
 
-export function History({ attempts }: Props) {
+export function History({ attempts, screenshotUrl }: Props) {
   return (
     <section className="attempt-history" aria-label="执行历史">
       <div className="history-heading">
@@ -38,6 +41,26 @@ export function History({ attempts }: Props) {
               {attempt.note ? <p className="case-text">说明：{attempt.note}</p> : null}
               {attempt.console_text ? (
                 <pre className="console-text">{attempt.console_text}</pre>
+              ) : null}
+              {screenshotUrl && attempt.screenshots.length > 0 ? (
+                <ul className="attempt-screenshots">
+                  {attempt.screenshots.map((shot) => (
+                    <li key={shot.id}>
+                      <a
+                        href={screenshotUrl(shot.id)}
+                        target="_blank"
+                        rel="noreferrer"
+                        aria-label={`查看截图 ${shot.storage_key}`}
+                      >
+                        <img
+                          src={screenshotUrl(shot.id)}
+                          alt={`截图 ${shot.storage_key}`}
+                          loading="lazy"
+                        />
+                      </a>
+                    </li>
+                  ))}
+                </ul>
               ) : null}
             </li>
           ))}

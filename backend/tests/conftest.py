@@ -1,5 +1,6 @@
 import os
 import json
+import re
 from dataclasses import replace
 from datetime import datetime, timezone
 from io import BytesIO
@@ -222,6 +223,23 @@ def add_case(db_session):
     return factory
 
 
+def _multipart_text(body: bytes, name: str) -> str | None:
+    """Read one text part out of a multipart/form-data body.
+
+    httpx encodes ``data=`` fields and ``files=`` alike, so the same scan reads
+    the media-upload form without pulling in a parser.
+    """
+
+    match = re.search(
+        rb'name="' + name.encode() + rb'"\r\n(?:[^\r\n]*\r\n)?\r\n(.*?)\r\n--',
+        body,
+        re.DOTALL,
+    )
+    if match is None:
+        return None
+    return match.group(1).decode("utf-8", "replace")
+
+
 class FakeLark:
     """In-process Lark API double that records every request it receives."""
 
@@ -230,12 +248,12 @@ class FakeLark:
         self.records: list[dict[str, Any]] = []
         self.bug_records: list[dict[str, Any]] = []
         self.fields: list[dict[str, Any]] = [
-            {"field_name": name, "type": types[0]}
-            for name, types in REQUIRED_RUN_FIELD_TYPES.items()
+            {"field_id": f"fld-run-{index}", "field_name": name, "type": types[0]}
+            for index, (name, types) in enumerate(REQUIRED_RUN_FIELD_TYPES.items())
         ]
         self.bug_fields: list[dict[str, Any]] = [
-            {"field_name": name, "type": types[0]}
-            for name, types in REQUIRED_BUG_FIELD_TYPES.items()
+            {"field_id": f"fld-bug-{index}", "field_name": name, "type": types[0]}
+            for index, (name, types) in enumerate(REQUIRED_BUG_FIELD_TYPES.items())
         ]
         self.wiki_nodes: dict[str, dict[str, Any]] = {}
         self.wiki_error = False
@@ -260,6 +278,10 @@ class FakeLark:
         self.requests: list[dict[str, str]] = []
         self.created_records: list[dict[str, Any]] = []
         self.created_fields: list[dict[str, Any]] = []
+        # Every field this double converted, so a retype can be asserted on.
+        self.updated_fields: list[dict[str, Any]] = []
+        # Every file the upload endpoint received, with the parts it carried.
+        self.uploaded_media: list[dict[str, Any]] = []
         self.created_views: list[dict[str, Any]] = []
         self.created_tables: list[dict[str, Any]] = []
         # Created views per (base, table), so a later listing of that table shows
@@ -279,6 +301,7 @@ class FakeLark:
         self.table_create_http_status: int | None = None
         self.hide_created_records = False
         self.media_unauthorized = False
+        self.upload_error = False
         self.fields_error = False
         self.field_create_error = False
         self.client = LarkClient(
@@ -330,6 +353,65 @@ class FakeLark:
             return None
         return base_token, table_id
 
+    def _update_field(self, request: httpx.Request, path: str) -> httpx.Response:
+        """Convert one existing header, exactly like the live field update."""
+
+        pair = self._base_token_and_table(path)
+        if pair is None:
+            return httpx.Response(404, json={"code": 1, "msg": "unsupported table"})
+        role = self.field_roles.get(pair)
+        field_id = path.split("/fields/", 1)[1].split("/", 1)[0]
+        body = json.loads(request.content or b"{}")
+        store = self.bug_fields if role == "bug" else self.fields
+        for field in store:
+            if field.get("field_id") != field_id:
+                continue
+            # The live API keeps the name and swaps the type/property; the
+            # listing read afterwards has to show the new type.
+            field["type"] = body.get("type")
+            if "property" in body:
+                field["property"] = body.get("property")
+            self.updated_fields.append(
+                {
+                    **body,
+                    "field_id": field_id,
+                    "base_token": pair[0],
+                    "table_id": pair[1],
+                    "path": path,
+                }
+            )
+            return httpx.Response(
+                200,
+                json={"code": 0, "data": {"field": dict(field)}},
+            )
+        return httpx.Response(404, json={"code": 1, "msg": "field not found"})
+
+    def _upload_media(self, request: httpx.Request) -> httpx.Response:
+        """Accept one screenshot and mint a file token for it."""
+
+        if self.upload_error:
+            return httpx.Response(500, json={"code": 1, "msg": "upload failed"})
+        content = request.content or b""
+        try:
+            parent_node = _multipart_text(content, "parent_node")
+            parent_type = _multipart_text(content, "parent_type")
+            file_name = _multipart_text(content, "file_name")
+            size = _multipart_text(content, "size")
+        except (UnicodeDecodeError, AttributeError):
+            return httpx.Response(400, json={"code": 1, "msg": "malformed upload"})
+        token = f"file-{len(self.uploaded_media) + 1}"
+        self.uploaded_media.append(
+            {
+                "file_token": token,
+                "file_name": file_name,
+                "parent_node": parent_node,
+                "parent_type": parent_type,
+                "size": size,
+                "bytes": len(content),
+            }
+        )
+        return httpx.Response(200, json={"code": 0, "data": {"file_token": token}})
+
     # The worker only needs this create-only surface, so the double speaks it.
     def create_execution(self, fields: dict[str, Any]) -> str:
         return self._gateway.create_execution(fields)
@@ -340,10 +422,19 @@ class FakeLark:
     def find_execution_ids(self, fields: dict[str, Any]) -> list[str]:
         return self._gateway.find_execution_ids(fields)
 
+    def upload_attachment(
+        self, file_name: str, content: bytes, mime: str, *, role: str
+    ) -> str:
+        return self._gateway.upload_attachment(file_name, content, mime, role=role)
+
     def handle(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
         self.requests.append({"method": request.method, "path": path})
         if request.method in ("PUT", "PATCH", "DELETE"):
+            # The one mutation this app is allowed to make is a deliberate
+            # header repair; every row stays read-only, exactly like live Lark.
+            if request.method == "PUT" and "/fields/" in path:
+                return self._update_field(request, path)
             if request.method == "DELETE":
                 self.delete_calls.append(path)
             else:
@@ -351,6 +442,8 @@ class FakeLark:
             return httpx.Response(405, json={"code": 1, "msg": "legacy rows are read-only"})
         if path == "/open-apis/auth/v3/tenant_access_token/internal":
             return httpx.Response(200, json={"code": 0, "data": {"tenant_access_token": "fake-token"}})
+        if path == "/open-apis/drive/v1/medias/upload_all":
+            return self._upload_media(request)
         if path == "/open-apis/wiki/v2/spaces/get_node":
             if self.wiki_error:
                 return httpx.Response(200, json={"code": 1770003, "msg": "no permission"})
@@ -407,7 +500,13 @@ class FakeLark:
             # The new header has to appear in the next read of this table, so it
             # joins the same schema store the /fields listing answers from.
             store = self.bug_fields if role == "bug" else self.fields
-            store.append({"field_name": body.get("field_name"), "type": body.get("type")})
+            store.append(
+                {
+                    "field_id": f"fld-created-{len(self.created_fields)}",
+                    "field_name": body.get("field_name"),
+                    "type": body.get("type"),
+                }
+            )
             return httpx.Response(
                 200,
                 json={

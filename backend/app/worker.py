@@ -72,7 +72,11 @@ def process_one_job(
         job,
         gateway,
         attempt,
-        reporter=reporter or settings.admin_email,
+        # 负责人/报告人 are display names in the hand-run rows; the sign-in
+        # address is only the fallback when no name is configured.
+        reporter=reporter or settings.default_reporter or settings.admin_email,
+        owner=settings.default_owner,
+        reporter_id=settings.default_reporter_id or None,
         now=now,
     )
     return job.state

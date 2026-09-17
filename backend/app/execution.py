@@ -13,6 +13,7 @@ from app.auth import require_admin
 from app.db import get_db
 from app.lark.outbox import enqueue_attempt_job
 from app.models import Attempt, Group, GroupCase
+from app.screenshots import screenshot_payload
 
 
 router = APIRouter(prefix="/api", dependencies=[Depends(require_admin)])
@@ -59,6 +60,14 @@ def _attempt_payload(attempt: Attempt) -> dict[str, Any]:
         "console_text": attempt.console_text,
         "source": attempt.source,
         "created_at": attempt.created_at,
+        # The screenshots belong to the result: the page shows what the executor
+        # captured next to the row it was submitted with.
+        "screenshots": [
+            screenshot_payload(shot)
+            for shot in sorted(
+                attempt.screenshots, key=lambda shot: (shot.created_at, shot.storage_key)
+            )
+        ],
     }
 
 

@@ -58,6 +58,7 @@ export default function App() {
             reserveRetest={api.reserveRetest}
             commitReserved={api.submitReserved}
             uploadScreenshot={api.uploadScreenshot}
+            screenshotUrl={api.screenshotUrl}
             loadSync={api.syncStatus}
             loadLegacyHistory={api.legacyHistory}
             legacyAttachmentUrl={api.legacyAttachmentUrl}
@@ -76,6 +77,7 @@ export default function App() {
             confirmTarget={api.confirmLarkTarget}
             loadPlan={api.larkProvisionPlan}
             provision={api.provisionLarkFields}
+            retype={api.retypeLarkFields}
             createTable={api.createLarkTable}
             loadSync={api.syncStatus}
             enqueueSync={api.enqueueSync}

@@ -97,6 +97,9 @@ export type Attempt = {
   console_text: string | null;
   source: "execution" | "reconcile";
   created_at: string;
+  // The evidence submitted with the row. Empty for a row adopted from the table
+  // or for a run nobody attached a picture to.
+  screenshots: Screenshot[];
 };
 
 export type SubmitPayload = {
@@ -170,9 +173,23 @@ export type ProvisionView = {
 
 export type ProvisionPlan = {
   roles: { execution: ProvisionField[]; bug: ProvisionField[] };
+  // A header that already exists with a type the writer cannot fill (for
+  // example a 优先级 column still created as plain text). Converting it is the
+  // administrator's decision, so it is reported instead of being rewritten.
+  retype?: { execution: RetypeField[]; bug: RetypeField[] };
   // Whether each role's table already carries the provisioning view, so nobody
   // is offered a view that is already there.
   views?: { execution: ProvisionView; bug: ProvisionView };
+};
+
+export type RetypeField = {
+  name: string;
+  type: number;
+  type_name: string;
+  field_id: string | null;
+  current_type: number;
+  current_type_name: string;
+  properties: Record<string, unknown>;
 };
 
 export type ProvisionFieldsPayload = {
@@ -180,6 +197,18 @@ export type ProvisionFieldsPayload = {
   field_names: string[];
   create_view: boolean;
   acknowledge: boolean;
+};
+
+export type RetypeFieldsPayload = {
+  role: TableRole;
+  field_names: string[];
+  acknowledge: boolean;
+};
+
+export type RetypeFieldsResult = {
+  retyped_fields: string[];
+  schema_errors: string[];
+  target: LarkTarget;
 };
 
 export type ProvisionFieldsResult = {
@@ -457,6 +486,12 @@ export const api = {
     request<ProvisionPlan>(`/api/groups/${groupId}/lark/provision`),
   provisionLarkFields: (groupId: string, payload: ProvisionFieldsPayload) =>
     mutation<ProvisionFieldsResult>(`/api/groups/${groupId}/lark/provision/fields`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    }),
+  retypeLarkFields: (groupId: string, payload: RetypeFieldsPayload) =>
+    mutation<RetypeFieldsResult>(`/api/groups/${groupId}/lark/provision/retype`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload)

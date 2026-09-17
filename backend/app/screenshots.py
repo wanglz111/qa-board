@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from app.auth import require_admin
 from app.config import settings
 from app.db import get_db
+from app.lark.outbox import hold_job_for_evidence
 from app.models import Attempt, Screenshot
 
 
@@ -57,7 +58,9 @@ def _storage_path(storage_key: str) -> Path:
     return Path(settings.upload_dir) / storage_key
 
 
-def _payload(screenshot: Screenshot) -> dict[str, Any]:
+def screenshot_payload(screenshot: Screenshot) -> dict[str, Any]:
+    """One screenshot as the API shows it, reused by the attempt payload."""
+
     return {
         "id": screenshot.id,
         "attempt_id": screenshot.attempt_id,
@@ -102,13 +105,17 @@ async def upload_screenshot(
     )
     db.add(screenshot)
     try:
+        db.flush()
+        # The queued write for this attempt waits for its evidence: a row built
+        # before this upload landed could never carry the picture.
+        hold_job_for_evidence(db, attempt)
         db.commit()
     except Exception:
         db.rollback()
         storage_path.unlink(missing_ok=True)
         raise
     db.refresh(screenshot)
-    return _payload(screenshot)
+    return screenshot_payload(screenshot)
 
 
 @router.get("/screenshots/{screenshot_id}")

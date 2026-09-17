@@ -4,7 +4,13 @@ import pytest
 from sqlalchemy import select
 
 from app.lark.client import RECORD_MUTATION_METHODS, LarkError
-from app.lark.provision import PROVISION_FIELD_TYPES, provision_plan
+from app.lark.fields import BUG_PRIORITY_OPTIONS, PASS_RESULT_OPTIONS
+from app.lark.provision import (
+    PROVISION_FIELD_TYPES,
+    RUN_SCHEMA,
+    provision_plan,
+    retype_plan,
+)
 from app.models import Group, LarkTarget
 
 
@@ -68,7 +74,8 @@ def test_plan_lists_only_the_missing_required_fields():
     names = [field["name"] for field in plan]
     assert "用例" not in names
     assert "自定义列" not in names
-    assert names == sorted(set(names))
+    # The plan follows the reference table's column order, not the alphabet.
+    assert names == [name for name in RUN_SCHEMA if name in set(names)]
     assert set(names) == {"结果", "优先级", "负责人", "报告人", "日期", "截图", "控制台"}
 
 
@@ -83,14 +90,45 @@ def test_plan_is_empty_when_every_header_exists():
 
 def test_bug_plan_only_covers_the_defect_table():
     names = {field["name"] for field in provision_plan([], "bug")}
-    assert names == {"问题描述", "进展状态", "优先级", "反馈时间", "备注", "反馈人"}
+    assert names == {
+        "问题描述",
+        "进展状态",
+        "跟进人",
+        "优先级",
+        "反馈时间",
+        "备注",
+        "反馈人",
+        "截图",
+    }
 
 
 def test_plan_marks_date_and_attachment_types():
     plan = {field["name"]: field for field in provision_plan([], "execution")}
     assert plan["日期"]["type"] == 5
     assert plan["截图"]["type"] == 17
-    assert plan["结果"]["type"] == 1
+    # 结果 and 优先级 are the single-select columns a person picks from in the
+    # reference table, so the new field carries the same option vocabulary.
+    assert plan["结果"]["type"] == 3
+    assert plan["结果"]["properties"] == {
+        "options": [{"name": name} for name in PASS_RESULT_OPTIONS]
+    }
+    assert plan["优先级"]["type"] == 3
+    assert plan["用例"]["type"] == 1
+
+
+def test_plan_marks_the_bug_multi_select_options():
+    plan = {field["name"]: field for field in provision_plan([], "bug")}
+    # The defect table has no P3 at all: a P3 case is filed as P2 there.
+    assert plan["优先级"]["properties"] == {
+        "options": [{"name": name} for name in BUG_PRIORITY_OPTIONS]
+    }
+    assert plan["进展状态"]["type"] == 3
+    assert plan["反馈人"]["type"] == 11
+    assert plan["反馈人"]["properties"] == {"multiple": True}
+    assert plan["反馈时间"]["properties"] == {
+        "date_formatter": "yyyy/MM/dd",
+        "auto_fill": False,
+    }
 
 
 def test_setting_headers_creates_only_the_approved_fields(
@@ -112,9 +150,10 @@ def test_setting_headers_creates_only_the_approved_fields(
             "acknowledge": True,
         },
     ).json()
-    assert body["created_fields"] == ["日期", "结果"]
+    # Created in the reference order, so 结果 lands left of 日期.
+    assert body["created_fields"] == ["结果", "日期"]
     created = lark_fake.created_fields
-    assert [field["field_name"] for field in created] == ["日期", "结果"]
+    assert [field["field_name"] for field in created] == ["结果", "日期"]
     assert [(field["base_token"], field["table_id"]) for field in created] == [
         ("app-exec", "tbl-runs"),
         ("app-exec", "tbl-runs"),
@@ -180,16 +219,52 @@ def test_creating_a_table_returns_its_new_id(lark_fake, authenticated_client, pr
     created_table = lark_fake.created_tables[0]
     assert created_table["base_token"] == "app-bug"
     assert created_table["path"] == "/open-apis/bitable/v1/apps/app-bug/tables"
-    assert len(created_table["fields"]) == 6
+    assert len(created_table["fields"]) == 8
     fields = {field["field_name"]: field for field in created_table["fields"]}
-    # The field guide gives text fields a null property; a date field keeps its
-    # own, so the created table matches what Lark documents for both.
-    assert fields["优先级"]["property"] is None
+    # The field guide gives text fields a null property; a select, person and
+    # date field each keep their own, exactly like the hand-built table.
+    assert fields["问题描述"]["property"] is None
+    assert fields["优先级"]["property"] == {
+        "options": [{"name": name} for name in BUG_PRIORITY_OPTIONS]
+    }
+    assert fields["反馈人"]["property"] == {"multiple": True}
+    assert fields["跟进人"]["property"] == {"multiple": True}
+    assert fields["截图"]["property"] is None
     assert fields["反馈时间"]["property"] == {
         "date_formatter": "yyyy/MM/dd",
         "auto_fill": False,
     }
     assert lark_fake.created_views == []
+
+
+def test_a_created_table_keeps_the_reference_column_order(
+    lark_fake, authenticated_client, provision_group
+):
+    """A generated table reads in the same order as the hand-built one.
+
+    Read off the reference base on 2026/09/17: the execution table is 用例 结果
+    优先级 负责人 截图 控制台 报告人 日期, and the defect table is 问题描述 进展状态
+    跟进人 优先级 截图 反馈人 反馈时间 备注. Sorting the names instead is what put
+    优先级/反馈人/… at the front and 问题描述 last.
+    """
+
+    expected = {
+        "execution": ["用例", "结果", "优先级", "负责人", "截图", "控制台", "报告人", "日期"],
+        "bug": ["问题描述", "进展状态", "跟进人", "优先级", "截图", "反馈人", "反馈时间", "备注"],
+    }
+    for role, names in expected.items():
+        lark_fake.created_tables.clear()
+        authenticated_client.post(
+            f"/api/groups/{provision_group.id}/lark/provision/table",
+            json={
+                "role": role,
+                "base_token": "app-exec" if role == "execution" else "app-bug",
+                "table_name": "新表",
+                "acknowledge": True,
+            },
+        )
+        created = lark_fake.created_tables[0]
+        assert [field["field_name"] for field in created["fields"]] == names
 
 
 def test_creating_a_table_reports_a_lark_permission_refusal(
@@ -260,7 +335,9 @@ def test_a_created_header_always_carries_a_property(
     )
 
     created = {field["field_name"]: field for field in lark_fake.created_fields}
-    assert created["结果"]["property"] is None
+    assert created["结果"]["property"] == {
+        "options": [{"name": name} for name in PASS_RESULT_OPTIONS]
+    }
     assert created["日期"]["property"] == {
         "date_formatter": "yyyy/MM/dd",
         "auto_fill": False,
@@ -588,7 +665,7 @@ def test_setting_headers_clears_the_approval_when_a_later_create_is_refused(
     real_create = lark_fake.client.create_field
 
     def create_one_then_refuse(app_token, table_id, name, type_id, properties):
-        if name != "优先级":
+        if name != "结果":
             raise LarkError(
                 "Lark rejected the create (code 1254302): no permission to create fields"
             )
@@ -599,7 +676,7 @@ def test_setting_headers_clears_the_approval_when_a_later_create_is_refused(
         f"/api/groups/{provision_group.id}/lark/provision/fields",
         json={
             "role": "execution",
-            "field_names": ["优先级", "结果"],
+            "field_names": ["结果", "优先级"],
             "create_view": False,
             "acknowledge": True,
         },
@@ -607,9 +684,9 @@ def test_setting_headers_clears_the_approval_when_a_later_create_is_refused(
 
     assert response.status_code == 409, response.text
     detail = response.json()["detail"]
-    assert detail["created_fields"] == ["优先级"]
+    assert detail["created_fields"] == ["结果"]
     assert "创建表头失败" in detail["message"]
-    assert [field["field_name"] for field in lark_fake.created_fields] == ["优先级"]
+    assert [field["field_name"] for field in lark_fake.created_fields] == ["结果"]
     assert lark_fake.created_fields[0]["base_token"] == "app-exec"
     stored = db_session.scalar(
         select(LarkTarget).where(LarkTarget.group_id == provision_group.id)
@@ -618,7 +695,231 @@ def test_setting_headers_clears_the_approval_when_a_later_create_is_refused(
 
 
 def test_plan_fails_loudly_when_a_required_header_has_no_type(monkeypatch):
-    monkeypatch.delitem(PROVISION_FIELD_TYPES, "控制台")
+    # The role schema is what the plan reads; dropping the header from the
+    # flattened guide alone would not reach it.
+    monkeypatch.delitem(RUN_SCHEMA, "控制台")
 
     with pytest.raises(RuntimeError, match="控制台"):
         provision_plan([], "execution")
+
+
+def _all_text_exec_headers():
+    """The headers this tool created as plain text before the schema was known.
+
+    This is the shape the live self-built tables have: 结果/优先级 exist, so the
+    create-only plan leaves them alone, and only a deliberate repair can make
+    them selectable.
+    """
+
+    return [
+        {"field_id": "fld-用例", "field_name": "用例", "type": 1},
+        {"field_id": "fld-结果", "field_name": "结果", "type": 1},
+        {"field_id": "fld-优先级", "field_name": "优先级", "type": 1},
+    ]
+
+
+def test_the_retype_plan_lists_the_wrongly_typed_headers(
+    lark_fake, authenticated_client, provision_group
+):
+    lark_fake.fields = _all_text_exec_headers()
+
+    plan = authenticated_client.get(
+        f"/api/groups/{provision_group.id}/lark/provision"
+    ).json()
+
+    repairs = {row["name"]: row for row in plan["retype"]["execution"]}
+    assert set(repairs) == {"结果", "优先级"}
+    assert repairs["结果"]["type"] == 3
+    assert repairs["结果"]["type_name"] == "single_select"
+    assert repairs["结果"]["field_id"] == "fld-结果"
+    assert repairs["结果"]["current_type"] == 1
+    assert repairs["结果"]["current_type_name"] == "text"
+    # A header that is already correct is never offered for a repair, and a
+    # whole-table listing is not confused with a repair.
+    assert "用例" not in repairs
+
+
+def test_the_retype_plan_is_empty_for_the_reference_schema(lark_fake, authenticated_client, provision_group):
+    lark_fake.fields = [
+        {"field_id": f"fld-{index}", "field_name": name, "type": type_id}
+        for index, (name, type_id) in enumerate(
+            {
+                "用例": 1,
+                "结果": 3,
+                "优先级": 3,
+                "负责人": 1,
+                "报告人": 1,
+                "日期": 5,
+                "截图": 17,
+                "控制台": 1,
+            }.items()
+        )
+    ]
+    lark_fake.bug_fields = [
+        {"field_id": f"fld-bug-{index}", "field_name": name, "type": type_id}
+        for index, (name, type_id) in enumerate(
+            {
+                "问题描述": 1,
+                "进展状态": 3,
+                "优先级": 3,
+                "反馈时间": 5,
+                "备注": 1,
+                "反馈人": 11,
+                "跟进人": 11,
+                "截图": 17,
+            }.items()
+        )
+    ]
+
+    plan = authenticated_client.get(
+        f"/api/groups/{provision_group.id}/lark/provision"
+    ).json()
+
+    assert plan["retype"] == {"execution": [], "bug": []}
+    assert plan["roles"] == {"execution": [], "bug": []}
+    assert retype_plan(lark_fake.fields, "execution") == []
+
+
+def test_retype_converts_only_the_approved_header(
+    lark_fake, authenticated_client, provision_group, db_session
+):
+    lark_fake.fields = _all_text_exec_headers()
+
+    body = authenticated_client.post(
+        f"/api/groups/{provision_group.id}/lark/provision/retype",
+        json={"role": "execution", "field_names": ["结果"], "acknowledge": True},
+    ).json()
+
+    assert body["retyped_fields"] == ["结果"]
+    assert [row["field_name"] for row in lark_fake.updated_fields] == ["结果"]
+    updated = lark_fake.updated_fields[0]
+    assert updated["type"] == 3
+    assert updated["property"] == {
+        "options": [{"name": name} for name in PASS_RESULT_OPTIONS]
+    }
+    assert updated["path"] == (
+        "/open-apis/bitable/v1/apps/app-exec/tables/tbl-runs/fields/fld-结果"
+    )
+    assert (updated["base_token"], updated["table_id"]) == ("app-exec", "tbl-runs")
+    # The column that was not ticked keeps its type, and no row was touched.
+    live = {field["field_name"]: field["type"] for field in lark_fake.fields}
+    assert live["结果"] == 3
+    assert live["优先级"] == 1
+    assert live["用例"] == 1
+    assert not lark_fake.put_calls and not lark_fake.delete_calls
+    # A real structure change invalidates the earlier write approval.
+    assert body["target"]["confirmed"] is False
+    stored = db_session.scalar(
+        select(LarkTarget).where(LarkTarget.group_id == provision_group.id)
+    )
+    assert stored is not None and stored.confirmed_at is None
+
+
+def test_retype_refuses_without_acknowledgement(
+    lark_fake, authenticated_client, provision_group
+):
+    lark_fake.fields = _all_text_exec_headers()
+
+    response = authenticated_client.post(
+        f"/api/groups/{provision_group.id}/lark/provision/retype",
+        json={"role": "execution", "field_names": ["结果"], "acknowledge": False},
+    )
+
+    assert response.status_code == 409
+    assert lark_fake.updated_fields == []
+    assert lark_fake.requests == []
+
+
+def test_retype_only_touches_a_header_of_the_named_role(
+    lark_fake, authenticated_client, provision_group
+):
+    """A defect header may not be converted through the execution table."""
+
+    lark_fake.fields = _all_text_exec_headers()
+
+    body = authenticated_client.post(
+        f"/api/groups/{provision_group.id}/lark/provision/retype",
+        json={
+            "role": "execution",
+            "field_names": ["问题描述", "进展状态", "用例"],
+            "acknowledge": True,
+        },
+    ).json()
+
+    assert body["retyped_fields"] == []
+    assert lark_fake.updated_fields == []
+
+
+def test_retype_is_a_no_op_and_keeps_the_approval_once_everything_is_right(
+    lark_fake, authenticated_client, provision_group, db_session
+):
+    lark_fake.fields = [
+        {"field_id": f"fld-{index}", "field_name": name, "type": type_id}
+        for index, (name, type_id) in enumerate(
+            {
+                "用例": 1,
+                "结果": 3,
+                "优先级": 3,
+                "负责人": 1,
+                "报告人": 1,
+                "日期": 5,
+                "截图": 17,
+                "控制台": 1,
+            }.items()
+        )
+    ]
+    lark_fake.bug_fields = [
+        {"field_id": f"fld-bug-{index}", "field_name": name, "type": type_id}
+        for index, (name, type_id) in enumerate(
+            {
+                "问题描述": 1,
+                "进展状态": 3,
+                "优先级": 3,
+                "反馈时间": 5,
+                "备注": 1,
+                "反馈人": 11,
+                "跟进人": 11,
+                "截图": 17,
+            }.items()
+        )
+    ]
+    payload = {
+        "role": "execution",
+        "field_names": ["结果", "优先级"],
+        "acknowledge": True,
+    }
+
+    body = authenticated_client.post(
+        f"/api/groups/{provision_group.id}/lark/provision/retype", json=payload
+    ).json()
+
+    assert body["retyped_fields"] == []
+    assert lark_fake.updated_fields == []
+    # Nothing changed, so the approval that already covered this structure has
+    # to survive: a no-op must never force a re-confirmation.
+    assert body["target"]["confirmed"] is True
+    stored = db_session.scalar(
+        select(LarkTarget).where(LarkTarget.group_id == provision_group.id)
+    )
+    assert stored is not None and stored.confirmed_at is not None
+
+
+def test_retype_reports_a_refused_conversion_as_a_conflict(
+    lark_fake, authenticated_client, provision_group, monkeypatch
+):
+    lark_fake.fields = _all_text_exec_headers()
+
+    def refuse(*args, **kwargs):
+        raise LarkError("Lark rejected the field update (code 1254306): bad type")
+
+    monkeypatch.setattr(lark_fake.client, "update_field", refuse)
+    response = authenticated_client.post(
+        f"/api/groups/{provision_group.id}/lark/provision/retype",
+        json={"role": "execution", "field_names": ["结果"], "acknowledge": True},
+    )
+
+    assert response.status_code == 409, response.text
+    detail = response.json()["detail"]
+    assert detail["reason"] == "provision_failed"
+    assert "修正表头类型失败" in detail["message"]
+    assert "test-app-secret" not in response.text

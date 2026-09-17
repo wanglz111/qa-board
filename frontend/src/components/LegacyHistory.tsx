@@ -7,6 +7,9 @@ type Props = {
   code: string;
   loadHistory: (code: string) => Promise<LegacyHistoryData>;
   attachmentUrl?: (refId: string, index: number) => string;
+  // Where one local attempt's stored screenshots live, so the "本组测试" tab
+  // shows the same evidence the executor submitted.
+  screenshotUrl?: (screenshotId: string) => string;
   attempts?: Attempt[];
   onStartRetest?: () => void;
   reservedLabel?: string | null;
@@ -64,6 +67,7 @@ export function LegacyHistory({
   code,
   loadHistory,
   attachmentUrl,
+  screenshotUrl,
   attempts = [],
   onStartRetest,
   reservedLabel,
@@ -136,6 +140,29 @@ export function LegacyHistory({
                   <time>{new Date(attempt.created_at).toLocaleString()}</time>
                 </div>
                 {attempt.note ? <p className="case-text">说明：{attempt.note}</p> : null}
+                {attempt.console_text ? (
+                  <pre className="console-text">{attempt.console_text}</pre>
+                ) : null}
+                {screenshotUrl && attempt.screenshots.length > 0 ? (
+                  <ul className="attempt-screenshots">
+                    {attempt.screenshots.map((shot) => (
+                      <li key={shot.id}>
+                        <a
+                          href={screenshotUrl(shot.id)}
+                          target="_blank"
+                          rel="noreferrer"
+                          aria-label={`查看截图 ${shot.storage_key}`}
+                        >
+                          <img
+                            src={screenshotUrl(shot.id)}
+                            alt={`截图 ${shot.storage_key}`}
+                            loading="lazy"
+                          />
+                        </a>
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
               </li>
             ))}
           </ol>

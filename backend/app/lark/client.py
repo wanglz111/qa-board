@@ -166,8 +166,18 @@ class LarkClient:
         data = body.get("data")
         return data if isinstance(data, dict) else body
 
-    def _post_json(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
-        """POST one JSON body and return Lark's ``data`` dict.
+    def _post(
+        self,
+        path: str,
+        *,
+        method: str = "POST",
+        action: str = "create",
+        json: dict[str, Any] | None = None,
+        data: dict[str, Any] | None = None,
+        files: dict[str, Any] | None = None,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        """Send one body and return Lark's ``data`` dict.
 
         Every create-only write goes through here, so the audit records one
         method and path per request. A timeout is reported as ``LarkTimeout``
@@ -178,12 +188,22 @@ class LarkClient:
         """
 
         headers = {"Authorization": f"Bearer {self._token_value()}"}
-        self.calls.append(LarkCall(method="POST", path=path))
+        self.calls.append(LarkCall(method=method, path=path))
         try:
-            response = self._client.post(path, json=body, headers=headers)
+            response = self._client.request(
+                method,
+                path,
+                json=json,
+                data=data,
+                files=files,
+                headers=headers,
+                timeout=timeout,
+            )
             response.raise_for_status()
         except httpx.TimeoutException as error:
-            raise LarkTimeout(f"Lark create timed out: {type(error).__name__}") from None
+            raise LarkTimeout(
+                f"Lark {action} timed out: {type(error).__name__}"
+            ) from None
         except httpx.HTTPError as error:
             # Lark puts the actionable reason in the JSON body even for HTTP
             # errors (for example, a missing bitable permission). Preserve only
@@ -200,7 +220,7 @@ class LarkClient:
                 detail += f"：{message}"
             suffix = f" HTTP {status}" if status is not None else ""
             raise LarkError(
-                f"Lark create failed{suffix}: {type(error).__name__}{detail}"
+                f"Lark {action} failed{suffix}: {type(error).__name__}{detail}"
                 f"{_permission_hint(status, message)}"
             ) from None
         try:
@@ -212,11 +232,16 @@ class LarkClient:
             message = str(payload.get("msg") or "").strip().replace("\n", " ")
             detail = f": {message}" if message else ""
             raise LarkError(
-                f"Lark rejected the create (code {code}){detail}"
+                f"Lark rejected the {action} (code {code}){detail}"
                 f"{_permission_hint(None, message)}"
             )
         data = payload.get("data")
         return data if isinstance(data, dict) else payload
+
+    def _post_json(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
+        """POST one JSON body; the create-only writes all speak through here."""
+
+        return self._post(path, json=body)
 
     def app_metadata(self, app_token: str) -> dict[str, Any]:
         return self._send("GET", f"/open-apis/bitable/v1/apps/{app_token}")
@@ -295,6 +320,73 @@ class LarkClient:
         if not isinstance(record, dict) or not record.get("record_id"):
             raise LarkError("Lark create returned no record id")
         return record
+
+    def upload_media(
+        self,
+        *,
+        file_name: str,
+        content: bytes,
+        mime: str,
+        parent_node: str,
+        parent_type: str = "bitable_image",
+    ) -> str:
+        """Upload one file into a base and return the token a record can hold.
+
+        A record's attachment column stores ``[{"file_token": ...}]``, and Lark
+        mints that token here. ``parent_node`` is the base's app token, and
+        ``parent_type`` is ``bitable_image`` for the pictures this tool writes.
+        """
+
+        # The upload path is not a record path, so the record audit still sees
+        # only the create calls the outbox makes.
+        data = self._post(
+            "/open-apis/drive/v1/medias/upload_all",
+            action="upload",
+            data={
+                "file_name": file_name,
+                "parent_type": parent_type,
+                "parent_node": parent_node,
+                "size": str(len(content)),
+            },
+            files={"file": (file_name, content, mime)},
+            # An image upload is slower than a metadata call; the default
+            # request timeout would abort one that is still going.
+            timeout=max(self._client.timeout.read or 15.0, 60.0),
+        )
+        file_token = data.get("file_token")
+        if not file_token:
+            raise LarkError("Lark upload returned no file token")
+        return str(file_token)
+
+    def update_field(
+        self,
+        app_token: str,
+        table_id: str,
+        field_id: str,
+        *,
+        name: str,
+        type_id: int,
+        properties: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Convert one existing column to the type the writer needs.
+
+        Only a column the administrator explicitly approved is ever changed:
+        this is a deliberate repair of a header this tool created wrongly, not a
+        migration that runs on its own.
+        """
+
+        body: dict[str, Any] = {
+            "field_name": name,
+            "type": type_id,
+            "property": properties or None,
+        }
+        return self._post(
+            f"/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}"
+            f"/fields/{field_id}",
+            method="PUT",
+            action="field update",
+            json=body,
+        )
 
     def create_field(
         self, app_token: str, table_id: str, name: str, type_id: int, properties: dict[str, Any]

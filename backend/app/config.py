@@ -22,6 +22,16 @@ class Settings:
     lark_base_url: str = "https://open.feishu.cn"
     lark_app_id: str = ""
     lark_app_secret: str = ""
+    # 负责人 and 报告人 are plain text columns in the verified run table, and the
+    # hand-built rows carry the deployment's display names, not the sign-in
+    # address the operator types at login. DEFAULT_OWNER/DEFAULT_REPORTER hold
+    # those names so a generated row reads like a hand-run one.
+    default_owner: str = "待指派"
+    default_reporter: str = ""
+    # The 反馈人 column of the verified defect table is a person column, and only
+    # an open id is accepted there. Empty means "no id is known": the writer then
+    # keeps 反馈人 as text so a legacy text column still receives the name.
+    default_reporter_id: str = ""
 
 
 def _environment_flag(name: str, default: bool = False) -> bool:
@@ -48,4 +58,7 @@ settings = Settings(
     lark_base_url=os.environ.get("LARK_BASE_URL") or "https://open.larksuite.com",
     lark_app_id=os.environ.get("LARK_APP_ID") or "",
     lark_app_secret=os.environ.get("LARK_APP_SECRET") or "",
+    default_owner=os.environ.get("DEFAULT_OWNER") or "待指派",
+    default_reporter=os.environ.get("DEFAULT_REPORTER") or "",
+    default_reporter_id=os.environ.get("DEFAULT_REPORTER_ID") or "",
 )

@@ -218,3 +218,8 @@ table { width: 100%; border-collapse: collapse; font-size: .8rem; } th { color: 
   .reference-gallery-main img { max-height: 220px; }
   .reference-gallery-locators img { width: 52px; height: 52px; }
 }
+.attempt-screenshots { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 0; padding: 0; list-style: none; }
+.attempt-screenshots li { min-width: 0; }
+.attempt-screenshots a { display: block; line-height: 0; border-radius: 5px; }
+.attempt-screenshots a:focus-visible { outline: 2px solid #176b57; outline-offset: 2px; }
+.attempt-screenshots img { display: block; width: 96px; height: 96px; object-fit: cover; background: #eef1f2; border: 1px solid #d9dddf; border-radius: 5px; }

@@ -14,6 +14,8 @@ import {
   type ProvisionFieldsPayload,
   type ProvisionFieldsResult,
   type ProvisionPlan,
+  type RetypeFieldsPayload,
+  type RetypeFieldsResult,
   type SyncStatus,
   type Table,
   type TableRole
@@ -42,6 +44,7 @@ type Props = {
   ) => Promise<{ requeued: number; released: number; repointed?: number }>;
   loadPlan?: (groupId: string) => Promise<ProvisionPlan>;
   provision?: (groupId: string, payload: ProvisionFieldsPayload) => Promise<ProvisionFieldsResult>;
+  retype?: (groupId: string, payload: RetypeFieldsPayload) => Promise<RetypeFieldsResult>;
   createTable?: (groupId: string, payload: CreateTablePayload) => Promise<CreateTableResult>;
   initialGroupId?: string;
 };
@@ -115,6 +118,7 @@ export function LarkCheckView({
   retrySync,
   loadPlan,
   provision,
+  retype,
   createTable,
   initialGroupId
 }: Props) {
@@ -669,6 +673,7 @@ export function LarkCheckView({
             groupId={groupId}
             loadPlan={loadPlan}
             provision={provision}
+            retype={retype}
             onChanged={reloadAfterProvision}
             targetFingerprint={target.target_fingerprint}
             schemaFingerprint={target.schema_fingerprint}

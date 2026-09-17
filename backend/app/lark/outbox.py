@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Annotated, Any
 from uuid import UUID
 
@@ -11,6 +12,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from app.auth import require_admin
+from app.config import settings
 from app.db import get_db
 from app.lark.client import LarkError, LarkTimeout
 from app.lark.target import target_for
@@ -42,9 +44,53 @@ STALE_CONFIRMATION_SECONDS = 60
 
 ACTIVE_STATES = ("pending", "running")
 
+# A row is not written the instant it is queued. The browser uploads the
+# screenshots that belong to it right after the result is saved, and a row built
+# before they land would carry no attachment — and a create is never repeated.
+# So a queued row waits one settle window, and every screenshot that arrives
+# pushes that window back: the write happens once the evidence stops coming.
+EVIDENCE_SETTLE_SECONDS = 15
+
+# The suffix each stored screenshot's mime maps to, so the file reaches Lark
+# under a name a person can read in the attachment list.
+SCREENSHOT_SUFFIX = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}
+SNAPSHOT_LIMIT = 10
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _stored_screenshots(attempt: Attempt) -> list[tuple[str, bytes, str]]:
+    """This attempt's screenshots, read back as (name, bytes, mime).
+
+    A row whose file is gone is skipped rather than blocking the row forever:
+    the missing file is a storage problem, and the result still belongs in Lark.
+    """
+
+    directory = Path(settings.upload_dir)
+    stored: list[tuple[str, bytes, str]] = []
+    shots = sorted(
+        attempt.screenshots, key=lambda shot: (shot.created_at, shot.storage_key)
+    )
+    for index, shot in enumerate(shots[:SNAPSHOT_LIMIT], start=1):
+        path = directory / shot.storage_key
+        if not path.is_file():
+            continue
+        suffix = SCREENSHOT_SUFFIX.get(shot.mime, "")
+        stored.append((f"{attempt.label}-{index}{suffix}", path.read_bytes(), shot.mime))
+    return stored
+
+
+def _upload_screenshots(
+    gateway: LarkWriteGateway, attempt: Attempt, *, role: str
+) -> list[str]:
+    """Upload this attempt's screenshots to that role's base, returning tokens."""
+
+    tokens: list[str] = []
+    for name, content, mime in _stored_screenshots(attempt):
+        tokens.append(gateway.upload_attachment(name, content, mime, role=role))
+    return tokens
 
 
 def group_is_confirmed(db: Session, group_id: UUID) -> bool:
@@ -68,13 +114,39 @@ def enqueue_attempt_job(db: Session, attempt: Attempt) -> SyncJob | None:
     job = SyncJob(
         attempt_id=attempt.id,
         state="pending",
-        next_retry_at=_now(),
+        # The first write waits for the evidence of this attempt: the browser
+        # starts uploading the screenshots only after this row is saved, so a
+        # write that ran any earlier could never carry them.
+        next_retry_at=_now() + timedelta(seconds=EVIDENCE_SETTLE_SECONDS),
         # The job is pinned to the destination that was approved when it was
         # queued; anything else parks it until an administrator re-points it.
         target_fingerprint=target.target_fingerprint,
     )
     db.add(job)
     return job
+
+
+def hold_job_for_evidence(
+    db: Session, attempt: Attempt, *, now: datetime | None = None
+) -> None:
+    """Push a queued row's write back so evidence still arriving is included.
+
+    Called when a screenshot lands. Only a row that has not been written yet is
+    held: once the execution record exists the attachment can no longer be
+    added to it, and a job an administrator has to look at (failed/uncertain) is
+    never rescheduled from here.
+    """
+
+    moment = now or _now()
+    job = db.scalar(select(SyncJob).where(SyncJob.attempt_id == attempt.id))
+    if job is None or job.state not in ACTIVE_STATES:
+        return
+    if job.new_exec_record_id is not None:
+        # The row is already in Lark; a later picture cannot join it.
+        return
+    due = moment + timedelta(seconds=EVIDENCE_SETTLE_SECONDS)
+    if job.next_retry_at is None or job.next_retry_at < due:
+        job.next_retry_at = due
 
 
 def enqueue_group_attempts(db: Session, group_id: UUID) -> int:
@@ -188,6 +260,8 @@ def run_job(
     attempt: Attempt,
     *,
     reporter: str,
+    owner: str | None = None,
+    reporter_id: str | None = None,
     now: datetime | None = None,
 ) -> SyncJob:
     """Run one job. A remote create is never repeated once its id is stored."""
@@ -216,7 +290,18 @@ def run_job(
         return job
 
     if job.new_exec_record_id is None:
-        fields = execution_fields(attempt, case, reporter)
+        try:
+            # The evidence travels with the row: a failure nobody can look at is
+            # not a defect report. A file that cannot be uploaded keeps the job
+            # queued instead of dropping the screenshot.
+            attachments = _upload_screenshots(gateway, attempt, role="execution")
+        except LarkError:
+            _schedule_retry(db, job, "upload_screenshot_failed", now=moment)
+            db.commit()
+            return job
+        fields = execution_fields(
+            attempt, case, owner=owner or reporter, reporter=reporter, attachments=attachments
+        )
         try:
             job.new_exec_record_id = gateway.create_execution(fields)
         except LarkTimeout:
@@ -239,8 +324,24 @@ def run_job(
 
     if attempt.result == "不通过" and job.new_bug_record_id is None:
         try:
+            # A bug table may live in another base, where the execution record's
+            # tokens are not valid; the bug row gets its own uploads.
+            bug_attachments = _upload_screenshots(gateway, attempt, role="bug")
+        except LarkError:
+            # An upload is not a record write: nothing ambiguous happened, so a
+            # bounded retry is safe and the screenshot is not dropped.
+            _schedule_retry(db, job, "upload_screenshot_failed", now=moment)
+            db.commit()
+            return job
+        try:
             job.new_bug_record_id = gateway.create_bug(
-                bug_fields(attempt, case, reporter)
+                bug_fields(
+                    attempt,
+                    case,
+                    reporter=reporter,
+                    attachments=bug_attachments,
+                    reporter_id=reporter_id,
+                )
             )
         except LarkTimeout:
             _mark_uncertain(db, job, "timeout_after_exec_create")

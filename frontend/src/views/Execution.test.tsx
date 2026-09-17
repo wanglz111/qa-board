@@ -57,7 +57,8 @@ function committed(id: string, label: string, result: Attempt["result"], note: s
     note,
     console_text: null,
     source: "execution",
-    created_at: "2026-09-16T09:00:00Z"
+    created_at: "2026-09-16T09:00:00Z",
+    screenshots: []
   };
 }
 
@@ -246,7 +247,8 @@ it("reserves a retest label before committing it", async () => {
     note: null,
     console_text: null,
     source: "execution",
-    created_at: "2026-09-16T10:00:00Z"
+    created_at: "2026-09-16T10:00:00Z",
+    screenshots: []
   };
   const reserveRetest = vi.fn().mockResolvedValue(reserved);
   const commitReserved = vi.fn().mockResolvedValue({ ...reserved, state: "committed", result: "通过" });
