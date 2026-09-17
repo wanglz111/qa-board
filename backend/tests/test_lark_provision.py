@@ -1273,4 +1273,170 @@ def test_the_plan_says_how_many_rows_a_rebuild_would_rewrite(
     ).json()
 
     # 执行表重写每一条本地结果；缺陷表只重写「不通过」的那一条。
+    # 这两条都是经过 POST /attempts 正常入队的 attempt（`provision_group` 已确认），
+    # 所以计 job 还是计 attempt 在这里给出同一个数：{2, 1}。
     assert plan["rebuild"] == {"execution": 2, "bug": 1}
+
+
+def test_the_rebuild_count_only_counts_the_rows_a_rebuild_will_re_file(
+    lark_fake, authenticated_client, provision_group, add_case, db_session
+):
+    """一条从表里对照采纳的行不会被重写，所以也不该被计数。
+
+    重建真正再写一遍的工作单位是入队的那条 ``SyncJob``，不是 committed 的
+    attempt：``reset_jobs_for_rebuilt_table`` 只 UPDATE 已存在的 job，从不 INSERT
+    （``backend/app/lark/outbox.py:553``），而 ``enqueue_attempt_job`` 明确拒绝
+    ``source != "execution"`` 的行（``outbox.py:101``）。同组两条 committed 结果里
+    有一条是 reconcile 采纳的，旧实现报 ``{"execution": 2, "bug": 1}``，而重建实际
+    只会重写一条。
+    """
+
+    add_case(provision_group.id, code="B-002", title="钱包绑定")
+
+    # 一条正常执行并入了队的行。
+    executed = authenticated_client.post(
+        f"/api/groups/{provision_group.id}/cases/B-001/attempts",
+        json={"result": "通过", "idempotency_key": "rebuild-job-count-1"},
+    )
+    assert executed.status_code == 201, executed.text
+
+    # 一条从表里对照采纳的行：同组、committed、「不通过」，且刻意没有自己的 job。
+    lark_fake.records = [
+        {
+            "record_id": "rec-adopted",
+            "fields": {"用例": "B-002 钱包绑定", "结果": "不通过"},
+        }
+    ]
+    adopted = authenticated_client.post(
+        f"/api/groups/{provision_group.id}/reconcile/apply",
+        json={"decisions": [{"key": "B-002", "action": "use_remote"}]},
+    )
+    assert adopted.status_code == 200, adopted.text
+    assert adopted.json()["pulled"] == 1
+
+    db_session.expire_all()
+    committed = db_session.scalars(
+        select(Attempt).where(Attempt.state == "committed")
+    ).all()
+    assert len(committed) == 2
+    adopted_attempt = db_session.scalar(
+        select(Attempt).where(Attempt.source == "reconcile")
+    )
+    assert adopted_attempt is not None
+    assert adopted_attempt.result == "不通过"
+    # 这一整类行就是被高估的那部分：committed 却没有 job，重建永远不会再写它。
+    assert (
+        db_session.scalar(select(SyncJob).where(SyncJob.attempt_id == adopted_attempt.id))
+        is None
+    )
+
+    plan = authenticated_client.get(
+        f"/api/groups/{provision_group.id}/lark/provision"
+    ).json()
+
+    # 只有执行行会再写一遍；采纳的「不通过」没有 job，也就不会在缺陷表里再写一行。
+    assert plan["rebuild"] == {"execution": 1, "bug": 0}
+
+
+def _record_reads(lark_fake, base_token: str, table_id: str) -> int:
+    """How many times one table's whole record listing was fetched.
+
+    The provisioning endpoints make a pile of Lark calls of their own (fields,
+    views, tables, the draft state read), so a test about the snapshot has to
+    count the one call it cares about instead of the total.
+    """
+
+    suffix = f"/apps/{base_token}/tables/{table_id}/records"
+    return sum(
+        1
+        for request in lark_fake.requests
+        if request["method"] == "GET" and request["path"].endswith(suffix)
+    )
+
+
+def _read_history(authenticated_client, group, code: str = "B-001"):
+    """One history read, which is the read that warms the record snapshot."""
+
+    response = authenticated_client.get(
+        f"/api/groups/{group.id}/cases/{code}/lark-history"
+    )
+    assert response.status_code == 200, response.text
+    return response
+
+
+def test_creating_a_header_drops_the_record_snapshot(
+    lark_fake, authenticated_client, provision_group
+):
+    """A structure change makes this process's snapshot of the rows stale.
+
+    Without the invalidation the history read after the change answers from the
+    snapshot and never asks Lark again.
+    """
+
+    _read_history(authenticated_client, provision_group)
+    assert _record_reads(lark_fake, "app-exec", "tbl-runs") == 1
+
+    body = authenticated_client.post(
+        f"/api/groups/{provision_group.id}/lark/provision/fields",
+        json={
+            "role": "execution",
+            "field_names": ["结果"],
+            "create_view": False,
+            "acknowledge": True,
+        },
+    )
+    assert body.status_code == 200, body.text
+    assert body.json()["created_fields"] == ["结果"]
+
+    _read_history(authenticated_client, provision_group)
+    assert _record_reads(lark_fake, "app-exec", "tbl-runs") == 2
+
+
+def test_retyping_a_header_drops_the_record_snapshot(
+    lark_fake, authenticated_client, provision_group
+):
+    """Converting a column changes what that table answers with."""
+
+    lark_fake.fields = _all_text_exec_headers()
+    _read_history(authenticated_client, provision_group)
+    assert _record_reads(lark_fake, "app-exec", "tbl-runs") == 1
+
+    body = authenticated_client.post(
+        f"/api/groups/{provision_group.id}/lark/provision/retype",
+        json={"role": "execution", "field_names": ["结果"], "acknowledge": True},
+    )
+    assert body.status_code == 200, body.text
+    assert body.json()["retyped_fields"] == ["结果"]
+
+    _read_history(authenticated_client, provision_group)
+    assert _record_reads(lark_fake, "app-exec", "tbl-runs") == 2
+
+
+def test_rebuilding_a_table_drops_the_groups_record_snapshots(
+    lark_fake, authenticated_client, provision_group
+):
+    """A rebuild re-points the group, so its snapshots are behind.
+
+    The execution table moves to a brand-new table id, which is a fresh
+    snapshot key by itself; the defect table does not move at all and would
+    keep answering from the snapshot of the moment before the rebuild. The
+    replaced table's own key is never read again and is released by the ttl
+    prune instead (``backend/app/lark/cache.py``).
+    """
+
+    _read_history(authenticated_client, provision_group)
+    assert _record_reads(lark_fake, "app-exec", "tbl-runs") == 1
+    assert _record_reads(lark_fake, "app-bug", "tbl-defects") == 1
+
+    response = authenticated_client.post(
+        f"/api/groups/{provision_group.id}/lark/provision/rebuild",
+        json={"role": "execution", "acknowledge": True},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["table"]["table_id"] == "tbl-new"
+
+    _read_history(authenticated_client, provision_group)
+    # 缺陷表换了新表也要重新问 Lark：不然重建后这一次读回的还是旧快照。
+    assert _record_reads(lark_fake, "app-bug", "tbl-defects") == 2
+    # 新表本来就是个新键，这条只是说明这次重建之后确实读了新表。
+    assert _record_reads(lark_fake, "app-exec", "tbl-new") == 1

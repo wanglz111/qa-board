@@ -36,7 +36,7 @@ from app.lark.target import (
     serialize_target,
     target_for,
 )
-from app.models import Attempt, Group, GroupCase
+from app.models import Attempt, Group, GroupCase, SyncJob
 
 
 router = APIRouter(prefix="/api", dependencies=[Depends(require_admin)])
@@ -759,20 +759,34 @@ def rebuild_table(
 
 
 def _rebuild_counts(db: Session, group_id: UUID) -> dict[str, int]:
-    """How many rows a rebuild of each role would write again.
+    """How many rows a rebuild of each role will write again.
 
-    Every committed result of the group is re-filed into the execution table;
-    only the failed ones raise a defect row.
+    Counted over ``SyncJob``, not over attempts: the rebuild re-files the rows
+    through ``reset_jobs_for_rebuilt_table``, which is an update of the jobs
+    that already exist and never inserts one. A committed attempt that has no
+    job is therefore a row this rebuild will not write again, and promising it
+    here would overstate the work — the two ways to end up without a job are a
+    row adopted from the table by reconcile (``enqueue_attempt_job`` refuses
+    anything whose source is not ``execution``) and an attempt committed while
+    the group's target was still unconfirmed.
+
+    ``Attempt.state`` stays as the record's own claim that it carries a
+    result: no application path mints a job for an attempt that is not
+    committed, so it is a guard rather than a filter that changes the count.
+
+    Every remaining job goes back into the execution table; only the ones whose
+    attempt failed raise a defect row.
     """
 
-    committed = (
-        select(func.count(Attempt.id))
+    queued = (
+        select(func.count(SyncJob.id))
+        .join(Attempt, SyncJob.attempt_id == Attempt.id)
         .join(GroupCase, Attempt.group_case_id == GroupCase.id)
         .where(GroupCase.group_id == group_id, Attempt.state == "committed")
     )
-    failed = committed.where(Attempt.result == "不通过")
+    failed = queued.where(Attempt.result == "不通过")
     return {
-        "execution": int(db.scalar(committed) or 0),
+        "execution": int(db.scalar(queued) or 0),
         "bug": int(db.scalar(failed) or 0),
     }
 
