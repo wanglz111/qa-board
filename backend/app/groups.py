@@ -23,6 +23,7 @@ from app.importers.casebook import (
 )
 from app.importers.schema import ImportErrorDetail, MAX_FILE_SIZE, ParsedCase, parse_file
 from app.models import (
+    Attempt,
     CaseReferenceAsset,
     CaseReferenceLink,
     Group,
@@ -201,6 +202,28 @@ def list_group_cases(
         )
         .order_by(GroupCase.position)
     ).all()
+    # One row per case: its highest-sequence committed attempt. The same shape
+    # group_progress counts, but kept per case so the page can open on the
+    # first case nobody has run instead of always on the first row.
+    latest_sequences = (
+        select(
+            Attempt.group_case_id,
+            func.max(Attempt.sequence).label("sequence"),
+        )
+        .where(Attempt.state == "committed")
+        .group_by(Attempt.group_case_id)
+        .subquery()
+    )
+    latest_result = {
+        row[0]: row[1]
+        for row in db.execute(
+            select(Attempt.group_case_id, Attempt.result).join(
+                latest_sequences,
+                (Attempt.group_case_id == latest_sequences.c.group_case_id)
+                & (Attempt.sequence == latest_sequences.c.sequence),
+            )
+        ).all()
+    }
     return [
         {
             "id": case.id,
@@ -218,6 +241,7 @@ def list_group_cases(
             "visual_check": case.visual_check,
             "prototype_note": case.prototype_note,
             "reference_assets": [link_payload(link) for link in case.reference_links],
+            "latest_result": latest_result.get(case.id),
         }
         for case in cases
     ]

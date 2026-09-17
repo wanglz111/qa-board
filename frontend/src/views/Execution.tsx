@@ -24,6 +24,7 @@ import {
   type SaveStatus
 } from "../components/OutcomeForm";
 import { dispatchCaseKey, useCaseKeys, type CaseKeyHandlers } from "../useCaseKeys";
+import { allTested, readCursor, startIndexFor, writeCursor } from "../executionCursor";
 import { usePiP } from "../usePiP";
 
 type Props = {
@@ -152,7 +153,11 @@ export function ExecutionView({
       .then((result) => {
         if (cancelled) return;
         setGroups(result);
-        const preferred = result.find((group) => group.id === initialGroupId) ?? result[0];
+        const rememberedGroup = readCursor()?.groupId ?? null;
+        const preferred =
+          result.find((group) => group.id === initialGroupId) ??
+          result.find((group) => group.id === rememberedGroup) ??
+          result[0];
         if (preferred) void selectGroup(preferred.id);
       })
       .catch((reason) => !cancelled && setFailure(message(reason)))
@@ -183,9 +188,16 @@ export function ExecutionView({
       const result = await loadCases(groupId);
       if (requestId !== caseRequest.current) return;
       setCases(result);
-      const first = result[0];
-      if (first) {
-        const history = await loadAttempts(groupId, first.code);
+      // Resume where the operator left off, else at the first case nobody has
+      // run. This is the whole point of the page: coming back after a break
+      // must not mean re-reading the first row of the group.
+      const remembered = readCursor();
+      const start = startIndexFor(result, remembered?.groupId === groupId ? remembered.code : null);
+      setCaseIndex(start);
+      const current = result[start];
+      if (current) {
+        writeCursor({ groupId, code: current.code });
+        const history = await loadAttempts(groupId, current.code);
         if (requestId === caseRequest.current) setAttempts(history);
       }
     } catch (reason) {
@@ -200,6 +212,7 @@ export function ExecutionView({
     if (!target || !selectedGroupId) return;
     const requestId = ++caseRequest.current;
     setCaseIndex(index);
+    writeCursor({ groupId: selectedGroupId, code: target.code });
     setAttempts([]);
     setReserved(null);
     setImages([]);
@@ -395,6 +408,9 @@ export function ExecutionView({
         {failure ? <p className="inline-status error" role="alert">{failure}</p> : null}
         {activeCase ? (
           <>
+            {allTested(cases) ? (
+              <p className="inline-status saved" role="status">本组已全部测过</p>
+            ) : null}
             <CaseDetail
               testCase={activeCase}
               position={caseIndex + 1}

@@ -32,7 +32,7 @@
 - Modify: `backend/app/groups.py`（`list_group_cases`）
 - Test: `backend/tests/test_groups_api.py`
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 在 `backend/tests/test_groups_api.py` 末尾追加：
 
@@ -68,12 +68,12 @@ def test_each_case_carries_its_own_latest_result(authenticated_client, csv_book)
 
 > `preview_csv` 与 `csv_book` 是本文件既有的 helper 与 fixture（见 `test_group_listing_and_cases_are_ordered`）：`csv_book` 是 CSV 字节，`preview_csv` 拿 ticket，`confirm` 之后才拿到组。`group14.csv` 的编号是 B-001…B-014，所以上面用到的三个编号都存在。
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cd backend && TEST_DATABASE_URL='postgresql+psycopg://testdeck:testdeck@127.0.0.1:5433/testdeck_test' .venv/bin/python -m pytest "tests/test_groups_api.py::test_each_case_carries_its_own_latest_result" -q`
 Expected: FAIL — `KeyError: 'latest_result'`
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `backend/app/groups.py` 的 `list_group_cases`：在 `cases = db.scalars(...).all()` 之后、`return [...]` 之前插入：
 
@@ -110,12 +110,12 @@ Expected: FAIL — `KeyError: 'latest_result'`
 
 确认 `groups.py` 顶部已导入 `func` 与 `Attempt`（`func` 在 `group_progress` 所在的 `app/execution.py` 里用过；`groups.py` 若没有就从 `sqlalchemy` 补 `func`，从 `app.models` 补 `Attempt`）。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `cd backend && TEST_DATABASE_URL='postgresql+psycopg://testdeck:testdeck@127.0.0.1:5433/testdeck_test' .venv/bin/python -m pytest tests/test_groups_api.py -q`
 Expected: PASS
 
-- [ ] **Step 5: 跑全套**
+- [x] **Step 5: 跑全套**
 
 Run: `cd backend && TEST_DATABASE_URL='postgresql+psycopg://testdeck:testdeck@127.0.0.1:5433/testdeck_test' .venv/bin/python -m pytest -q`
 Expected: PASS
@@ -138,7 +138,7 @@ git commit -m "feat(execution): report each case's own latest result"
 - Create: `frontend/src/executionCursor.ts`
 - Test: `frontend/src/executionCursor.test.ts`（新建）
 
-- [ ] **Step 1: 改类型**
+- [x] **Step 1: 改类型**
 
 `frontend/src/api.ts` 的 `GroupCase` 加一个字段（放在 `reference_assets` 之前）：
 
@@ -149,7 +149,7 @@ git commit -m "feat(execution): report each case's own latest result"
   latest_result: AttemptResult | null;
 ```
 
-- [ ] **Step 2: 写失败的测试**
+- [x] **Step 2: 写失败的测试**
 
 新建 `frontend/src/executionCursor.test.ts`：
 
@@ -211,12 +211,12 @@ it("stays on the last case when the whole group is done", () => {
 });
 ```
 
-- [ ] **Step 3: 跑测试确认失败**
+- [x] **Step 3: 跑测试确认失败**
 
 Run: `cd frontend && npx vitest run src/executionCursor.test.ts`
 Expected: FAIL — `Failed to resolve import "./executionCursor"`
 
-- [ ] **Step 4: 实现**
+- [x] **Step 4: 实现**
 
 新建 `frontend/src/executionCursor.ts`：
 
@@ -285,7 +285,7 @@ export function allTested(cases: GroupCase[]): boolean {
 }
 ```
 
-- [ ] **Step 5: 跑测试确认通过**
+- [x] **Step 5: 跑测试确认通过**
 
 Run: `cd frontend && npx vitest run src/executionCursor.test.ts`
 Expected: PASS（5 passed）
@@ -305,7 +305,7 @@ git commit -m "feat(execution): add the resume cursor and its start-of-work rule
 - Modify: `frontend/src/views/Execution.tsx`
 - Test: `frontend/src/views/Execution.test.tsx`
 
-- [ ] **Step 1: 先让既有 fixture 满足新类型**
+- [x] **Step 1: 先让既有 fixture 满足新类型**
 
 `frontend/src/views/Execution.test.tsx` 的 `testCase` 换成：
 
@@ -346,7 +346,7 @@ beforeEach(() => {
 });
 ```
 
-- [ ] **Step 2: 写失败的测试**
+- [x] **Step 2: 写失败的测试**
 
 在 `frontend/src/views/Execution.test.tsx` 末尾追加：
 
@@ -410,12 +410,12 @@ it("remembers the case once it is opened", async () => {
 });
 ```
 
-- [ ] **Step 3: 跑测试确认失败**
+- [x] **Step 3: 跑测试确认失败**
 
 Run: `cd frontend && npx vitest run src/views/Execution.test.tsx`
 Expected: 前四个新测试 FAIL（页面仍然停在第一条，「本组已全部测过」不存在，localStorage 为空）。
 
-- [ ] **Step 4: 实现**
+- [x] **Step 4: 实现**
 
 `frontend/src/views/Execution.tsx`：
 
@@ -488,12 +488,12 @@ import { allTested, readCursor, startIndexFor, writeCursor } from "../executionC
             ) : null}
 ```
 
-- [ ] **Step 5: 跑测试确认通过**
+- [x] **Step 5: 跑测试确认通过**
 
 Run: `cd frontend && npx vitest run src/views/Execution.test.tsx`
 Expected: PASS
 
-- [ ] **Step 6: 跑前端全套与构建**
+- [x] **Step 6: 跑前端全套与构建**
 
 Run: `cd frontend && npx vitest run && npm run build`
 Expected: PASS + 构建通过。其他测试文件里手写的 `GroupCase` fixture 会因为新增必填字段而报 TS 错，给它们补 `latest_result: null`（这是类型变动的正常代价，不要把它改成可选来回避）。
