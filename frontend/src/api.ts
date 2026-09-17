@@ -238,6 +238,24 @@ export type CreateTableResult = {
   role: TableRole;
 };
 
+export type RebuildTablePayload = {
+  role: TableRole;
+  acknowledge: boolean;
+};
+
+export type RebuildTableResult = {
+  role: TableRole;
+  table: Table;
+  // The table this one replaces, left in place for the administrator to delete
+  // by hand once the rows have moved.
+  replaced: Table;
+  // How many local results were re-queued so they are written again, into the
+  // rebuilt table.
+  requeued: number;
+  schema_errors: string[];
+  target: LarkTarget;
+};
+
 export type LarkTargetPayload = {
   source_url: string;
   execution_base_token: string;
@@ -498,6 +516,12 @@ export const api = {
     }),
   createLarkTable: (groupId: string, payload: CreateTablePayload) =>
     mutation<CreateTableResult>(`/api/groups/${groupId}/lark/provision/table`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    }),
+  rebuildLarkTable: (groupId: string, payload: RebuildTablePayload) =>
+    mutation<RebuildTableResult>(`/api/groups/${groupId}/lark/provision/rebuild`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload)

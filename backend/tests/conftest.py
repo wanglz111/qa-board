@@ -549,6 +549,13 @@ class FakeLark:
             self.created_tables.append({**table, "base_token": base_token, "path": path})
             # A created table really does show up in the base's listing afterwards.
             base[1].append(("tbl-new", str(table.get("name") or "")))
+            # …and it answers its own schema. The role is read off the headers
+            # the caller created it with, so a rebuild's new table can be read
+            # back the way the live API would answer.
+            names = [str(field.get("field_name") or "") for field in table.get("fields") or []]
+            self.field_roles.setdefault(
+                (base_token, "tbl-new"), "bug" if "问题描述" in names else "run"
+            )
             return httpx.Response(
                 200,
                 json={

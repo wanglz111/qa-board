@@ -7,11 +7,13 @@ from app.lark.client import RECORD_MUTATION_METHODS, LarkError
 from app.lark.fields import BUG_PRIORITY_OPTIONS, PASS_RESULT_OPTIONS
 from app.lark.provision import (
     PROVISION_FIELD_TYPES,
+    ROLE_SCHEMA,
     RUN_SCHEMA,
     provision_plan,
+    rebuilt_table_name,
     retype_plan,
 )
-from app.models import Group, LarkTarget
+from app.models import Attempt, Group, GroupCase, LarkTarget, SyncJob
 
 
 @pytest.fixture
@@ -66,6 +68,25 @@ def no_record_writes(request):
         if "/records" in request_seen["path"]
         and request_seen["method"] in RECORD_MUTATION_METHODS
     ] == []
+
+
+@pytest.fixture(autouse=True)
+def schema_order_restored():
+    """Put the role schemas back exactly as they were, order included.
+
+    One test deletes a header to prove the loud check fires. ``monkeypatch``
+    puts the key back at the *end* of the dict, and that dict's order is
+    load-bearing — it is the column order a created table is given — so a test
+    that ran afterwards would silently assert against a table built in the
+    wrong order. Restoring the whole mapping is what keeps the two honest.
+    """
+
+    before = {name: dict(schema) for name, schema in ROLE_SCHEMA.items()}
+    yield
+    for name, snapshot in before.items():
+        schema = ROLE_SCHEMA[name]
+        schema.clear()
+        schema.update(snapshot)
 
 
 def test_plan_lists_only_the_missing_required_fields():
@@ -923,3 +944,219 @@ def test_retype_reports_a_refused_conversion_as_a_conflict(
     assert detail["reason"] == "provision_failed"
     assert "修正表头类型失败" in detail["message"]
     assert "test-app-secret" not in response.text
+
+
+def _attempt_with_job(db_session, group, *, result: str = "不通过"):
+    """One committed attempt of this group, already written to both tables."""
+
+    group_case = db_session.scalar(
+        select(GroupCase).where(GroupCase.group_id == group.id)
+    )
+    attempt = Attempt(
+        group_case=group_case,
+        label="B-001",
+        sequence=1,
+        state="committed",
+        result=result,
+        note="",
+        console_text="",
+        idempotency_key="fixture-rebuild-1",
+    )
+    db_session.add(attempt)
+    db_session.flush()
+    job = SyncJob(
+        attempt_id=attempt.id,
+        state="synced",
+        new_exec_record_id="rec-exec-1",
+        new_bug_record_id="rec-bug-1",
+        target_fingerprint="app-exec|tbl-runs|app-bug|tbl-defects",
+    )
+    db_session.add(job)
+    db_session.commit()
+    return attempt, job
+
+
+def test_rebuilding_a_table_replaces_it_in_the_reference_layout(
+    lark_fake, authenticated_client, provision_group, db_session
+):
+    """A table built before the schema was known is rebuilt, not patched.
+
+    Neither the column order nor the primary column can be edited through the
+    API, so the only way back to the reference layout is a new table: it is
+    created with the reference headers in the reference order and the group is
+    pointed at it.
+    """
+
+    body = authenticated_client.post(
+        f"/api/groups/{provision_group.id}/lark/provision/rebuild",
+        json={"role": "execution", "acknowledge": True},
+    ).json()
+
+    created = lark_fake.created_tables[0]
+    assert created["base_token"] == "app-exec"
+    # 用例 first: the first header Lark is given is the primary column.
+    assert [field["field_name"] for field in created["fields"]] == [
+        "用例",
+        "结果",
+        "优先级",
+        "负责人",
+        "截图",
+        "控制台",
+        "报告人",
+        "日期",
+    ]
+    assert body["table"] == {"table_id": "tbl-new", "name": rebuilt_table_name("执行记录")}
+    assert body["replaced"] == {"table_id": "tbl-runs", "name": "执行记录"}
+    assert body["role"] == "execution"
+
+    db_session.expire_all()
+    stored = db_session.scalar(
+        select(LarkTarget).where(LarkTarget.group_id == provision_group.id)
+    )
+    assert stored is not None
+    assert stored.execution_table_id == "tbl-new"
+    assert stored.execution_table_name == rebuilt_table_name("执行记录")
+    # The defect table did not move, and neither did its base.
+    assert stored.bug_base_token == "app-bug"
+    assert stored.bug_table_id == "tbl-defects"
+    # The recorded view belongs to the replaced table.
+    assert stored.execution_view_id is None
+    assert stored.target_fingerprint == "app-exec|tbl-new|app-bug|tbl-defects"
+    # A rebuilt destination can never inherit the previous write approval.
+    assert stored.confirmed_at is None
+    assert body["target"]["confirmed"] is False
+
+
+def test_rebuilding_one_role_requeues_only_that_roles_rows(
+    lark_fake, authenticated_client, provision_group, db_session
+):
+    """The rebuilt table is empty, so its rows are written again.
+
+    The other role's table did not move: clearing its record id would append a
+    second row beside the one already there.
+    """
+
+    attempt, _job = _attempt_with_job(db_session, provision_group)
+
+    body = authenticated_client.post(
+        f"/api/groups/{provision_group.id}/lark/provision/rebuild",
+        json={"role": "bug", "acknowledge": True},
+    ).json()
+
+    assert body["requeued"] == 1
+    db_session.expire_all()
+    stored = db_session.scalar(select(SyncJob).where(SyncJob.attempt_id == attempt.id))
+    assert stored is not None
+    assert stored.new_bug_record_id is None
+    assert stored.new_exec_record_id == "rec-exec-1"
+    assert stored.state == "pending"
+    assert stored.retry_count == 0
+    assert stored.error_kind is None
+    assert stored.target_fingerprint == "app-exec|tbl-runs|app-bug|tbl-new"
+
+
+def test_rebuilding_a_table_needs_the_acknowledgement(
+    lark_fake, authenticated_client, provision_group
+):
+    response = authenticated_client.post(
+        f"/api/groups/{provision_group.id}/lark/provision/rebuild",
+        json={"role": "execution"},
+    )
+
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"] == "需确认后才会重建数据表"
+    assert lark_fake.created_tables == []
+
+
+def test_rebuilding_a_table_is_refused_before_the_group_is_confirmed(
+    lark_fake, authenticated_client, provision_group, db_session
+):
+    """Rebuilding moves the destination; a group nobody approved has none."""
+
+    target = db_session.scalar(
+        select(LarkTarget).where(LarkTarget.group_id == provision_group.id)
+    )
+    target.confirmed_at = None
+    db_session.commit()
+
+    response = authenticated_client.post(
+        f"/api/groups/{provision_group.id}/lark/provision/rebuild",
+        json={"role": "execution", "acknowledge": True},
+    )
+
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"] == "请先确认写入，再重建数据表"
+    assert lark_fake.created_tables == []
+
+
+def test_rebuilding_a_table_waits_for_a_running_job(
+    lark_fake, authenticated_client, provision_group, db_session
+):
+    """A row in flight is writing into the table this would replace."""
+
+    attempt, job = _attempt_with_job(db_session, provision_group)
+    job.state = "running"
+    db_session.commit()
+
+    response = authenticated_client.post(
+        f"/api/groups/{provision_group.id}/lark/provision/rebuild",
+        json={"role": "execution", "acknowledge": True},
+    )
+
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"] == "有记录正在同步，请稍后再重建"
+    assert lark_fake.created_tables == []
+
+
+def test_rebuilding_a_table_rejects_an_unknown_role(
+    lark_fake, authenticated_client, provision_group
+):
+    response = authenticated_client.post(
+        f"/api/groups/{provision_group.id}/lark/provision/rebuild",
+        json={"role": "screenshots", "acknowledge": True},
+    )
+
+    assert response.status_code == 422
+    assert lark_fake.created_tables == []
+
+
+def test_rebuilding_a_table_reports_a_table_lark_cannot_read(
+    lark_fake, authenticated_client, provision_group, db_session
+):
+    """A base the app can only read cannot be built in either."""
+
+    target = db_session.scalar(
+        select(LarkTarget).where(LarkTarget.group_id == provision_group.id)
+    )
+    target.execution_table_id = "tbl-gone"
+    db_session.commit()
+
+    response = authenticated_client.post(
+        f"/api/groups/{provision_group.id}/lark/provision/rebuild",
+        json={"role": "execution", "acknowledge": True},
+    )
+
+    assert response.status_code == 409, response.text
+    assert "tbl-gone" in response.json()["detail"]
+    assert lark_fake.created_tables == []
+
+
+def test_rebuilding_a_table_reports_a_refused_creation(
+    lark_fake, authenticated_client, provision_group, db_session
+):
+    lark_fake.table_create_http_status = 403
+
+    response = authenticated_client.post(
+        f"/api/groups/{provision_group.id}/lark/provision/rebuild",
+        json={"role": "execution", "acknowledge": True},
+    )
+
+    assert response.status_code == 409, response.text
+    assert "重建数据表失败" in response.json()["detail"]
+    db_session.expire_all()
+    stored = db_session.scalar(
+        select(LarkTarget).where(LarkTarget.group_id == provision_group.id)
+    )
+    # Nothing was replaced, so the approved target is still the approved one.
+    assert stored is not None and stored.execution_table_id == "tbl-runs"
+    assert stored.confirmed_at is not None

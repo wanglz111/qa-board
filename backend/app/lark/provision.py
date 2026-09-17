@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Annotated, Any, Iterable
 from uuid import UUID
 
@@ -24,8 +25,10 @@ from app.lark.fields import (
     type_name,
 )
 from app.lark.link import SOURCE_ID
+from app.lark.outbox import reset_jobs_for_rebuilt_table, running_job_count
 from app.lark.target import (
     TargetDraft,
+    record_target_revision,
     locked_target_for,
     read_draft_state,
     serialize_target,
@@ -38,6 +41,9 @@ router = APIRouter(prefix="/api", dependencies=[Depends(require_admin)])
 
 PROVISION_VIEW_NAME = "TestDeck"
 TABLE_NAME_LIMIT = 100
+# What a rebuilt table is called beside the one it replaces. The old table is
+# never deleted by this tool, so the two have to be told apart at a glance.
+REBUILD_SUFFIX = "（表头修正）"
 # A listing failure is the one an administrator can act on: it is a missing
 # collaborator, not a bad link.
 READ_FIELDS_FAILED = "读取数据表字段失败，请确认应用仍是协作者"
@@ -552,6 +558,158 @@ class ProvisionTableRequest(BaseModel):
     base_token: str
     table_name: str = Field(min_length=1, max_length=TABLE_NAME_LIMIT)
     acknowledge: bool = False
+
+
+class RebuildTableRequest(BaseModel):
+    role: str
+    acknowledge: bool = False
+
+
+def rebuilt_table_name(name: str) -> str:
+    """What the replacement for a table called ``name`` is called."""
+
+    return f"{name or '数据表'}{REBUILD_SUFFIX}"[:TABLE_NAME_LIMIT]
+
+
+@router.post("/groups/{group_id}/lark/provision/rebuild")
+def rebuild_table(
+    group_id: UUID,
+    payload: RebuildTableRequest,
+    db: Annotated[Session, Depends(get_db)],
+    client: Annotated[LarkClient, Depends(get_lark_client)],
+) -> dict[str, Any]:
+    """Rebuild one role's table in the reference layout and re-file its rows.
+
+    A table this tool built before the schema was known cannot be brought in
+    line in place. Lark mints a column where it lands and takes the primary
+    column from whichever field was created first, and neither the order nor
+    the primary can be edited through the API — so an alphabetically created
+    table stays 「优先级 first, 用例 nowhere near it」 however many columns are
+    converted afterwards. The only route back to the layout the team fills by
+    hand is a new table:
+
+    * it is created with the reference headers, in the reference order, so
+      「用例」/「问题描述」 is the first and primary column;
+    * the group is pointed at it, which drops the write approval — the
+      administrator re-confirms the same way a re-pointed target always is;
+    * every local result of that role is re-queued, so its row is written
+      again by the current writer: right types, the screenshot, and the
+      marker-free wording.
+
+    The replaced table is left exactly where it is. Deleting a table is not
+    something this tool does, and the administrator can compare the two before
+    removing the old one by hand.
+    """
+
+    if not payload.acknowledge:
+        raise HTTPException(status_code=409, detail="需确认后才会重建数据表")
+    if payload.role not in ROLE_REQUIRED:
+        raise HTTPException(status_code=422, detail="未知的表角色")
+    target = _require_group_target(db, group_id)
+    if target.confirmed_at is None:
+        # Rebuilding moves the destination, so a group nobody approved is not
+        # the case this is for: the administrator confirms the table they have
+        # first and then decides whether it needs replacing.
+        raise HTTPException(status_code=409, detail="请先确认写入，再重建数据表")
+    if running_job_count(db, group_id) > 0:
+        # A job in flight is writing into the table this call is about to
+        # replace, and its create may land after the stored id was cleared.
+        raise HTTPException(status_code=409, detail="有记录正在同步，请稍后再重建")
+
+    checked_fingerprint = target.target_fingerprint
+    base_token, table_id = _role_table(target, payload.role)
+    try:
+        tables = client.list_tables(base_token)
+    except LarkError as error:
+        raise HTTPException(
+            status_code=409, detail=f"无法读取该多维表格，请确认应用仍是协作者：{error}"
+        ) from None
+    current_name = next(
+        (
+            str(table.get("name") or "")
+            for table in tables
+            if str(table.get("table_id") or "") == table_id
+        ),
+        "",
+    )
+    if not current_name:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Lark 中找不到 {table_id} 这张数据表，请重新读取目标表",
+        )
+
+    new_name = rebuilt_table_name(current_name)
+    try:
+        table = client.create_table(base_token, new_name, table_fields(payload.role))
+    except LarkError as error:
+        raise HTTPException(status_code=409, detail=f"重建数据表失败：{error}") from None
+    new_table_id = str(table.get("table_id") or "")
+    if not new_table_id:
+        raise HTTPException(status_code=409, detail="重建数据表失败：Lark 没有返回数据表 id")
+    new_table_name = str(table.get("name") or new_name)
+
+    draft = TargetDraft(
+        execution_base_token=(
+            base_token if payload.role == "execution" else target.execution_base_token
+        ),
+        execution_table_id=(
+            new_table_id if payload.role == "execution" else target.execution_table_id
+        ),
+        # The recorded view belongs to the table being replaced; the new table
+        # offers its own, and keeping a stale id would filter by nothing.
+        execution_view_id=(
+            None if payload.role == "execution" else target.execution_view_id
+        ),
+        bug_base_token=(
+            base_token if payload.role == "bug" else target.bug_base_token
+        ),
+        bug_table_id=new_table_id if payload.role == "bug" else target.bug_table_id,
+    )
+    # Read before the lock, exactly like the save path: six Lark requests do not
+    # belong inside a transaction that holds a row lock.
+    try:
+        state = read_draft_state(client, draft)
+    except LarkError as error:
+        raise HTTPException(status_code=409, detail=f"读取目标表失败：{error}") from None
+
+    locked = locked_target_for(db, group_id)
+    if locked is None or locked.target_fingerprint != checked_fingerprint:
+        # Another tab re-pointed the group while the new table was being built.
+        # Its table is not this request's, so this one changes nothing.
+        raise HTTPException(status_code=409, detail="目标表已变化，请重新读取后再重建")
+    if payload.role == "execution":
+        locked.execution_base_token = base_token
+        locked.execution_base_name = state["execution_base_name"]
+        locked.execution_table_id = new_table_id
+        locked.execution_table_name = state["execution_table_name"] or ""
+        locked.execution_view_id = None
+        locked.execution_view_name = None
+    else:
+        locked.bug_base_token = base_token
+        locked.bug_base_name = state["bug_base_name"]
+        locked.bug_table_id = new_table_id
+        locked.bug_table_name = state["bug_table_name"] or ""
+    locked.schema_fingerprint = state["schema_fingerprint"]
+    locked.target_fingerprint = draft.fingerprint
+    locked.selected_at = datetime.now(timezone.utc)
+    # A rebuilt destination can never inherit the approval of the table it
+    # replaces, and the rows about to move were written under that approval.
+    locked.confirmed_at = None
+    db.add(locked)
+    record_target_revision(db, group_id, draft)
+    requeued = reset_jobs_for_rebuilt_table(
+        db, group_id, role=payload.role, fingerprint=draft.fingerprint
+    )
+    db.commit()
+    db.refresh(locked)
+    return {
+        "role": payload.role,
+        "table": {"table_id": new_table_id, "name": new_table_name},
+        "replaced": {"table_id": table_id, "name": current_name},
+        "requeued": requeued,
+        "schema_errors": state["schema_errors"],
+        "target": serialize_target(locked),
+    }
 
 
 @router.post("/groups/{group_id}/lark/provision/table")

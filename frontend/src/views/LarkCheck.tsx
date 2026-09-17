@@ -14,6 +14,8 @@ import {
   type ProvisionFieldsPayload,
   type ProvisionFieldsResult,
   type ProvisionPlan,
+  type RebuildTablePayload,
+  type RebuildTableResult,
   type RetypeFieldsPayload,
   type RetypeFieldsResult,
   type SyncStatus,
@@ -46,6 +48,7 @@ type Props = {
   provision?: (groupId: string, payload: ProvisionFieldsPayload) => Promise<ProvisionFieldsResult>;
   retype?: (groupId: string, payload: RetypeFieldsPayload) => Promise<RetypeFieldsResult>;
   createTable?: (groupId: string, payload: CreateTablePayload) => Promise<CreateTableResult>;
+  rebuild?: (groupId: string, payload: RebuildTablePayload) => Promise<RebuildTableResult>;
   initialGroupId?: string;
 };
 
@@ -120,6 +123,7 @@ export function LarkCheckView({
   provision,
   retype,
   createTable,
+  rebuild,
   initialGroupId
 }: Props) {
   const [groups, setGroups] = useState<Group[]>([]);
@@ -329,6 +333,20 @@ export function LarkCheckView({
       setBugTableId(table.table_id);
     }
     setError("");
+  }
+
+  // A rebuild moves the group onto a brand new table on the server, so the
+  // page has to follow it: the role's selection becomes the rebuilt table and
+  // the one it replaced is dropped from the created list, otherwise 「保存选择」
+  // would keep offering a table the server has already walked away from.
+  function acceptRebuiltTable(role: TableRole, table: Table, replaced: Table) {
+    if (replaced.table_id !== table.table_id) {
+      setCreatedTables((current) => {
+        if (current[role]?.table_id !== replaced.table_id) return current;
+        return { ...current, [role]: null };
+      });
+    }
+    acceptCreatedTable(role, table);
   }
 
   async function refreshTarget() {
@@ -678,7 +696,13 @@ export function LarkCheckView({
             targetFingerprint={target.target_fingerprint}
             schemaFingerprint={target.schema_fingerprint}
             createTable={createTable}
+            rebuild={rebuild}
+            onTableRebuilt={acceptRebuiltTable}
             bases={{ execution: executionBaseToken, bug: bugBaseToken }}
+            tableNames={{
+              execution: target.execution_table_name,
+              bug: target.bug_table_name
+            }}
             onTableCreated={acceptCreatedTable}
           />
         ) : null}

@@ -10,6 +10,8 @@ import {
   type ProvisionFieldsPayload,
   type ProvisionFieldsResult,
   type ProvisionPlan,
+  type RebuildTablePayload,
+  type RebuildTableResult,
   type RetypeField,
   type RetypeFieldsPayload,
   type RetypeFieldsResult,
@@ -32,7 +34,15 @@ type Props = {
   // A new table is only offered when the page can also name the base to build
   // it in; without a base the button stays out of the way.
   createTable?: (groupId: string, payload: CreateTablePayload) => Promise<CreateTableResult>;
+  // Rebuilds one role's table in the reference layout. Kept apart from the
+  // provisioning calls because it does not repair the table in place: it
+  // creates a new one, moves the group onto it and re-files its rows.
+  rebuild?: (groupId: string, payload: RebuildTablePayload) => Promise<RebuildTableResult>;
+  onTableRebuilt?: (role: TableRole, table: Table, replaced: Table) => void;
   bases?: Record<TableRole, string>;
+  // The stored table of each role, so the rebuild dialog can name what it
+  // replaces instead of talking about 「这张表」.
+  tableNames?: Record<TableRole, string>;
   onTableCreated?: (role: TableRole, table: Table) => void;
 };
 
@@ -56,6 +66,19 @@ const CREATE_TABLE_LABELS: Record<TableRole, string> = {
   execution: "新建执行记录数据表",
   bug: "新建缺陷记录数据表"
 };
+const REBUILD_LABELS: Record<TableRole, string> = {
+  execution: "重建执行记录数据表",
+  bug: "重建缺陷记录数据表"
+};
+
+// What a rebuilt table is called beside the one it replaces. It mirrors the
+// server's own suffix: the dialog names the table the administrator will find
+// in Lark, not a description of it.
+const REBUILD_SUFFIX = "（表头修正）";
+
+function rebuiltNameOf(name: string): string {
+  return `${name || "数据表"}${REBUILD_SUFFIX}`;
+}
 
 function messageOf(reason: unknown, fallback: string): string {
   return reason instanceof Error && reason.message ? reason.message : fallback;
@@ -120,11 +143,14 @@ export function HeaderSetup({
   loadPlan,
   provision,
   retype,
+  rebuild,
+  onTableRebuilt,
   onChanged,
   targetFingerprint,
   schemaFingerprint,
   createTable,
   bases,
+  tableNames,
   onTableCreated
 }: Props) {
   const [plan, setPlan] = useState<ProvisionPlan | null>(null);
@@ -146,12 +172,21 @@ export function HeaderSetup({
     bug: []
   });
   const [retypeBusy, setRetypeBusy] = useState(false);
+  const [rebuildOpen, setRebuildOpen] = useState(false);
+  const [rebuildNotice, setRebuildNotice] = useState("");
+  const [rebuildTicked, setRebuildTicked] = useState<Record<TableRole, boolean>>({
+    execution: false,
+    bug: false
+  });
+  const [rebuildBusy, setRebuildBusy] = useState(false);
   const [names, setNames] = useState<Record<TableRole, string>>(DEFAULT_TABLE_NAME);
   const [tableBusy, setTableBusy] = useState<TableRole | null>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
   const confirmRef = useRef<HTMLButtonElement>(null);
   const retypeRef = useRef<HTMLDivElement>(null);
   const retypeConfirmRef = useRef<HTMLButtonElement>(null);
+  const rebuildRef = useRef<HTMLDivElement>(null);
+  const rebuildConfirmRef = useRef<HTMLButtonElement>(null);
   const executionBase = bases?.execution ?? "";
   const bugBase = bases?.bug ?? "";
   const baseOf = (role: TableRole) => (role === "execution" ? executionBase : bugBase);
@@ -163,9 +198,11 @@ export function HeaderSetup({
     setNotice("");
     setRunNotice("");
     setRetypeNotice("");
+    setRebuildNotice("");
     setError("");
     setOpen(false);
     setRetypeOpen(false);
+    setRebuildOpen(false);
     setCreateView(false);
   }, [groupId]);
 
@@ -189,6 +226,13 @@ export function HeaderSetup({
   useEffect(() => {
     if (retypeOpen) retypeConfirmRef.current?.focus();
   }, [retypeOpen]);
+
+  useEffect(() => {
+    // The primary command starts disabled (nothing is ticked), and a disabled
+    // button cannot take focus — so the dialog itself takes it, which is also
+    // what announces the replacement to a screen reader.
+    if (rebuildOpen) rebuildRef.current?.focus();
+  }, [rebuildOpen]);
 
   // A message about a table created in one base must not survive that base
   // moving to another one.
@@ -254,6 +298,20 @@ export function HeaderSetup({
     setRetypeNotice("");
   }
 
+  function openRebuildDialog() {
+    // Nothing is ticked to begin with: this one replaces real tables, so it
+    // asks for the choice rather than pre-selecting it.
+    setRebuildTicked({ execution: false, bug: false });
+    setRebuildNotice("");
+    setError("");
+    setRebuildOpen(true);
+  }
+
+  function closeRebuildDialog() {
+    setRebuildOpen(false);
+    setRebuildNotice("");
+  }
+
   function toggleRetype(role: TableRole, name: string) {
     setRetypeTicked((current) => ({
       ...current,
@@ -288,6 +346,15 @@ export function HeaderSetup({
       return;
     }
     trapFocus(event, retypeRef.current);
+  }
+
+  function handleRebuildKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      if (!rebuildBusy) closeRebuildDialog();
+      return;
+    }
+    trapFocus(event, rebuildRef.current);
   }
 
   async function createTicked() {
@@ -433,6 +500,67 @@ export function HeaderSetup({
     }
   }
 
+  async function runRebuild() {
+    if (!rebuild) return;
+    const roles = ROLES.filter((role) => rebuildTicked[role]);
+    if (roles.length === 0) return;
+    setRebuildBusy(true);
+    setError("");
+    setRebuildNotice("");
+    setNotice("");
+    const moved: { role: TableRole; table: Table; replaced: Table; requeued: number }[] = [];
+    let failure = "";
+    try {
+      for (const role of roles) {
+        try {
+          const result = await rebuild(groupId, { role, acknowledge: true });
+          moved.push({
+            role,
+            table: result.table,
+            replaced: result.replaced,
+            requeued: result.requeued ?? 0
+          });
+          // The group now points at the rebuilt table, so this page has to
+          // name it too: without this the selection would still offer the
+          // table the server just walked away from.
+          onTableRebuilt?.(role, result.table, result.replaced);
+        } catch (reason) {
+          failure = messageOf(reason, "重建数据表失败");
+          break;
+        }
+      }
+      if (moved.length > 0) {
+        // The rebuilt destination dropped the write approval on the server.
+        try {
+          await onChanged();
+        } catch {
+          // The page reports its own reload failure; the rebuild did happen.
+        }
+      }
+      const reloaded = await loadPlan(groupId).catch(() => null);
+      if (reloaded) setPlan(reloaded);
+
+      const copy = moved
+        .map(
+          (item) =>
+            `已重建「${item.table.name}」，重新排入 ${item.requeued} 条「${ROLE_LABELS[item.role]}」记录`
+        )
+        .join("；");
+      const cleanup = moved
+        .map((item) => `旧表「${item.replaced.name}」不会自动删除，请确认后手动删除`)
+        .join("；");
+      if (failure) {
+        setError(failure);
+        if (moved.length > 0) setRebuildNotice(`${copy}；请重新确认写入`);
+      } else {
+        closeRebuildDialog();
+        setNotice(moved.length > 0 ? `${copy}；${cleanup}；请重新确认写入` : "没有重建任何数据表");
+      }
+    } finally {
+      setRebuildBusy(false);
+    }
+  }
+
   const statusParts: string[] = [];
   if (missingTotal > 0) {
     statusParts.push(
@@ -474,6 +602,12 @@ export function HeaderSetup({
             修正表头类型
           </button>
         ) : null}
+        {rebuild ? (
+          <button type="button" className="ghost-button" onClick={openRebuildDialog}>
+            <Table2 size={16} />
+            重建数据表（表头修正）
+          </button>
+        ) : null}
         {createTable && onTableCreated ? (
           <div className="lark-new-tables">
             {ROLES.map((role) => (
@@ -513,7 +647,7 @@ export function HeaderSetup({
           {notice}
         </p>
       ) : null}
-      {!open && !retypeOpen && error ? (
+      {!open && !retypeOpen && !rebuildOpen && error ? (
         <p className="inline-status error" role="alert">
           {error}
         </p>
@@ -670,6 +804,88 @@ export function HeaderSetup({
               >
                 {retypeBusy ? <LoaderCircle className="spin" size={16} /> : <Wrench size={16} />}
                 修正这些表头
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {rebuildOpen ? (
+        <div className="header-setup-overlay" onKeyDown={handleRebuildKeyDown}>
+          <div
+            ref={rebuildRef}
+            className="header-setup-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="header-rebuild-title"
+            tabIndex={-1}
+          >
+            <h3 id="header-rebuild-title">重建数据表（表头修正）</h3>
+            <p className="inline-status">
+              新建一张表头顺序和类型都正确的新表（执行记录表为 用例 / 结果 / 优先级 /
+              负责人 / 截图 / 控制台 / 报告人 / 日期，缺陷记录表为 问题描述 / 进展状态 /
+              跟进人 / 优先级 / 截图 / 反馈人 / 反馈时间 / 备注），并把本组指向它。
+              结果、优先级、进展状态是下拉框，截图和人员是对应类型的字段。
+            </p>
+            <p className="inline-status">
+              表头顺序和主列无法在 Lark 里改，只能换一张表。旧表不会被删除，本组已经写入的记录会按当前规则重新写入新表（含截图）；重建后需要重新确认写入。
+            </p>
+
+            <ul className="header-setup-roles">
+              {ROLES.map((role) => (
+                <li className="header-setup-role" key={role}>
+                  <h4>{ROLE_LABELS[role]}</h4>
+                  <ul className="header-setup-fields">
+                    <li className="header-setup-row">
+                      <input
+                        type="checkbox"
+                        checked={rebuildTicked[role]}
+                        aria-label={REBUILD_LABELS[role]}
+                        onChange={() =>
+                          setRebuildTicked((current) => ({ ...current, [role]: !current[role] }))
+                        }
+                      />
+                      <span className="header-setup-name">
+                        {tableNames?.[role] || ROLE_LABELS[role]}
+                      </span>
+                      <span className="header-setup-type">
+                        → {rebuiltNameOf(tableNames?.[role] ?? "")}
+                      </span>
+                    </li>
+                  </ul>
+                </li>
+              ))}
+            </ul>
+
+            {rebuildNotice ? (
+              <p className="inline-status saved" role="status">
+                {rebuildNotice}
+              </p>
+            ) : null}
+            {error ? (
+              <p className="inline-status error" role="alert">
+                {error}
+              </p>
+            ) : null}
+
+            <div className="header-setup-actions">
+              <button
+                type="button"
+                className="ghost-button"
+                disabled={rebuildBusy}
+                onClick={closeRebuildDialog}
+              >
+                取消
+              </button>
+              <button
+                ref={rebuildConfirmRef}
+                type="button"
+                className="primary"
+                disabled={rebuildBusy || !ROLES.some((role) => rebuildTicked[role])}
+                onClick={() => void runRebuild()}
+              >
+                {rebuildBusy ? <LoaderCircle className="spin" size={16} /> : <Table2 size={16} />}
+                重建勾选的数据表
               </button>
             </div>
           </div>

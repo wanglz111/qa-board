@@ -494,3 +494,160 @@ it("hides the repair command when the page cannot repair a table", async () => {
   await screen.findByText("表头完整");
   expect(screen.queryByRole("button", { name: "修正表头类型" })).not.toBeInTheDocument();
 });
+
+function rebuildResult(role: "execution" | "bug", requeued = 3) {
+  const replaced =
+    role === "execution"
+      ? { table_id: "tbl-runs", name: "执行记录" }
+      : { table_id: "tbl-bugs", name: "缺陷记录" };
+  return {
+    role,
+    table: { table_id: "tbl-fresh", name: `${replaced.name}（表头修正）` },
+    replaced,
+    requeued,
+    schema_errors: [],
+    target: {}
+  };
+}
+
+function renderRebuild(overrides: Partial<Parameters<typeof HeaderSetup>[0]> = {}) {
+  const rebuild = vi
+    .fn()
+    .mockResolvedValueOnce(rebuildResult("execution"))
+    .mockResolvedValue(rebuildResult("bug"));
+  const onTableRebuilt = vi.fn();
+  const harness = renderSetup({
+    loadPlan: vi.fn().mockResolvedValue(COMPLETE),
+    rebuild,
+    onTableRebuilt,
+    tableNames: { execution: "执行记录", bug: "缺陷记录" },
+    ...overrides
+  });
+  return { ...harness, rebuild, onTableRebuilt };
+}
+
+it("rebuilds the ticked role's table and names the one it replaces", async () => {
+  const { rebuild, onTableRebuilt, onChanged } = renderRebuild();
+
+  await screen.findByText("表头完整");
+  await userEvent.click(screen.getByRole("button", { name: "重建数据表（表头修正）" }));
+
+  const dialog = await screen.findByRole("dialog");
+  // The dialog names both tables before anything is replaced.
+  expect(dialog).toHaveTextContent("执行记录");
+  expect(dialog).toHaveTextContent("执行记录（表头修正）");
+  expect(rebuild).not.toHaveBeenCalled();
+
+  await userEvent.click(screen.getByRole("checkbox", { name: "重建执行记录数据表" }));
+  await userEvent.click(screen.getByRole("button", { name: "重建勾选的数据表" }));
+
+  expect(rebuild).toHaveBeenCalledWith("g1", { role: "execution", acknowledge: true });
+  expect(onTableRebuilt).toHaveBeenCalledWith(
+    "execution",
+    { table_id: "tbl-fresh", name: "执行记录（表头修正）" },
+    { table_id: "tbl-runs", name: "执行记录" }
+  );
+  // The rebuilt destination dropped the write approval on the server, so the
+  // page re-reads it instead of showing the one that no longer stands.
+  expect(onChanged).toHaveBeenCalledTimes(1);
+  expect(
+    await screen.findByText(/已重建「执行记录（表头修正）」，重新排入 3 条「执行记录表」记录/)
+  ).toBeVisible();
+  expect(screen.getByText(/旧表「执行记录」不会自动删除/)).toBeVisible();
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+});
+
+it("keeps the rebuild command disabled until a role is ticked", async () => {
+  const { rebuild } = renderRebuild();
+
+  await screen.findByText("表头完整");
+  await userEvent.click(screen.getByRole("button", { name: "重建数据表（表头修正）" }));
+
+  // Replacing tables is destructive: the checkbox starts unticked and the
+  // command stays out of reach until the administrator picks one.
+  const confirm = screen.getByRole("button", { name: "重建勾选的数据表" });
+  expect(screen.getByRole("checkbox", { name: "重建执行记录数据表" })).not.toBeChecked();
+  expect(confirm).toBeDisabled();
+
+  await userEvent.click(screen.getByRole("checkbox", { name: "重建缺陷记录数据表" }));
+  expect(confirm).toBeEnabled();
+  expect(rebuild).not.toHaveBeenCalled();
+});
+
+it("rebuilds every ticked role, one table after the other", async () => {
+  const { rebuild, onTableRebuilt } = renderRebuild();
+
+  await screen.findByText("表头完整");
+  await userEvent.click(screen.getByRole("button", { name: "重建数据表（表头修正）" }));
+  await userEvent.click(screen.getByRole("checkbox", { name: "重建缺陷记录数据表" }));
+  await userEvent.click(screen.getByRole("checkbox", { name: "重建执行记录数据表" }));
+  await userEvent.click(screen.getByRole("button", { name: "重建勾选的数据表" }));
+
+  expect(rebuild.mock.calls).toEqual([
+    ["g1", { role: "execution", acknowledge: true }],
+    ["g1", { role: "bug", acknowledge: true }]
+  ]);
+  expect(onTableRebuilt).toHaveBeenCalledTimes(2);
+  expect(
+    await screen.findByText(/已重建「缺陷记录（表头修正）」，重新排入 3 条「缺陷记录表」记录/)
+  ).toBeVisible();
+});
+
+it("reports a refused rebuild and keeps the dialog open", async () => {
+  const rebuild = vi.fn().mockRejectedValue(new Error("重建数据表失败：没有权限"));
+  const { onTableRebuilt, onChanged } = renderRebuild({ rebuild });
+
+  await screen.findByText("表头完整");
+  await userEvent.click(screen.getByRole("button", { name: "重建数据表（表头修正）" }));
+  await userEvent.click(screen.getByRole("checkbox", { name: "重建执行记录数据表" }));
+  await userEvent.click(screen.getByRole("button", { name: "重建勾选的数据表" }));
+
+  expect(await screen.findByText("重建数据表失败：没有权限")).toBeVisible();
+  expect(screen.getByRole("dialog")).toBeVisible();
+  expect(onTableRebuilt).not.toHaveBeenCalled();
+  // Nothing moved, so the approval the group already had still stands.
+  expect(onChanged).not.toHaveBeenCalled();
+});
+
+it("keeps the page on the table that did move when the second rebuild is refused", async () => {
+  const rebuild = vi
+    .fn()
+    .mockResolvedValueOnce(rebuildResult("execution"))
+    .mockRejectedValue(new Error("重建数据表失败：没有权限"));
+  const { onTableRebuilt, onChanged } = renderRebuild({ rebuild });
+
+  await screen.findByText("表头完整");
+  await userEvent.click(screen.getByRole("button", { name: "重建数据表（表头修正）" }));
+  await userEvent.click(screen.getByRole("checkbox", { name: "重建执行记录数据表" }));
+  await userEvent.click(screen.getByRole("checkbox", { name: "重建缺陷记录数据表" }));
+  await userEvent.click(screen.getByRole("button", { name: "重建勾选的数据表" }));
+
+  expect(await screen.findByText("重建数据表失败：没有权限")).toBeVisible();
+  // The first table really was replaced: the page follows it and says so.
+  expect(onTableRebuilt).toHaveBeenCalledTimes(1);
+  expect(onChanged).toHaveBeenCalledTimes(1);
+  expect(screen.getByText(/已重建「执行记录（表头修正）」/)).toBeVisible();
+  expect(screen.getByRole("dialog")).toBeVisible();
+});
+
+it("closes the rebuild dialog on Escape without replacing anything", async () => {
+  const { rebuild } = renderRebuild();
+
+  await screen.findByText("表头完整");
+  await userEvent.click(screen.getByRole("button", { name: "重建数据表（表头修正）" }));
+  expect(screen.getByRole("dialog")).toHaveFocus();
+
+  await userEvent.keyboard("{Escape}");
+
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(rebuild).not.toHaveBeenCalled();
+});
+
+it("hides the rebuild command when the page cannot rebuild a table", async () => {
+  renderSetup({ loadPlan: vi.fn().mockResolvedValue(COMPLETE) });
+
+  await screen.findByText("表头完整");
+  expect(
+    screen.queryByRole("button", { name: "重建数据表（表头修正）" })
+  ).not.toBeInTheDocument();
+});

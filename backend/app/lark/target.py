@@ -264,7 +264,7 @@ def locked_target_for(db: Session, group_id: UUID) -> LarkTarget | None:
     )
 
 
-def _record_revision(db: Session, group_id: UUID, draft: TargetDraft) -> None:
+def record_target_revision(db: Session, group_id: UUID, draft: TargetDraft) -> None:
     """Log a target the group has never used before; repeats are not new rows."""
 
     existing = db.scalar(
@@ -496,7 +496,7 @@ def save_target(
         # A changed destination can never inherit the previous write approval.
         target.confirmed_at = None
     db.add(target)
-    _record_revision(db, group_id, draft)
+    record_target_revision(db, group_id, draft)
     db.commit()
     db.refresh(target)
     return {

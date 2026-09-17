@@ -895,3 +895,52 @@ it("leaves the draft alone when creating a table is refused", async () => {
   expect(await screen.findByText(/新建数据表失败：没有权限/)).toBeVisible();
   expect(screen.getByLabelText("缺陷记录表")).toHaveValue("tbl-bugs");
 });
+
+it("follows the group onto a rebuilt table and drops the one it replaced", async () => {
+  // The server builds the replacement, points the group at it and clears the
+  // write approval; the page has to follow all three or 「保存选择」 would keep
+  // offering the table the group has already walked away from.
+  const rebuilt: LarkTarget = {
+    ...TARGET,
+    bug_table_id: "tbl-fresh",
+    bug_table_name: "缺陷记录（表头修正）",
+    schema_fingerprint: "schema-2",
+    target_fingerprint: "app-exec|tbl-runs|app-exec|tbl-fresh",
+    confirmed: false,
+    confirmed_at: null
+  };
+  const rebuild = vi.fn().mockResolvedValue({
+    role: "bug",
+    table: { table_id: "tbl-fresh", name: "缺陷记录（表头修正）" },
+    replaced: { table_id: "tbl-bugs", name: "缺陷记录" },
+    requeued: 2,
+    schema_errors: [],
+    target: rebuilt
+  });
+  const loadTarget = vi
+    .fn()
+    .mockResolvedValueOnce(TARGET_STATE)
+    .mockResolvedValue(stateWith(rebuilt));
+  const { saveTarget } = renderCheck({ rebuild, loadTarget });
+
+  await readExecutionLink();
+  await userEvent.click(screen.getByRole("button", { name: "重建数据表（表头修正）" }));
+  await userEvent.click(screen.getByRole("checkbox", { name: "重建缺陷记录数据表" }));
+  await userEvent.click(screen.getByRole("button", { name: "重建勾选的数据表" }));
+
+  expect(rebuild).toHaveBeenCalledWith(GROUP.id, { role: "bug", acknowledge: true });
+  expect(await screen.findByLabelText("缺陷记录表")).toHaveValue("tbl-fresh");
+  // The rebuilt destination dropped the approval on the server, so the page
+  // says so instead of showing the one that no longer stands.
+  expect(await screen.findByText(/尚未确认：本地结果不会写入 Lark/)).toBeVisible();
+
+  // The server already points the group at the rebuilt table, so the page is
+  // not asking for a switch: saving only has to keep naming that table.
+  await userEvent.click(screen.getByRole("button", { name: "保存选择" }));
+
+  expect(saveTarget).toHaveBeenCalledTimes(1);
+  expect(saveTarget.mock.calls[0][1]).toMatchObject({
+    execution_table_id: "tbl-runs",
+    bug_table_id: "tbl-fresh"
+  });
+});

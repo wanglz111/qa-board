@@ -519,6 +519,65 @@ def repoint_parked_jobs(db: Session, group_id: UUID) -> int:
     return int(result.rowcount or 0)
 
 
+def running_job_count(db: Session, group_id: UUID) -> int:
+    """Jobs a worker holds right now, for the callers that must not race one.
+
+    A rebuild replaces the table a job is writing into, so it waits until no
+    row is in flight rather than resetting a job whose create may land in the
+    table being replaced.
+    """
+
+    return int(
+        db.scalar(
+            select(func.count(SyncJob.id))
+            .join(Attempt, SyncJob.attempt_id == Attempt.id)
+            .join(GroupCase, Attempt.group_case_id == GroupCase.id)
+            .where(
+                GroupCase.group_id == group_id,
+                SyncJob.state == "running",
+            )
+        )
+        or 0
+    )
+
+
+def reset_jobs_for_rebuilt_table(
+    db: Session, group_id: UUID, *, role: str, fingerprint: str
+) -> int:
+    """Send one role's rows back through the writer, into a rebuilt table.
+
+    A rebuilt table is empty, so every stored record id of that role points at
+    a row in the table being replaced and the row has to be written again. The
+    other role's id is left alone: its table did not move, and clearing it
+    would append a second record there.
+
+    The caller owns the transaction (the rebuild writes the target in the same
+    one), so this deliberately does not commit.
+    """
+
+    values: dict[str, Any] = {
+        "state": "pending",
+        "lease_until": None,
+        "retry_count": 0,
+        "next_retry_at": _now(),
+        "error_kind": None,
+        "target_fingerprint": fingerprint,
+    }
+    values["new_exec_record_id" if role == "execution" else "new_bug_record_id"] = None
+    result = db.execute(
+        update(SyncJob)
+        .where(
+            SyncJob.attempt_id.in_(
+                select(Attempt.id)
+                .join(GroupCase, Attempt.group_case_id == GroupCase.id)
+                .where(GroupCase.group_id == group_id)
+            )
+        )
+        .values(**values)
+    )
+    return int(result.rowcount or 0)
+
+
 class SyncRetryRequest(BaseModel):
     # Releasing an uncertain job can duplicate a remote record; the flag makes
     # the administrator state that they checked the table first.

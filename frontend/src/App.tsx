@@ -79,6 +79,7 @@ export default function App() {
             provision={api.provisionLarkFields}
             retype={api.retypeLarkFields}
             createTable={api.createLarkTable}
+            rebuild={api.rebuildLarkTable}
             loadSync={api.syncStatus}
             enqueueSync={api.enqueueSync}
             retrySync={api.retrySync}
