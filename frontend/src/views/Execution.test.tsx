@@ -503,6 +503,76 @@ it("keeps a save from repainting another group's list", async () => {
   expect(screen.getByText("B 组待执行")).toBeVisible();
 });
 
+it("a save that outlives a group switch does not repaint the new group", async () => {
+  const pendingSave = deferred<Attempt>();
+  const pendingB = deferred<GroupCase[]>();
+  const submit = vi.fn<(groupId: string, code: string, payload: SubmitPayload) => Promise<Attempt>>();
+  submit.mockReturnValue(pendingSave.promise);
+  renderExecution({
+    initialGroupId: "0918-id",
+    submit,
+    loadGroups: async () => [
+      group("0918-id", "Sprint 0918", "0918.csv"),
+      group("0922-id", "Sprint 0922", "0922.csv")
+    ],
+    // A resolves at once; B's cases are held back so the save can land inside the
+    // window where A's list is gone and B's has not arrived. A carries *two*
+    // cases on purpose: with one, `nextUntestedIndex` returns null and the
+    // advance arm of the guard never runs, which is how the group half of it
+    // slips past the test above.
+    loadCases: (groupId) =>
+      groupId === "0918-id"
+        ? Promise.resolve([
+            testCase("a1", "A 组第一条", null, "B-001", null),
+            testCase("a2", "A 组第二条", null, "B-002", null)
+          ])
+        : pendingB.promise
+  });
+
+  expect(await screen.findByText("A 组第一条")).toBeVisible();
+  await userEvent.click(screen.getByRole("button", { name: "通过" }));
+  await userEvent.click(screen.getByRole("button", { name: /保存结果/ }));
+
+  // The group list stays clickable while the save is on the wire.
+  await userEvent.click(screen.getByText("Sprint 0922"));
+  expect(await screen.findByText("正在加载用例")).toBeVisible();
+
+  // Resolve the save *first*: it completes while B's cases are still pending.
+  await act(async () => {
+    pendingSave.resolve(committed("attempt-1", "B-001", "通过", null));
+    await pendingSave.promise;
+  });
+  await settle();
+  // The window is real — if the save ever finished after B's cases, this test
+  // would stop proving anything. And inside that window the save must leave the
+  // desk alone: the cursor still names the case the operator left in A, not the
+  // one an unguarded advance would have jumped to. That rewrite to A is exactly
+  // what the operator saw before 26bb85d.
+  expect(window.localStorage.getItem("testdeck.execution.cursor")).toBe(
+    JSON.stringify({ groupId: "0918-id", code: "B-001" })
+  );
+  expect(screen.getByText("正在加载用例")).toBeVisible();
+
+  await act(async () => {
+    pendingB.resolve([testCase("b9", "B 组唯一", null, "B-009", null)]);
+    await pendingB.promise;
+  });
+  await settle();
+
+  // B's list and only B's. Unguarded, the save advances into A's *second* case,
+  // which bumps `caseRequest`, aborts this very load and rewrites the cursor to A.
+  expect(await screen.findByText("B 组唯一")).toBeVisible();
+  expect(screen.queryByText("A 组第一条")).not.toBeInTheDocument();
+  expect(screen.queryByText("A 组第二条")).not.toBeInTheDocument();
+
+  expect(screen.getByText("Sprint 0922").closest("button")).toHaveAttribute("aria-pressed", "true");
+  expect(screen.getByText("Sprint 0918").closest("button")).toHaveAttribute("aria-pressed", "false");
+
+  expect(window.localStorage.getItem("testdeck.execution.cursor")).toBe(
+    JSON.stringify({ groupId: "0922-id", code: "B-009" })
+  );
+});
+
 it("remembers the case the operator walks to, not only the one it landed on", async () => {
   renderExecution({
     initialGroupId: "0918-id",
@@ -593,6 +663,31 @@ it("keeps the save confirmation visible on the case it moved to", async () => {
   expect(await screen.findByText(/B-002 已保存到本地/)).toBeVisible();
 });
 
+it("drops the save confirmation when the operator walks away by hand", async () => {
+  renderExecution({
+    initialGroupId: "0918-id",
+    loadCases: async () => [
+      testCase("c1", "第一条", null, "B-001", null),
+      testCase("c2", "第二条", null, "B-002", null)
+    ]
+  });
+
+  expect(await screen.findByText("第一条")).toBeVisible();
+  await userEvent.click(screen.getByRole("button", { name: "通过" }));
+  await userEvent.click(screen.getByRole("button", { name: /保存结果/ }));
+
+  // The save carries its confirmation to the case it moved to — that is the
+  // whole point of keeping it there.
+  expect(await screen.findByText(/B-001 已保存到本地/)).toBeVisible();
+  expect(await screen.findByText("第二条")).toBeVisible();
+
+  // Walking back by hand is not the save moving the desk, so the message about a
+  // save that did not happen here must not stay on screen claiming otherwise.
+  await userEvent.click(screen.getByRole("button", { name: "上一条用例" }));
+  expect(await screen.findByText("第一条")).toBeVisible();
+  expect(screen.queryByText(/已保存到本地/)).not.toBeInTheDocument();
+});
+
 it("wraps to the earliest unrun case when the tail is finished", async () => {
   window.localStorage.setItem(
     "testdeck.execution.cursor",
@@ -625,13 +720,23 @@ it("stays put and says the group is finished when nothing is left", async () => 
   });
 
   expect(await screen.findByText("第二条")).toBeVisible();
-  await userEvent.click(screen.getByRole("button", { name: "通过" }));
+  // 不通过 on purpose: it forces a note into 失败说明, which is what makes the
+  // reset observable. On a save that moves the desk, `showCase` resets the form
+  // itself and hides whether the guard did — no-move paths have no such cover.
+  await userEvent.click(screen.getByRole("button", { name: "不通过" }));
+  await userEvent.type(screen.getByLabelText("失败说明"), "最后一条也不通过");
   await userEvent.click(screen.getByRole("button", { name: /保存结果/ }));
 
   expect(await screen.findByText("本组已全部测过")).toBeVisible();
   // No unrun case to move to: the desk stays where the operator left it instead
   // of walking off the end of the group.
   expect(screen.getByText("第二条")).toBeVisible();
+  // The desk did not move, so `showCase` never ran and its reset never fired: the
+  // only thing that can clear this note is the guard's own reset. The save landed
+  // with the note stored server-side, so leaving it on screen would invite the
+  // operator to submit it again under the next case.
+  await settle();
+  expect(screen.getByLabelText("失败说明")).toHaveValue("");
 });
 
 it("does not submit the previous case's note after moving on", async () => {

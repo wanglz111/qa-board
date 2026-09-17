@@ -203,6 +203,14 @@ export function ExecutionView({
     setImages([]);
     setStatus(null);
     // A group switch must not carry the previous case's note into the new one.
+    // This reset is deliberately defensive, and it is *not* what actually clears
+    // the form: `cases` was cleared a few lines up, so <OutcomeForm> unmounts on
+    // the next render and its state (note, result, console, validation) dies with
+    // the component instance. No test can tell whether this line ran — that is
+    // precisely why it needs saying out loud, so nobody deletes it as dead code.
+    // Keep it anyway: it does not depend on that unmount happening, and a future
+    // render that keeps the form mounted across a group switch would otherwise
+    // inherit the previous case's draft.
     formRef.current?.reset();
     setFailure("");
     setSync(null);
