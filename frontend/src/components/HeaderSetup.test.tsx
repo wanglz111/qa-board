@@ -632,6 +632,33 @@ it("names a role with nothing to rewrite instead of showing a bare zero", async 
   expect(screen.queryByText(/将重新写入 0 条记录/)).not.toBeInTheDocument();
 });
 
+it("reads the count again when the dialog opens, not only when the page loaded", async () => {
+  const loadPlan = vi
+    .fn()
+    .mockResolvedValueOnce({ ...COMPLETE, rebuild: { execution: 1, bug: 0 } })
+    .mockResolvedValue({ ...COMPLETE, rebuild: { execution: 3, bug: 0 } });
+  renderRebuild({ loadPlan });
+
+  await screen.findByText("表头完整");
+  await userEvent.click(screen.getByRole("button", { name: "重建数据表（表头修正）" }));
+
+  // Results filed since the panel loaded have already minted their jobs, so
+  // the number the administrator approves has to come from a read taken now.
+  expect(await screen.findByText(/将重新写入 3 条记录/)).toBeVisible();
+  expect(screen.queryByText(/将重新写入 1 条记录/)).not.toBeInTheDocument();
+});
+
+it("does not promise a count the plan does not carry yet", async () => {
+  renderRebuild({ loadPlan: vi.fn().mockReturnValue(new Promise(() => {})) });
+
+  await userEvent.click(await screen.findByRole("button", { name: "重建数据表（表头修正）" }));
+
+  // The command is reachable while the plan is still in flight, so the
+  // sentence may not point at a number that is not on screen.
+  expect(screen.getByRole("dialog")).toBeVisible();
+  expect(screen.queryByText(/本组按当前规则重新写入的行数见下/)).not.toBeInTheDocument();
+});
+
 it("rebuilds every ticked role, one table after the other", async () => {
   const { rebuild, onTableRebuilt } = renderRebuild();
 

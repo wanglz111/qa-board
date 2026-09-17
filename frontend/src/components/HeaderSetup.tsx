@@ -219,6 +219,27 @@ export function HeaderSetup({
     };
   }, [groupId, targetFingerprint, schemaFingerprint, loadPlan]);
 
+  // The count this dialog asks the administrator to approve is the one the
+  // rebuild will really write, and a result filed since the panel loaded has
+  // already minted its job. Read the plan again when the dialog opens, under
+  // the same guard as the load above: a late answer must not follow the panel
+  // onto another group. A failed read neither holds the dialog shut nor drops
+  // the plan already on screen.
+  useEffect(() => {
+    if (!rebuildOpen) return;
+    let cancelled = false;
+    loadPlan(groupId)
+      .then((loaded) => {
+        if (cancelled) return;
+        setPlan(loaded);
+        setLoadError("");
+      })
+      .catch((reason) => !cancelled && setLoadError(messageOf(reason, "读取缺失表头失败")));
+    return () => {
+      cancelled = true;
+    };
+  }, [rebuildOpen, groupId, targetFingerprint, schemaFingerprint, loadPlan]);
+
   // The overlay claims modality, so focus has to move in.
   useEffect(() => {
     if (open) confirmRef.current?.focus();
@@ -589,6 +610,11 @@ export function HeaderSetup({
       : statusParts.length > 0
         ? statusParts.join(" · ")
         : "表头完整";
+  // The count is only on screen once the plan carries it, so the sentence that
+  // points at the count is promised under the same condition.
+  const rebuildCostNote = plan?.rebuild
+    ? "，本组按当前规则重新写入的行数见下（从表里采纳的记录不会重写，本组目标确认前写入的记录也不会）"
+    : "";
 
   return (
     <div className="lark-provision">
@@ -834,7 +860,7 @@ export function HeaderSetup({
               结果、优先级、进展状态是下拉框，截图和人员是对应类型的字段。
             </p>
             <p className="inline-status">
-              表头顺序和主列无法在 Lark 里改，只能换一张表。旧表不会被删除，本组按当前规则重新写入的行数见下（从表里采纳的记录不会重写，本组目标确认前写入的记录也不会）；重建后需要重新确认写入。
+              {`表头顺序和主列无法在 Lark 里改，只能换一张表。旧表不会被删除${rebuildCostNote}；重建后需要重新确认写入。`}
             </p>
 
             <ul className="header-setup-roles">
