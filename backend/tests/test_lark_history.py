@@ -474,3 +474,147 @@ def test_the_same_legacy_attachment_is_downloaded_once(
     ]
     assert downloads == ["/open-apis/drive/v1/medias/file-old/download"]
     assert first.headers["cache-control"] == "private, max-age=86400"
+
+
+def _original_record_ids(client, group_id, code: str = "B-001") -> list[str]:
+    """The table rows a case's history page would show right now.
+
+    ``available`` is asserted so a surprising "no table" answer can never be
+    mistaken for a snapshot that answered.
+    """
+
+    body = client.get(f"/api/groups/{group_id}/cases/{code}/lark-history").json()
+    assert body["available"] is True, body
+    return [record["record_id"] for record in body["original"]]
+
+
+def _warm_then_change_upstream(lark_fake, client, group_id, old_id: str = "old1"):
+    """Put one row in the snapshot, then make Lark serve a different one.
+
+    Every invalidation test below needs the same two-step setup: a snapshot that
+    really is warm (so removing the invalidation leaves it in place), and an
+    upstream read that has moved on since.
+    """
+
+    lark_fake.records = [
+        {"record_id": old_id, "fields": {"用例": "B-001 Login", "结果": "不通过"}}
+    ]
+    assert _original_record_ids(client, group_id) == [old_id]
+    lark_fake.records = [
+        {"record_id": "mine", "fields": {"用例": "B-001 Login", "结果": "通过"}}
+    ]
+
+
+def test_reserving_a_retest_drops_the_snapshot(
+    authenticated_client, lark_fake, confirmed_group
+):
+    """A reservation is a local row; the table read behind it may not be reused."""
+
+    _warm_then_change_upstream(lark_fake, authenticated_client, confirmed_group.id)
+
+    reserved = authenticated_client.post(
+        f"/api/groups/{confirmed_group.id}/cases/B-001/retest"
+    )
+
+    assert reserved.status_code == 201, reserved.text
+    assert _original_record_ids(authenticated_client, confirmed_group.id) == ["mine"]
+
+
+def test_submitting_a_reserved_attempt_drops_its_groups_snapshot(
+    authenticated_client, lark_fake, confirmed_group
+):
+    """``/attempts/{id}/submit`` holds only the attempt; the group is reached
+    through it, and that group's snapshot is the one that has to go."""
+
+    reserved = authenticated_client.post(
+        f"/api/groups/{confirmed_group.id}/cases/B-001/retest"
+    )
+    assert reserved.status_code == 201, reserved.text
+
+    _warm_then_change_upstream(lark_fake, authenticated_client, confirmed_group.id)
+
+    submitted = authenticated_client.post(
+        f"/api/attempts/{reserved.json()['id']}/submit",
+        json={"result": "通过", "idempotency_key": "key-snapshot-submit"},
+    )
+
+    assert submitted.status_code == 200, submitted.text
+    assert _original_record_ids(authenticated_client, confirmed_group.id) == ["mine"]
+
+
+def test_applying_reconcile_decisions_drops_the_snapshot(
+    authenticated_client, lark_fake, confirmed_group
+):
+    """The apply reads through the snapshot itself, so that read has to go.
+
+    The decision is deliberately aimed at the row the *upstream* table now has
+    but the warm snapshot does not: the ``skipped`` reason proves the apply was
+    answered by the snapshot, and the read after it proves the snapshot is gone.
+    """
+
+    lark_fake.records = []
+    warmed = authenticated_client.get(
+        f"/api/groups/{confirmed_group.id}/reconcile?source=live"
+    ).json()
+    assert [row["key"] for row in warmed["rows"]] == []
+    lark_fake.records = [
+        {
+            "record_id": "r9",
+            "fields": {"用例": "B-001-R0918-01 管理员登录", "结果": "通过"},
+        }
+    ]
+
+    applied = authenticated_client.post(
+        f"/api/groups/{confirmed_group.id}/reconcile/apply",
+        json={"decisions": [{"key": "B-001-R0918-01", "action": "use_remote"}]},
+    )
+
+    assert applied.status_code == 200, applied.text
+    assert applied.json()["pulled"] == 0
+    # Still answered by the pre-change snapshot: the premise of the test.
+    assert applied.json()["skipped"] == [
+        {"key": "B-001-R0918-01", "reason": "本次读取没有这条记录"}
+    ]
+
+    after = authenticated_client.get(
+        f"/api/groups/{confirmed_group.id}/reconcile?source=live"
+    ).json()
+    assert [row["key"] for row in after["rows"]] == ["B-001-R0918-01"]
+
+
+def test_a_drained_sync_queue_drops_the_snapshot(
+    authenticated_client, lark_fake, confirmed_group
+):
+    """Nothing is queued, so the worker has landed whatever the page cached."""
+
+    _warm_then_change_upstream(lark_fake, authenticated_client, confirmed_group.id)
+
+    summary = authenticated_client.get(
+        f"/api/groups/{confirmed_group.id}/sync"
+    ).json()
+
+    assert summary["queued"] == 0
+    assert _original_record_ids(authenticated_client, confirmed_group.id) == ["mine"]
+
+
+def test_a_sync_queue_with_work_in_flight_keeps_the_snapshot(
+    authenticated_client, lark_fake, confirmed_group, failed_attempt
+):
+    """The queue has not drained, so this read is deliberately still the cache.
+
+    The other direction of the same branch: with a job queued the poll must NOT
+    drop the snapshot, because the worker may not have written anything yet.
+    """
+
+    enqueued = authenticated_client.post(f"/api/groups/{confirmed_group.id}/sync/enqueue")
+    assert enqueued.json()["queued"] == 1
+
+    _warm_then_change_upstream(lark_fake, authenticated_client, confirmed_group.id)
+
+    summary = authenticated_client.get(
+        f"/api/groups/{confirmed_group.id}/sync"
+    ).json()
+
+    assert summary["queued"] == 1
+    # The stale row is still what this snapshot answers with: it was kept.
+    assert _original_record_ids(authenticated_client, confirmed_group.id) == ["old1"]

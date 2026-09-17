@@ -622,3 +622,62 @@ def test_reading_a_target_in_one_base_reads_that_base_once(
     paths = [request["path"] for request in lark_fake.requests]
     assert paths.count("/open-apis/bitable/v1/apps/app-exec") == 1
     assert paths.count("/open-apis/bitable/v1/apps/app-exec/tables") == 1
+
+
+def _history_record_ids(client, group_id, code: str = "B-001") -> list[str]:
+    body = client.get(f"/api/groups/{group_id}/cases/{code}/lark-history").json()
+    assert body["available"] is True, body
+    return [record["record_id"] for record in body["original"]]
+
+
+def test_saving_the_same_target_again_drops_the_snapshot(
+    lark_fake, authenticated_client, confirmed_group
+):
+    """Re-saving an unchanged destination still re-reads the table live.
+
+    The destination identity does not move, so the snapshot *key* does not
+    change either: only the invalidation can make the next history read show the
+    rows the re-read saw.
+    """
+
+    lark_fake.records = [
+        {"record_id": "old1", "fields": {"用例": "B-001 Login", "结果": "不通过"}}
+    ]
+    assert _history_record_ids(authenticated_client, confirmed_group.id) == ["old1"]
+    lark_fake.records = [
+        {"record_id": "mine", "fields": {"用例": "B-001 Login", "结果": "通过"}}
+    ]
+
+    saved = authenticated_client.put(
+        f"/api/groups/{confirmed_group.id}/lark/target", json=_payload("tbl-runs")
+    )
+
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["diff"]["changed"] is False
+    assert _history_record_ids(authenticated_client, confirmed_group.id) == ["mine"]
+
+
+def test_confirming_the_target_drops_the_snapshot(
+    lark_fake, authenticated_client, confirmed_group, db_session
+):
+    """Approval re-reads the schema live; the records snapshot goes with it."""
+
+    lark_fake.records = [
+        {"record_id": "old1", "fields": {"用例": "B-001 Login", "结果": "不通过"}}
+    ]
+    assert _history_record_ids(authenticated_client, confirmed_group.id) == ["old1"]
+    lark_fake.records = [
+        {"record_id": "mine", "fields": {"用例": "B-001 Login", "结果": "通过"}}
+    ]
+    target = _fresh_target(db_session, confirmed_group.id)
+
+    confirmed = authenticated_client.post(
+        f"/api/groups/{confirmed_group.id}/lark/target/confirm",
+        json={
+            "allow_writes": True,
+            "target_fingerprint": target.target_fingerprint,
+        },
+    )
+
+    assert confirmed.status_code == 200, confirmed.text
+    assert _history_record_ids(authenticated_client, confirmed_group.id) == ["mine"]
