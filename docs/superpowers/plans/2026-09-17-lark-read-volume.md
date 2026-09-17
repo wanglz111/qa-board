@@ -245,10 +245,22 @@ git commit -m "perf(lark): reuse one client and renew the token instead of re-bu
 
 ```python
 def test_reading_a_target_in_one_base_reads_that_base_once(
-    lark_fake, authenticated_client, confirmed_group
+    lark_fake, authenticated_client, confirmed_group, db_session
 ):
     """Both roles in one base: the base metadata and its table list are read once."""
 
+    target = db_session.scalar(
+        select(LarkTarget).where(LarkTarget.group_id == confirmed_group.id)
+    )
+    # ``confirmed_group`` deliberately puts the two roles in different bases
+    # (app-exec / app-bug), and reading two different bases once each is already
+    # what the code does. This case is the one worth pinning: one operator who
+    # points both roles at the same base.
+    target.bug_base_token = "app-exec"
+    target.bug_base_name = "执行库"
+    target.bug_table_id = "tbl-bugs"
+    target.bug_table_name = "缺陷记录"
+    db_session.commit()
     lark_fake.requests.clear()
 
     response = authenticated_client.get(f"/api/groups/{confirmed_group.id}/lark/target")
@@ -259,7 +271,7 @@ def test_reading_a_target_in_one_base_reads_that_base_once(
     assert paths.count("/open-apis/bitable/v1/apps/app-exec/tables") == 1
 ```
 
-> 先确认 `confirmed_group` fixture 的两个角色都在 `app-exec`（`tests/conftest.py` 的 `bases` 与 target 构造）。若实测不是同一个 base，就改成按实际 base token 断言，并在注释里写明它是「同 base」用例。
+> 这个测试只有在**同一个 base** 时才有区分力：`bases` 里 `app-exec` 与 `app-bug` 是两个库，所以上面先把缺陷角色搬进 `app-exec`（`(app-exec, tbl-bugs)` 在该 fixture 的 `field_roles` 里已登记为 bug 角色）。改之前先跑一遍确认它**现在会失败**（计数是 2），否则说明测试没测到东西。
 
 - [ ] **Step 2: 跑测试确认失败**
 
