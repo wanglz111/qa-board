@@ -58,6 +58,10 @@ function message(reason: unknown) {
   return reason instanceof Error ? reason.message : "保存失败";
 }
 
+// The worker drains its outbox every few seconds, so a badge read once per save
+// would claim work is still waiting long after the row reached Lark.
+const SYNC_POLL_MS = 3000;
+
 export function ExecutionView({
   loadGroups,
   loadCases,
@@ -88,6 +92,7 @@ export function ExecutionView({
   const [failure, setFailure] = useState("");
   const [lastAttemptId, setLastAttemptId] = useState<string | null>(null);
   const [sync, setSync] = useState<SyncStatus | null>(null);
+  const [legacyVersion, setLegacyVersion] = useState(0);
   const caseRequest = useRef(0);
   const deskMountRef = useRef<HTMLDivElement>(null);
   const [deskHost] = useState(() => {
@@ -112,6 +117,32 @@ export function ExecutionView({
     },
     [loadLegacyHistory, selectedGroupId]
   );
+
+  // A save only queues the write; the worker reaches Lark a few seconds later.
+  // So while something is genuinely queued the page keeps asking, and the
+  // legacy panel is re-read once the queue drains — otherwise the badge counts
+  // every local result as 待同步 forever and the panel keeps its pre-save
+  // snapshot ("旧表没有该用例的失败记录") even though the row is already there.
+  const syncDraining = sync !== null && sync.queued > (sync.parked ?? 0);
+  useEffect(() => {
+    if (!loadSync || !selectedGroupId || !syncDraining) return;
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      loadSync(selectedGroupId)
+        .then((latest) => {
+          if (cancelled) return;
+          setSync(latest);
+          if (latest.queued === 0) setLegacyVersion((version) => version + 1);
+        })
+        .catch(() => {
+          // Leave the numbers as they are; the next save or group switch reads again.
+        });
+    }, SYNC_POLL_MS);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [loadSync, selectedGroupId, sync, syncDraining]);
 
   useEffect(() => {
     let cancelled = false;
@@ -383,6 +414,7 @@ export function ExecutionView({
                 attempts={attempts}
                 onStartRetest={reserveRetest ? () => void startRetest() : undefined}
                 reservedLabel={reserved?.label ?? null}
+                reloadKey={legacyVersion}
               />
             ) : null}
             <div className="outcome-panel">
@@ -391,7 +423,7 @@ export function ExecutionView({
                 {sync ? (
                   <span className={`sync-badge ${sync.confirmed ? "confirmed" : "unconfirmed"}`}>
                     {sync.confirmed
-                      ? `Lark 目标已确认 · 待同步 ${sync.pending_attempts} 条`
+                      ? `Lark 目标已确认 · 待同步 ${sync.queued} 条 · 已同步 ${sync.synced} 条`
                       : "Lark 未确认：结果仅保存在本地"}
                   </span>
                 ) : null}

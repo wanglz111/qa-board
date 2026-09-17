@@ -160,6 +160,7 @@ table { width: 100%; border-collapse: collapse; font-size: .8rem; } th { color: 
 .legacy-tabs button { display: inline-flex; align-items: center; gap: 6px; padding: 7px 12px; color: #5b6469; background: #f4f6f6; border: 1px solid transparent; border-radius: 999px; font-size: .78rem; font-weight: 700; }
 .legacy-tabs button.active { color: #176b57; background: #e8f3ef; border-color: #bcdcd0; }
 .legacy-source { margin: 0 0 8px; color: #8b9398; font-size: .74rem; }
+.legacy-source-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }.legacy-source-row .legacy-source { margin: 0; }.legacy-source-row .ghost-button { flex: 0 0 auto; min-height: 28px; padding: 3px 10px; font-size: .74rem; }
 .legacy-failure { margin: 0 0 10px; padding: 9px 12px; color: #8f3530; background: #fbeceb; border-radius: 5px; font-weight: 700; }
 .legacy-bugs { margin: 0 0 8px; padding: 0; list-style: none; display: grid; gap: 8px; }.legacy-bugs li { padding: 8px 11px; background: #f7f8f8; border-radius: 5px; }
 .legacy-attachments { display: flex; flex-wrap: wrap; gap: 10px; margin: 8px 0 0; padding: 0; list-style: none; }

@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { vi } from "vitest";
 
@@ -154,4 +154,36 @@ it("reports unavailable Lark without pretending there is a previous failure", as
   );
   expect(await screen.findByText("旧表当前不可读，未显示历史结果")).toBeVisible();
   expect(screen.queryByText(/上次失败：/)).not.toBeInTheDocument();
+});
+
+it("re-reads the table on demand instead of keeping a stale snapshot", async () => {
+  const loadHistory = vi
+    .fn<(code: string) => Promise<LegacyHistoryData>>()
+    .mockResolvedValueOnce({
+      ...VERIFIED,
+      original: [],
+      retests: [],
+      bugs: []
+    })
+    .mockResolvedValue(VERIFIED);
+  render(<LegacyHistory code="B-001" loadHistory={loadHistory} />);
+
+  expect(await screen.findByText("旧表没有该用例的失败记录")).toBeVisible();
+  await userEvent.click(screen.getByRole("button", { name: "刷新" }));
+
+  expect(await screen.findByText("上次失败：绑定未触发")).toBeVisible();
+  expect(loadHistory).toHaveBeenCalledTimes(2);
+});
+
+it("re-reads when the executor reports that its own write has landed", async () => {
+  const loadHistory = vi.fn(async () => VERIFIED);
+  const { rerender } = render(
+    <LegacyHistory code="B-001" loadHistory={loadHistory} reloadKey={0} />
+  );
+  await screen.findByText(/来源：执行记录/);
+  expect(loadHistory).toHaveBeenCalledTimes(1);
+
+  rerender(<LegacyHistory code="B-001" loadHistory={loadHistory} reloadKey={1} />);
+
+  await waitFor(() => expect(loadHistory).toHaveBeenCalledTimes(2));
 });

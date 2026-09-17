@@ -10,6 +10,9 @@ type Props = {
   attempts?: Attempt[];
   onStartRetest?: () => void;
   reservedLabel?: string | null;
+  // The executor bumps this when its own write should be visible here, so the
+  // panel stops showing the snapshot it took before that write.
+  reloadKey?: number;
 };
 
 type Tab = "legacy" | "current";
@@ -63,12 +66,14 @@ export function LegacyHistory({
   attachmentUrl,
   attempts = [],
   onStartRetest,
-  reservedLabel
+  reservedLabel,
+  reloadKey = 0
 }: Props) {
   const [tab, setTab] = useState<Tab>("legacy");
   const [data, setData] = useState<LegacyHistoryData | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [reloads, setReloads] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -82,7 +87,7 @@ export function LegacyHistory({
     return () => {
       cancelled = true;
     };
-  }, [code, loadHistory]);
+  }, [code, loadHistory, reloadKey, reloads]);
 
   // Defensive defaults: a partial payload must degrade, never blank the page.
   const original = data?.original ?? [];
@@ -148,10 +153,19 @@ export function LegacyHistory({
         </div>
       ) : data ? (
         <>
-          <p className="legacy-source">
-            来源：{data.source_table_name ?? "未知表"} · 读取时间 {new Date(data.read_at).toLocaleString()}
-            {data.base_name ? ` · ${data.base_name}` : ""}
-          </p>
+          <div className="legacy-source-row">
+            <p className="legacy-source">
+              来源：{data.source_table_name ?? "未知表"} · 读取时间 {new Date(data.read_at).toLocaleString()}
+              {data.base_name ? ` · ${data.base_name}` : ""}
+            </p>
+            <button
+              type="button"
+              className="ghost-button"
+              onClick={() => setReloads((count) => count + 1)}
+            >
+              <RotateCcw size={14} />刷新
+            </button>
+          </div>
 
           {uncertain ? (
             <p className="inline-status warning">

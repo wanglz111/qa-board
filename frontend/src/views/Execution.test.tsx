@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { vi } from "vitest";
 
@@ -7,8 +7,10 @@ import type {
   Group,
   GroupCase,
   GroupProgress,
+  LegacyHistory as LegacyHistoryData,
   ReferenceAsset,
-  SubmitPayload
+  SubmitPayload,
+  SyncStatus
 } from "../api";
 import { ExecutionView } from "./Execution";
 
@@ -86,6 +88,47 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+const EMPTY_LEGACY: LegacyHistoryData = {
+  available: true,
+  code: "B-001",
+  read_errors: [],
+  source_table_name: "执行记录",
+  base_name: "Untitled bitable",
+  bug_table_name: "冒烟测试bug表",
+  read_at: "2026-09-17T05:56:38Z",
+  certainty: "verified",
+  uncertainty: null,
+  ambiguous: false,
+  original: [],
+  retests: [],
+  bugs: [],
+  unknown_count: 0
+};
+
+function syncStatus(overrides: Partial<SyncStatus> = {}): SyncStatus {
+  return {
+    confirmed: true,
+    queued: 0,
+    synced: 0,
+    failed: 0,
+    uncertain: 0,
+    parked: 0,
+    last_error_kind: null,
+    pending_attempts: 0,
+    detail: "目标表已确认，可显式排入同步",
+    ...overrides
+  };
+}
+
+// Fake timers do not run promises, so the mount chain needs its own turns.
+async function settle(turns = 12) {
+  for (let turn = 0; turn < turns; turn += 1) {
+    await act(async () => {
+      await Promise.resolve();
+    });
+  }
+}
+
 function renderExecution(overrides: Partial<Parameters<typeof ExecutionView>[0]> = {}) {
   const submit = vi.fn<(groupId: string, code: string, payload: SubmitPayload) => Promise<Attempt>>();
   submit.mockResolvedValue(committed("attempt-1", "B-001", "通过", null));
@@ -111,6 +154,32 @@ it("shows only the selected group's case and asks for a failure note", async () 
 
   await userEvent.click(screen.getByRole("button", { name: "不通过" }));
   expect(screen.getByLabelText("失败说明")).toBeRequired();
+});
+
+it("counts the queue that is still waiting, not every local result, and re-reads the table once it drains", async () => {
+  vi.useFakeTimers();
+  try {
+    const loadSync = vi.fn(async () => syncStatus({ queued: 1, synced: 0, pending_attempts: 3 }));
+    const loadLegacyHistory = vi.fn(async () => EMPTY_LEGACY);
+    renderExecution({ initialGroupId: "0918-id", loadSync, loadLegacyHistory });
+
+    await settle();
+    // Three saved local results are not three unsynced ones: the badge counts
+    // the outbox queue, exactly like the Lark check page.
+    expect(screen.getByText("Lark 目标已确认 · 待同步 1 条 · 已同步 0 条")).toBeVisible();
+    const readsBeforeDrain = loadLegacyHistory.mock.calls.length;
+
+    loadSync.mockResolvedValue(syncStatus({ queued: 0, synced: 1, pending_attempts: 3 }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+
+    expect(screen.getByText("Lark 目标已确认 · 待同步 0 条 · 已同步 1 条")).toBeVisible();
+    // The row this page just wrote is only readable after the worker lands it.
+    expect(loadLegacyHistory.mock.calls.length).toBe(readsBeforeDrain + 1);
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 it("keeps history aligned with the selected group even when B-001 exists twice", async () => {
