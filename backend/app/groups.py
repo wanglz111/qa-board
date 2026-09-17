@@ -207,8 +207,8 @@ def list_group_cases(
     # case nobody has run instead of always on the first row.
     #
     # ``started`` rows are deliberately excluded: a retest the operator reserved
-    # but never submitted carries no result, and letting it win the max would
-    # fabricate a verdict — or erase the one the case already reported.
+    # but never submitted carries no result, so letting it win the max would
+    # hide the verdict the case already reported.
     latest_sequences = (
         select(
             Attempt.group_case_id,
