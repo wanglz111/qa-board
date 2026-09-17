@@ -500,3 +500,29 @@ live base `LIhnb0ok7a1TMksi3t1jrVoLpke` 现有 5 张表，其中这两张是本�
 - 游标只有一份（不是每组一份），两个标签页共用；单用户下可接受。
 - 重建时若把 `reset_jobs_for_rebuilt_table` 改成「补齐缺失 job」，新表还能带上目标确认前写入的行——那会改变重建的语义（写入之前被确认闸门挡住的行），属产品决策，未做。
 - 面板失败路径的「不留半写状态」目前依赖 session teardown 回滚；生产正确，但性质不显式。
+
+## 19. 未发布：同步卡住时看不到原因、排入同步推不动卡住的行、面板按钮错位
+
+起源于线上那一条：「不知道原因，一直有这个问题，提交同步不了，大概在 v1.7 就出现了。待同步 3 · 已同步 0 · 失败 1 · 待人工确认 0 · 待管理员处理 3 · 最近错误 create_execution_failed」。
+
+**根因 1：原因被丢掉了。** `lark/client.py` 早就把「HTTP 状态 + Lark 自己的 `code`/`msg` + 权限补救话术」拼成了一句人话，但 `outbox.run_job` 只把内部枚举 `error_kind` 写进库，那句话随异常一起消失，全仓也没有任何 logging。于是面板永远只能显示 `create_execution_failed`——运维无从下手，这正是「不知道原因」的来源，不是偶发。
+
+**根因 2：那个按钮对已存在的卡住行是死的。** `enqueue_group_attempts` 是 `on_conflict_do_nothing(attempt_id)`：这 3 条早就有 job 行了，接口返回 `queued: 0`，页面显示「已排入 0 条」，而它们仍停在 `target_changed`。用户最先点的按钮恰好永远动不了他正看着的行。
+
+**根因 3：写端可能给人员列发纯文本。** `REQUIRED_RUN_FIELD_TYPES` 允许执行表的 `负责人`/`报告人` 是人员列（type 11），`REQUIRED_BUG_FIELD_TYPES` 允许 `反馈人` 是人员列，但 `execution_fields` 一律发字符串。人员列只吃 `[{"id": <open_id>}]`，纯文本被 Lark 拒——确认能过、每次创建都失败、重试永远无效，表现就是 `create_execution_failed`。v0.1.7 把「参考表表头」引进来之后，指向手工表（团队用人员列）就会踩上。
+
+**改动**
+
+- `sync_jobs.last_error`（迁移 `0012_sync_job_last_error`，Text）：每条失败路径都把它记录在案，`GET /api/groups/{id}/sync` 的 `last_error_kind` 与 `last_error` 取自**同一行**（不会出现「类别是 A、原因是 B」）。同步成功后清空；重新排队/重新指向时一并清空，避免留下过期原因。`_reason` 截断到 600 字符，且只可能包含 Lark 的 status/code/msg 与既有话术——不含 token、URL、请求体、记录 id（客户端本来就不把这些放进消息）。
+- `POST /api/groups/{id}/sync/enqueue` 现在除了新排入，还会把 `target_changed` 的行重新指向当前目标表、把 `failed` 的行重新排队，返回 `{queued, repointed, requeued}`；页面把「动了多少条」逐项说明。**`uncertain` 一律不碰**：那条可能已经写进远端，再发一次会多出一条记录，仍只走它自己的按钮与勾选。未确认目标仍然 409 拒绝，不会绕过写入审批。
+- 写入端按目标表**已存的** schema 指纹判断人员列：是人员列且有 open id → `[{"id": …}]`；是人员列但没有 id（`负责人` 恒为 `待指派` 占位符）→ 该字段从请求里省略（留空照样能建行，发错类型则整行失败）；文本列照旧收显示名。指纹缺失/不合法时退回旧行为，不猜类型。
+- 面板显示真实原因（红字一行）；「排入同步」的提示按实际动作逐项列出；执行台徽标在 `失败`/`待管理员处理` 非零时也显示，不再把卡住的队列说成「只是慢」。
+- 按钮错位：`.lark-queue` 的四个按钮原本是行内兄弟，`.ghost-button` 是 `inline-flex` + `align-items: center`，而首个子节点是 SVG——替换元素的基线取自身底边，于是带图标的那个按钮比同级高 **2.5px**；再加上 JSX 会把表达式之间的空白去掉，四个按钮本来还是贴在一起的。现在包进 `.lark-queue-actions`（`display:flex; flex-wrap:wrap; align-items:center; gap:10px`）。
+
+**本地验证**
+
+- 后端 `424 passed`（`TEST_DATABASE_URL=… pytest -q`）；迁移 head 断言更新为 `0012_sync_job_last_error`，并断言 `sync_jobs.last_error` 存在。
+- 前端 `161 passed`（17 文件）+ `npm run build` 通过；Playwright `lark-check.spec.ts` 8/8 通过，其中新增的用例把「同一行的按钮必须共享同一 top、相邻间距 ≥8px」写成断言——**把 CSS 修复删掉后它确实失败（差值 2.5px）**，不是空断言。
+- 复现与验证用的临时页面已删除。
+
+**部署后要做的一件事**：升级后随便点一次「把已保存的本地结果排入同步」，面板会写出每条卡住行的真实原因。若是权限类（`Forbidden` / `permission`），按提示在 Lark 开放平台开通「查看、评论、编辑和管理多维表格」并把应用加为该多维表格的可编辑协作者；若提示字段类型，用「修正表头类型」或「重建数据表」。线上未验证（本轮没有真实 Lark 凭证），首次部署后请按上面这行确认。

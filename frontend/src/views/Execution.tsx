@@ -479,6 +479,13 @@ export function ExecutionView({
                     {sync.confirmed
                       ? `Lark 目标已确认 · 待同步 ${sync.queued} 条 · 已同步 ${sync.synced} 条`
                       : "Lark 未确认：结果仅保存在本地"}
+                    {/* A queue that stops draining has to say so here: "待同步 3 ·
+                        已同步 0" with a hidden failure reads as a slow worker. The
+                        reason itself belongs to the Lark check page. */}
+                    {sync.confirmed && (sync.failed ?? 0) > 0 ? ` · 失败 ${sync.failed}` : ""}
+                    {sync.confirmed && (sync.parked ?? 0) > 0
+                      ? ` · 待管理员处理 ${sync.parked}`
+                      : ""}
                   </span>
                 ) : null}
                 {reserveRetest ? (

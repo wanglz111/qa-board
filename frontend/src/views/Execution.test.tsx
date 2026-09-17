@@ -194,6 +194,22 @@ it("counts the queue that is still waiting, not every local result, and re-reads
   }
 });
 
+it("says a stalled queue has failures or parked rows instead of reading as slow", async () => {
+  const loadSync = vi.fn(async () =>
+    syncStatus({ queued: 3, synced: 0, failed: 1, parked: 3, pending_attempts: 4 })
+  );
+  renderExecution({
+    initialGroupId: "0918-id",
+    loadSync,
+    loadLegacyHistory: vi.fn(async () => EMPTY_LEGACY)
+  });
+
+  await settle();
+  expect(
+    screen.getByText("Lark 目标已确认 · 待同步 3 条 · 已同步 0 条 · 失败 1 · 待管理员处理 3")
+  ).toBeVisible();
+});
+
 it("keeps history aligned with the selected group even when B-001 exists twice", async () => {
   const firstHistory = deferred<Attempt[]>();
   const secondHistory = deferred<Attempt[]>();

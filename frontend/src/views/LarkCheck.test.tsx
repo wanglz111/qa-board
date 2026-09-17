@@ -213,7 +213,7 @@ it("reads a pasted link into selectable tables and its detected fields", async (
 });
 
 it("queues previously saved local attempts only after confirmation", async () => {
-  const enqueueSync = vi.fn().mockResolvedValue({ queued: 2 });
+  const enqueueSync = vi.fn().mockResolvedValue({ queued: 2, repointed: 0, requeued: 0 });
   const loadSync = vi
     .fn()
     .mockResolvedValueOnce(syncStatus())
@@ -231,6 +231,73 @@ it("queues previously saved local attempts only after confirmation", async () =>
   expect(enqueueSync).toHaveBeenCalledWith("0918-id");
   expect(await screen.findByText(/已排入 2 条本地结果/)).toBeVisible();
   expect(await screen.findByText(/待同步 2/)).toBeVisible();
+});
+
+it("says what the queue button moved instead of only reporting new rows", async () => {
+  // The rows an operator is looking at already have jobs, so "已排入 0 条" used
+  // to be the whole answer while the parked and failed rows stayed put.
+  const enqueueSync = vi.fn().mockResolvedValue({ queued: 0, repointed: 3, requeued: 1 });
+  const loadSync = vi.fn().mockResolvedValue(syncStatus({ queued: 3, failed: 1, parked: 3 }));
+  renderCheck({
+    loadTarget: async () => stateWith(confirmedTarget()),
+    loadSync,
+    enqueueSync
+  });
+
+  await userEvent.click(
+    await screen.findByRole("button", { name: /把已保存的本地结果排入同步/ })
+  );
+
+  const notice = await screen.findByText(/3 条任务已重新指向当前目标表/);
+  expect(notice).toHaveTextContent("已重新排队 1 条失败结果");
+  expect(notice).not.toHaveTextContent("已排入 0 条本地结果");
+});
+
+it("tells an operator when there was nothing left to enqueue", async () => {
+  const enqueueSync = vi.fn().mockResolvedValue({ queued: 0, repointed: 0, requeued: 0 });
+  renderCheck({
+    loadTarget: async () => stateWith(confirmedTarget()),
+    loadSync: async () => syncStatus({ queued: 1 }),
+    enqueueSync
+  });
+
+  await userEvent.click(
+    await screen.findByRole("button", { name: /把已保存的本地结果排入同步/ })
+  );
+
+  expect(
+    await screen.findByText(/没有需要排入的本地结果：这一组的本地结果都已经在队列里/)
+  ).toBeVisible();
+});
+
+it("prints why the last sync failed, not just the internal category", async () => {
+  const loadSync = vi.fn().mockResolvedValue(
+    syncStatus({
+      failed: 1,
+      last_error_kind: "create_execution_failed",
+      last_error:
+        "Lark create failed HTTP 403: HTTPStatusError，Lark code 91403：Forbidden；请在 Lark 开放平台为应用开通「查看、评论、编辑和管理多维表格」权限并发布"
+    })
+  );
+  renderCheck({
+    loadTarget: async () => stateWith(confirmedTarget()),
+    loadSync
+  });
+
+  expect(await screen.findByText(/最近错误 create_execution_failed/)).toBeVisible();
+  expect(await screen.findByText(/Lark create failed HTTP 403/)).toBeVisible();
+  expect(screen.getByText(/Lark 开放平台为应用开通/)).toBeVisible();
+});
+
+it("shows no reason line when nothing has failed", async () => {
+  renderCheck({
+    loadTarget: async () => stateWith(confirmedTarget()),
+    loadSync: async () => syncStatus()
+  });
+
+  await screen.findByText(/已同步 1/);
+  expect(screen.queryByText(/最近错误/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/Lark create failed|Lark rejected/)).not.toBeInTheDocument();
 });
 
 it("lets an operator recover failed and uncertain syncs explicitly", async () => {

@@ -92,6 +92,13 @@ table { width: 100%; border-collapse: collapse; font-size: .8rem; } th { color: 
 .lark-consent { display: flex; align-items: center; gap: 9px; margin: 14px 0 12px; font-weight: 700; }.lark-consent input { width: auto; min-height: auto; }
 .sync-badge { padding: 3px 9px; border-radius: 999px; font-size: .72rem; font-weight: 700; }.sync-badge.confirmed { color: #1c6b45; background: #e2f2e9; }.sync-badge.unconfirmed { color: #8a6206; background: #fdf1d5; }
 .lark-queue { margin-top: 10px; padding-top: 10px; border-top: 1px solid #eceeef; }.lark-queue .inline-status { margin: 0 0 10px; }
+/* The queue's buttons get their own flex row. As inline-level siblings they sat
+   on one text baseline, and an inline-flex box whose first child is a replaced
+   element (the upload icon) takes its baseline from that element's bottom edge —
+   so the icon button rode 2.5px above the text-only ones beside it. JSX strips
+   the whitespace between expressions as well, which left the row with no gaps. */
+.lark-queue-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }.lark-queue-actions .ghost-button { flex: 0 0 auto; }
+
 .lark-panel-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
 .lark-panel-heading .ghost-button { min-height: 32px; }
 .lark-roles { margin-top: 14px; }.lark-roles .inline-status { margin: 0 0 12px; }

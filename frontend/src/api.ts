@@ -308,8 +308,20 @@ export type SyncStatus = {
   // from retrying an ordinary failure.
   parked?: number;
   last_error_kind: string | null;
+  // Why that kind happened, in Lark's own words plus the remedy the API already
+  // worded. The kind on its own ("create_execution_failed") is not actionable.
+  last_error?: string | null;
   pending_attempts: number;
   detail: string;
+};
+
+// Queueing reports what it moved: a row that already has a job is never inserted
+// again, so the rows stuck on a stale target or a refused create are re-armed and
+// counted separately instead of hiding behind "queued: 0".
+export type SyncEnqueueResult = {
+  queued: number;
+  repointed: number;
+  requeued: number;
 };
 
 export type LegacyAttachment = {
@@ -536,7 +548,7 @@ export const api = {
     }),
   syncStatus: (groupId: string) => request<SyncStatus>(`/api/groups/${groupId}/sync`),
   enqueueSync: (groupId: string) =>
-    mutation<{ queued: number }>(`/api/groups/${groupId}/sync/enqueue`, { method: "POST" }),
+    mutation<SyncEnqueueResult>(`/api/groups/${groupId}/sync/enqueue`, { method: "POST" }),
   retrySync: (groupId: string, releaseUncertain = false) =>
     mutation<{ requeued: number; released: number; repointed: number }>(
       `/api/groups/${groupId}/sync/retry`,

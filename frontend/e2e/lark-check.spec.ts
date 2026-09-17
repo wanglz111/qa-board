@@ -79,7 +79,8 @@ async function mockApi(
   page: Page,
   saved: SavedTarget[] = [],
   plan: unknown = COMPLETE_PLAN,
-  created: CreatedHeaders[] = []
+  created: CreatedHeaders[] = [],
+  sync: Record<string, unknown> | null = null
 ) {
   const target = { ...TARGET };
   await page.route("**/api/**", async (route: Route) => {
@@ -142,7 +143,7 @@ async function mockApi(
     }
     if (pathname === `/api/groups/${GROUP_ID}/sync`) {
       return route.fulfill({
-        json: {
+        json: sync ?? {
           confirmed: false,
           queued: 0,
           synced: 0,
@@ -155,6 +156,73 @@ async function mockApi(
       });
     }
     return route.fulfill({ json: {} });
+  });
+}
+
+// One confirmed target whose rows are all stuck: three parked on a stale
+// fingerprint and one refused by Lark. This is the panel the operator was
+// looking at when the queue button answered "已排入 0 条" and nothing moved.
+const STUCK_SYNC = {
+  confirmed: true,
+  queued: 3,
+  synced: 0,
+  failed: 1,
+  uncertain: 0,
+  parked: 3,
+  last_error_kind: "create_execution_failed",
+  last_error:
+    "Lark create failed HTTP 403: HTTPStatusError，Lark code 91403：Forbidden；请在 Lark 开放平台为应用开通「查看、评论、编辑和管理多维表格」权限并发布",
+  pending_attempts: 4,
+  detail: "目标表已确认，可显式排入同步"
+};
+
+for (const viewport of ["desktop", "mobile"] as const) {
+  test(`${viewport} the queue row aligns its buttons and prints why a row is stuck`, async ({ page }) => {
+    await page.setViewportSize(viewport === "desktop" ? { width: 1440, height: 900 } : { width: 360, height: 800 });
+    await mockApi(page, [], COMPLETE_PLAN, [], STUCK_SYNC);
+    // The queue's own buttons are gated on the *target* being approved, not on
+    // the counters, so this test needs a confirmed target of its own. Routes are
+    // matched newest-first, so this one wins over the shared mock.
+    await page.route(`**/api/groups/${GROUP_ID}/lark/target`, (route) =>
+      route.fulfill({
+        json: {
+          target: { ...TARGET, confirmed: true, confirmed_at: "2026-09-17T08:35:17Z" },
+          live: { schema_errors: [], read_errors: [] },
+          read_errors: []
+        }
+      })
+    );
+    await page.goto("/");
+    await page.getByRole("button", { name: "Lark 检查" }).click();
+
+    await expect(page.getByText(/最近错误 create_execution_failed/)).toBeVisible();
+    // The category alone was all the panel ever said; now the reason is there.
+    await expect(page.getByText(/Lark create failed HTTP 403/)).toBeVisible();
+
+    const boxes = await page
+      .locator(".lark-queue-actions button")
+      .evaluateAll((nodes) =>
+        nodes.map((node) => {
+          const box = node.getBoundingClientRect();
+          return { top: box.top, bottom: box.bottom, left: box.left, right: box.right };
+        })
+      );
+    expect(boxes.length).toBeGreaterThan(1);
+
+    for (let index = 1; index < boxes.length; index += 1) {
+      const previous = boxes[index - 1];
+      const current = boxes[index];
+      // Only a pair that shares a line has to share a top edge: the icon-led
+      // button used to sit 2.5px above the text-only buttons beside it.
+      const sameLine = current.top < previous.bottom && current.bottom > previous.top;
+      if (!sameLine) continue;
+      expect(current.top).toBeCloseTo(previous.top, 1);
+      expect(current.left - previous.right).toBeGreaterThanOrEqual(8);
+    }
+
+    const noOverflow = await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth);
+    expect(noOverflow).toBe(true);
+    await page.screenshot({ path: `test-results/lark-queue-${viewport}.png`, fullPage: true });
   });
 }
 

@@ -18,6 +18,7 @@ import {
   type RebuildTableResult,
   type RetypeFieldsPayload,
   type RetypeFieldsResult,
+  type SyncEnqueueResult,
   type SyncStatus,
   type Table,
   type TableRole
@@ -39,7 +40,7 @@ type Props = {
   }>;
   confirmTarget: (groupId: string, targetFingerprint: string) => Promise<LarkTarget>;
   loadSync?: (groupId: string) => Promise<SyncStatus>;
-  enqueueSync?: (groupId: string) => Promise<{ queued: number }>;
+  enqueueSync?: (groupId: string) => Promise<SyncEnqueueResult>;
   retrySync?: (
     groupId: string,
     releaseUncertain?: boolean
@@ -480,7 +481,20 @@ export function LarkCheckView({
     setError("");
     try {
       const result = await enqueueSync(groupId);
-      setNotice(`已排入 ${result.queued} 条本地结果，仅新增记录`);
+      // Reporting only the newly inserted rows is what made this button look
+      // dead: rows already in the queue answered "已排入 0 条" while nothing
+      // moved. Every count it moved is named now.
+      const moved: string[] = [];
+      if (result.queued > 0) moved.push(`已排入 ${result.queued} 条本地结果`);
+      if (result.repointed > 0) {
+        moved.push(`${result.repointed} 条任务已重新指向当前目标表`);
+      }
+      if (result.requeued > 0) moved.push(`已重新排队 ${result.requeued} 条失败结果`);
+      setNotice(
+        moved.length > 0
+          ? `${moved.join("，")}，仅新增记录`
+          : "没有需要排入的本地结果：这一组的本地结果都已经在队列里"
+      );
       const refreshed = await loadSync?.(groupId);
       if (refreshed) setSync(refreshed);
     } catch (reason) {
@@ -747,50 +761,59 @@ export function LarkCheckView({
               待同步 {sync?.queued ?? 0} · 已同步 {sync?.synced ?? 0} · 失败 {syncFailed} · 待人工确认 {sync?.uncertain ?? 0} · 待管理员处理 {syncParked}
               {sync?.last_error_kind ? ` · 最近错误 ${sync.last_error_kind}` : ""}
             </p>
-            {confirmed && enqueueSync ? (
-              <button
-                type="button"
-                className="ghost-button"
-                disabled={queueing || (sync?.pending_attempts ?? 0) === 0}
-                onClick={() => void queueSavedAttempts()}
-              >
-                {queueing ? <LoaderCircle className="spin" size={16} /> : <Upload size={16} />}
-                把已保存的本地结果排入同步
-              </button>
+            {/* The category alone is not actionable: this is what Lark actually
+                answered, plus the remedy the API already worded. */}
+            {sync?.last_error ? (
+              <p className="inline-status error" role="alert">
+                {sync.last_error}
+              </p>
             ) : null}
-            {confirmed && retrySync && syncFailed > 0 ? (
-              <button
-                type="button"
-                className="ghost-button"
-                disabled={retryingSync}
-                onClick={() => void retryQueuedJobs(false)}
-              >
-                {retryingSync ? <LoaderCircle className="spin" size={16} /> : null}
-                重试失败的同步（{syncFailed} 条）
-              </button>
-            ) : null}
-            {retrySync && syncParked > 0 ? (
-              <button
-                type="button"
-                className="ghost-button"
-                disabled={retryingSync}
-                onClick={() => void retryQueuedJobs(false)}
-              >
-                {retryingSync ? <LoaderCircle className="spin" size={16} /> : null}
-                重新指向当前目标表（{syncParked} 条）
-              </button>
-            ) : null}
-            {confirmed && retrySync && (sync?.uncertain ?? 0) > 0 ? (
-              <button
-                type="button"
-                className="ghost-button"
-                disabled={retryingSync}
-                onClick={() => void retryQueuedJobs(true)}
-              >
-                {retryingSync ? <LoaderCircle className="spin" size={16} /> : null}
-                已核对远端，释放待人工确认（{sync?.uncertain} 条）
-              </button>
-            ) : null}
+            <div className="lark-queue-actions">
+              {confirmed && enqueueSync ? (
+                <button
+                  type="button"
+                  className="ghost-button"
+                  disabled={queueing || (sync?.pending_attempts ?? 0) === 0}
+                  onClick={() => void queueSavedAttempts()}
+                >
+                  {queueing ? <LoaderCircle className="spin" size={16} /> : <Upload size={16} />}
+                  把已保存的本地结果排入同步
+                </button>
+              ) : null}
+              {confirmed && retrySync && syncFailed > 0 ? (
+                <button
+                  type="button"
+                  className="ghost-button"
+                  disabled={retryingSync}
+                  onClick={() => void retryQueuedJobs(false)}
+                >
+                  {retryingSync ? <LoaderCircle className="spin" size={16} /> : null}
+                  重试失败的同步（{syncFailed} 条）
+                </button>
+              ) : null}
+              {retrySync && syncParked > 0 ? (
+                <button
+                  type="button"
+                  className="ghost-button"
+                  disabled={retryingSync}
+                  onClick={() => void retryQueuedJobs(false)}
+                >
+                  {retryingSync ? <LoaderCircle className="spin" size={16} /> : null}
+                  重新指向当前目标表（{syncParked} 条）
+                </button>
+              ) : null}
+              {confirmed && retrySync && (sync?.uncertain ?? 0) > 0 ? (
+                <button
+                  type="button"
+                  className="ghost-button"
+                  disabled={retryingSync}
+                  onClick={() => void retryQueuedJobs(true)}
+                >
+                  {retryingSync ? <LoaderCircle className="spin" size={16} /> : null}
+                  已核对远端，释放待人工确认（{sync?.uncertain} 条）
+                </button>
+              ) : null}
+            </div>
             {confirmed && (sync?.uncertain ?? 0) > 0 ? (
               <p className="attachment-hint">
                 释放待人工确认前，请先在旧表搜索该复测标签：若远端其实已写入，释放后会再新增一条记录。
@@ -798,7 +821,7 @@ export function LarkCheckView({
             ) : null}
             {syncParked > 0 ? (
               <p className="attachment-hint">
-                {syncParked} 条记录正在等待管理员处理，不会自行同步：只有管理员确认它们应写入当前目标表后才会继续。若目标表确实更换过，请按「重新指向当前目标表」；若本组的写入确认已被撤销，需要先重新确认。
+                {syncParked} 条记录正在等待管理员处理，不会自行同步：只有管理员确认它们应写入当前目标表后才会继续。若目标表确实更换过，按「重新指向当前目标表」或「把已保存的本地结果排入同步」都会把它们重新指向当前目标表；若本组的写入确认已被撤销，需要先重新确认。
                 {confirmed ? null : "本组目前尚未确认写入目标，这些记录不会同步。"}
               </p>
             ) : null}
