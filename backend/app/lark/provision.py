@@ -784,16 +784,18 @@ def _rebuild_counts(db: Session, group_id: UUID) -> dict[str, int]:
 
     Counted over ``SyncJob``, not over attempts: ``reset_jobs_for_rebuilt_table``
     is an update of the jobs that exist and never inserts one, so a job is the
-    exact unit of work this number promises, and the dialog equals the
-    rebuild's own ``requeued`` count. An attempt committed before the group's
-    target was confirmed never got a job, and a row adopted from the table
-    (``source="reconcile"``) must never get one, so neither is a row this
-    rebuild will write.
+    exact unit of work this number promises. For the execution role that makes
+    it equal the rebuild's own ``requeued`` count; the defect number is the
+    subset of those jobs that raises a defect row. An attempt committed before
+    the group's target was confirmed never got a job, and a row adopted from
+    the table (``source="reconcile"``) must never get one, so neither is a row
+    this rebuild will write.
 
     ``Attempt.state`` is kept as the record's own claim that it carries a
-    result. The two paths that mint jobs, ``enqueue_attempt_job`` and
-    ``enqueue_group_attempts``, already require ``source="execution"``, so that
-    filter would say nothing a job does not.
+    result — a guard rather than a fact, since no application path mints a job
+    for an attempt that is still ``started``. The two paths that do mint jobs,
+    ``enqueue_attempt_job`` and ``enqueue_group_attempts``, already require
+    ``source="execution"``, so that filter would say nothing a job does not.
     """
 
     queued = (
