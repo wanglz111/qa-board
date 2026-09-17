@@ -9,6 +9,10 @@ Two things keep the snapshot honest. This process drops it when it writes
 (``POST /attempts`` and its siblings), and the sync queue emptying drops it too
 — the worker runs in another container, so that is the one moment this process
 learns that a row it queued has landed.
+
+The snapshot is read-only. Readers get shallow copies, so they cannot append to
+or reorder what they were handed, but the record dicts inside are shared with
+the snapshot: a caller that wants to change one must copy it first.
 """
 
 from __future__ import annotations
@@ -35,15 +39,21 @@ def read_records(
     *,
     ttl: float | None = None,
 ) -> list[dict[str, Any]]:
-    """The table's records, from the snapshot while it is still fresh."""
+    """The table's records, from the snapshot while it is still fresh.
+
+    The list is a copy, but the dicts in it are the snapshot's own records, so
+    a reader that needs to edit one copies it first.
+    """
 
     key = (base_token, table_id)
+    now = time.monotonic()
     with _lock:
         entry = _entries.get(key)
-        if entry is not None and time.monotonic() < entry[0]:
+        if entry is not None and now < entry[0]:
             # A reader must not be able to edit the snapshot through the list it
             # was handed, so every reader gets its own container.
             return list(entry[1])
+        _prune_expired(now)
     records = fetch()
     with _lock:
         _entries[key] = (
@@ -51,6 +61,19 @@ def read_records(
             list(records),
         )
     return list(records)
+
+
+def _prune_expired(now: float) -> None:
+    """Drop what has aged out, so a table read once does not linger forever.
+
+    The store otherwise shrinks only on a write, which would leave a snapshot
+    for a group nobody opens again in memory for the process's lifetime.
+    """
+
+    for key in [key for key, entry in _entries.items() if now >= entry[0]]:
+        del _entries[key]
+    for key in [key for key, entry in _names.items() if now >= entry[0]]:
+        del _names[key]
 
 
 def invalidate(base_token: str, table_id: str) -> None:
@@ -73,13 +96,18 @@ def read_names(target: Any, fetch: Callable[[], dict[str, Any]]) -> dict[str, An
     Without this the panel still pays four name reads per case open (base
     metadata and table listing for each role) — the record snapshot alone only
     removes the two record reads.
+
+    The dictionary is a copy; like the records, anything nested inside it is
+    shared with the snapshot and must be copied before it is edited.
     """
 
     key = _names_key(target)
+    now = time.monotonic()
     with _lock:
         entry = _names.get(key)
-        if entry is not None and time.monotonic() < entry[0]:
+        if entry is not None and now < entry[0]:
             return dict(entry[1])
+        _prune_expired(now)
     names = fetch()
     with _lock:
         _names[key] = (time.monotonic() + DEFAULT_TTL_SECONDS, dict(names))
