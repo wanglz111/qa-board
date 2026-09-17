@@ -363,3 +363,75 @@ Cloudflare 侧只需 `testdeck.gleaftex.com` 的 A 记录指向 `43.167.241.33`�
 | 旧行（v0.1.6 及更早写的） | 仍是旧内容：`问题描述` 带 `【自动提】`、没有附件、`用例` 带 `-R…` 后缀 |
 
 回滚：`cd /home/ubuntu/testdeck && ./deploy.sh v0.1.6`（本次无 schema 变更，可直接回滚）。
+
+## 16. 这次交付做了什么（v0.1.8）
+
+v0.1.7 把表头**类型**修对了，但列序和主列修不了：Lark 只在字段**创建的那一刻**决定它落在第几列，主列固定取最先创建的那个字段，这两样都**没有 API 可以改**。线上那两张表就是 v0.1.6 及更早按字母序生成的——`优先级` 占着主列，后面全部错位，bug 表还多了一个空「单选」列（同样删不掉）。所以能装下参考表的只有「换一张表」。
+
+- 新增 `POST /api/groups/{id}/lark/provision/rebuild`：按参考表列序新建该角色的数据表（`用例` / `问题描述` 在第一列即主列），把本组指向它，丢掉写入审批，并把该角色**全部**本地结果重新排队，交给当前写入端重写一遍——于是新表里是类型正确的列、带截图、且不带 `【自动提】` 的行。只清被重建那一侧已存的记录 id，没动的那张表不会因此多出重复行。
+- 新表命名为 `<原名>（表头修正）`，与它替换掉的表可以并排区分；**旧表不会被删除**，本工具也没有删表/删列的 API，需要人工清理。
+- 「Lark 检查」页新增「重建数据表（表头修正）」：默认**不勾选**任何角色，对话框会写出每个角色当前在哪张表、将被哪张表替换；重建后页面会跟着本组走到新表，并把被替换的那张从可选列表里去掉，避免「保存选择」再把旧表写回去。
+- 重建不与正在写表的任务抢跑：有 job 在飞就返回 409 等它写完；没有审批时同样拒绝（这条在 v0.1.9 被放开，原因见下节）。
+- 提交 `38399fb`，tag `v0.1.8`；GitHub Actions [#35198414348](https://github.com/wanglz111/qa-board/actions/runs/35198414348) 成功，镜像已推到 GHCR。
+- 服务器执行 `./deploy.sh v0.1.8`：`.env` 备份为 `.env.bak-20260917-161459`，无新迁移（`alembic_version` 仍是 `0011_case_reference_assets`），api / worker / web 全部换成 `ghcr.io/wanglz111/qa-board-*:v0.1.8`。
+
+升级后的实测结果（真实域名 + 真实 Lark 数据）：
+
+| 检查 | 结果 |
+| --- | --- |
+| `docker compose ps` | api（healthy）、worker、web 都是 `ghcr.io/wanglz111/qa-board-*:v0.1.8` |
+| 部署的 SPA 资源 | `index-B2Lx5Uy0.js` / `index-DEPbX85t.css`，与本地 `v0.1.9` 工作区构建产物一致（前端未再改动） |
+| `GET /health/ready` | 200 `{"ok":true}` |
+| `POST /api/groups/<id>/lark/provision/rebuild`（role=execution） | 200，本组执行表指向新建的 `tblhvnitk1I661Kd`「执行记录（表头修正）」 |
+| 新执行表表头（Lark 直读 `bitable/v1/apps/.../tables/tblhvnitk1I661Kd/fields`） | `用例`(文本, **主列**) `结果`(单选：通过/不通过/阻塞/未执行) `优先级`(单选：P0/P1/P2/P3) `负责人`(文本) `截图`(附件) `控制台`(文本) `报告人`(文本) `日期`(DateTime `yyyy/MM/dd`)——与参考表 `tblHQfoGkECqrsBZ` 的列序、类型、选项名逐项一致 |
+| `POST .../rebuild`（role=bug，同一轮） | **409**「请先确认写入，再重建数据表」——第一次重建已经清走审批，这条前置校验把第二张表挡在门外（api 日志同轮的 `200` 与 `409` 就是这两次调用） |
+| bug 表 | 仍是旧的 `tblUWgX6amSJvAOr`「冒烟测试bug表」：`优先级` 占主列、列序错、残留一个空「单选」列 |
+| `lark_targets.confirmed_at` | 空——重建换掉了目标，写入审批按设计失效，需要重新确认 |
+| `sync_jobs` | 5 条 pending、`error_kind='target_changed'`：等重新确认后被释放 |
+
+回滚：`cd /home/ubuntu/testdeck && ./deploy.sh v0.1.7`（本次无 schema 变更，可直接回滚；但已重建的执行表不会因此回退，旧表 `tblqk65OnxaVkGBD` 仍在）。
+
+## 17. 这次交付做了什么（v0.1.9）
+
+v0.1.8 上线后，管理员在同一轮里重建执行表（**200**），紧接着重建 bug 表却被 **409「请先确认写入，再重建数据表」** 挡住——bug 表因此一直留在旧结构上。
+
+- 根因：重建会把本组**指向新表**，而换目标必然丢弃写入审批（这是刻意设计：换表后不该再往新表里静默写）。v0.1.8 又加了一条前置校验「本组没有审批就拒绝重建」，于是**第一次重建亲手造出的状态**否掉了第二次重建。连着重建两张表是常规操作，这条校验是错的。
+- 改动（提交 `89742af`）：去掉该前置校验；「正在写表的 job 在飞时等它写完（409）」这一条保留。新增回归测试 `test_rebuilding_one_role_leaves_the_other_role_rebuildable`：先重建执行表（断言 `confirmed:false`），再重建 bug 表（断言 200 且两张表都已换、`confirmed_at` 仍为空）。
+- 本地验证：后端 `347 passed`，前端 `131 passed`（16 文件），`npm run build` 通过，`git diff --check` 干净。
+- tag `v0.1.9`（指向 `2ce6516`）；GitHub Actions [#35200128634](https://github.com/wanglz111/qa-board/actions/runs/35200128634) success，两个镜像已推到 GHCR。
+- 服务器执行 `./deploy.sh v0.1.9`：`.env` 备份为 `.env.bak-20260917-163355`，无新迁移（`alembic_version` 仍是 `0011_case_reference_assets`），api / worker / web 全部换成 `ghcr.io/wanglz111/qa-board-*:v0.1.9`。重建前另做了一份数据库备份 `backups/backup-2026-09-17-163450.sql.gz`。
+
+升级后的实测结果（真实域名 + 真实 Lark 数据）：
+
+| 检查 | 结果 |
+| --- | --- |
+| `docker compose ps` | api（healthy）、worker、web 都是 `ghcr.io/wanglz111/qa-board-*:v0.1.9` |
+| `GET /health/ready` | 200 `{"ok":true}` |
+| `POST /api/groups/<id>/lark/provision/rebuild`（role=bug，**同一轮第二次重建**） | 200：新建 `tbllJqe4zDrCQgpW`「冒烟测试bug表（表头修正）」，替换 `tblUWgX6amSJvAOr`，`requeued: 5` |
+| `POST /api/groups/<id>/lark/target/confirm` | 200，`confirmed_at` = `2026-09-17T08:35:17Z` |
+| `POST /api/groups/<id>/sync/retry` | 200，`{"requeued":0,"released":0,"repointed":5}`——5 条被 `target_changed` 停住的记录重新指向新目标 |
+| `GET /api/groups/<id>/sync` | `{"confirmed":true,"queued":0,"synced":5,"failed":0,"parked":0,"uncertain":0}` |
+| 新执行表 `tblhvnitk1I661Kd` 表头 | `用例`(文本,**主列**) `结果`(单选) `优先级`(单选 P0-P3) `负责人`(文本) `截图`(附件) `控制台`(文本) `报告人`(文本) `日期`(DateTime) |
+| 新 bug 表 `tbllJqe4zDrCQgpW` 表头 | `问题描述`(文本,**主列**) `进展状态`(单选 9 项) `跟进人`(人员) `优先级`(单选 P0-P2) `截图`(附件) `反馈人`(人员) `反馈时间`(DateTime) `备注`(文本) |
+| 与参考表逐字段比对（列序 / type / ui_type / 主列 / 选项名逐个 / 多选属性） | 两张表都与参考表 **完全一致**（执行比 `tblHQfoGkECqrsBZ`，缺陷比 `tblbiGnPAOh8ilsl`，含 `反馈人`/`跟进人` 的 `multiple:true`） |
+| 新执行表记录（5 条） | `用例` 为干净标题（无 `-R…` 后缀）、`结果`/`优先级` 是单选值、`报告人`=Max、`负责人`=待指派、`日期` 有值；带截图的行 `截图` 列是附件（`file_token` + `name` + 下载 url） |
+| 新 bug 表记录（3 条） | `备注` = 「由用例 B-005 提交（结果：不通过）」，**不再有** `【自动提】`；`反馈人` 是人员列（open_id `ou_61dabbc…`）；`截图` 是附件（`file_token` + 下载 url） |
+| api / worker 日志 | 部署后 8 分钟内无 error / traceback；三个调用都是 200 |
+
+至此用户提的三件事在线上闭环：`【自动提】` 已消失、自动生成表头（顺序 / 类型 / 内容 / 主列 / 选项）与参考表一致、截图进入 Lark 附件列并在执行历史里可见。
+
+### 需要人工清理（Lark API 没有删表 / 删列接口）
+
+live base `LIhnb0ok7a1TMksi3t1jrVoLpke` 现有 5 张表，其中这两张是本工具早期生成的、表头错的那版，**确认新表数据无误后可删**：
+
+| 表 | 说明 |
+| --- | --- |
+| `tblqk65OnxaVkGBD`「执行记录」 | 旧执行表（`优先级` 占主列、列序按字母序），已被 `tblhvnitk1I661Kd` 取代 |
+| `tblUWgX6amSJvAOr`「冒烟测试bug表」 | 旧 bug 表（同上，且残留一个**空「单选」列，API 删不掉**），已被 `tbllJqe4zDrCQgpW` 取代 |
+
+另有两项：
+
+- `tblOlLZLkeSK7ktG`「数据表」是这个 base 自带的默认表，**不是本工具建的**，留不留由你决定。
+- 我为了验证截图链路造过一条**真实的**测试记录（`attempt a327b24e-…`，复测标签 `B-005-Rgroup-4e98c0-01`，一次「不通过」，备注「端到端截图链路验证」）。它已经按预期写进了新执行表和新 bug 表各一行，Lark 没有删除记录的 API，需要你手动删掉这两行。
+
+回滚：`cd /home/ubuntu/testdeck && ./deploy.sh v0.1.8`（本次无 schema 变更，可直接回滚）。注意已重建的两张表不会因此回退，本组的目标已指向新表。
