@@ -11,7 +11,11 @@ const CASE = {
   preconditions: "已存在可登录的管理员账号",
   test_data: "admin@example.test / test-password",
   steps: "1. 打开登录页\n2. 绑定钱包",
-  expected: "钱包绑定成功"
+  expected: "钱包绑定成功",
+  expect_absent: [],
+  visual_check: "text_and_visual",
+  prototype_note: null,
+  reference_assets: []
 };
 
 async function mockApi(page: Page) {
@@ -83,6 +87,18 @@ async function mockApi(page: Page) {
   });
 }
 
+async function pasteDefectImage(page: Page) {
+  await page.locator(".outcome-form").evaluate((form) => {
+    const binary = atob(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    );
+    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+    const transfer = new DataTransfer();
+    transfer.items.add(new File([bytes], "checkout-error.png", { type: "image/png" }));
+    form.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, clipboardData: transfer }));
+  });
+}
+
 test("desktop keyboard flow keeps shortcuts away from the failure note", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await mockApi(page);
@@ -109,6 +125,28 @@ test("desktop keyboard flow keeps shortcuts away from the failure note", async (
   await page.screenshot({ path: "test-results/task5-shortcuts-desktop.png", fullPage: true });
 });
 
+test("pasted defect screenshots render as removable image previews", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await mockApi(page);
+  await page.goto("/");
+  await expect(page.getByText("管理员登录后绑定钱包")).toBeVisible();
+
+  await pasteDefectImage(page);
+  const preview = page.getByRole("img", { name: "缺陷截图：checkout-error.png" });
+  await expect(preview).toBeVisible();
+  await expect.poll(() => preview.evaluate((image) => image.complete && image.naturalWidth > 0)).toBe(true);
+  await page.screenshot({ path: "test-results/defect-image-preview-desktop.png", fullPage: true });
+
+  await page.getByRole("button", { name: "移除 checkout-error.png" }).click();
+  await expect(preview).toHaveCount(0);
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await pasteDefectImage(page);
+  await expect(page.getByRole("img", { name: "缺陷截图：checkout-error.png" })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: "test-results/defect-image-preview-mobile.png", fullPage: true });
+});
+
 test("picture-in-picture opens when supported and degrades visibly when not", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await mockApi(page);
@@ -126,10 +164,28 @@ test("picture-in-picture opens when supported and degrades visibly when not", as
   }
 
   await expect(pipButton).toBeEnabled();
+  const pipPagePromise = page.context().waitForEvent("page");
   await pipButton.click();
-  await expect(page.getByRole("button", { name: "关闭画中画" })).toBeVisible();
-  await page.screenshot({ path: "test-results/task5-pip-open.png", fullPage: true });
+  const pipPage = await pipPagePromise;
+  await pipPage.setViewportSize({ width: 420, height: 760 });
+  await expect(pipPage.getByRole("button", { name: "关闭画中画" })).toBeVisible();
+  await pipPage.getByRole("button", { name: "通过", exact: true }).click();
+  await expect(pipPage.getByRole("button", { name: "通过", exact: true })).toHaveAttribute(
+    "aria-pressed",
+    "true"
+  );
+  await pasteDefectImage(pipPage);
+  const preview = pipPage.getByRole("img", { name: "缺陷截图：checkout-error.png" });
+  await expect(preview).toBeVisible();
+  await expect.poll(() => preview.evaluate((image) => image.complete && image.naturalWidth > 0)).toBe(true);
+  expect(
+    await pipPage.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)
+  ).toBe(true);
+  await pipPage.screenshot({ path: "test-results/task5-pip-open.png", fullPage: true });
 
-  await page.keyboard.press("Control+p");
+  await pipPage.getByRole("button", { name: "移除 checkout-error.png" }).click();
+  await expect(preview).toHaveCount(0);
+
+  await pipPage.getByRole("button", { name: "关闭画中画" }).click();
   await expect(page.getByRole("button", { name: "画中画" })).toBeVisible();
 });

@@ -36,7 +36,11 @@ async function mockApi(page: Page) {
             preconditions: "已存在可登录的管理员账号",
             test_data: "admin@example.test / test-password",
             steps: LONG_STEPS,
-            expected: "钱包绑定成功且账户状态为已激活"
+            expected: "钱包绑定成功且账户状态为已激活",
+            expect_absent: [],
+            visual_check: "text_and_visual",
+            prototype_note: null,
+            reference_assets: []
           }
         ]
       });

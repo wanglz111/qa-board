@@ -1,6 +1,7 @@
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { useEffect, useRef } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { usePiP } from "./usePiP";
@@ -12,13 +13,28 @@ type FakeApi = {
 
 function Harness() {
   const pip = usePiP();
-  const source = useRef<HTMLDivElement>(null);
+  const mount = useRef<HTMLDivElement>(null);
+  const [source] = useState(() => {
+    const node = document.createElement("div");
+    node.dataset.testid = "source";
+    return node;
+  });
+  const [clicks, setClicks] = useState(0);
+
+  useLayoutEffect(() => {
+    mount.current?.append(source);
+  }, [source]);
+
   return (
     <div>
-      <div ref={source} data-testid="source">
-        执行台
-      </div>
-      <button type="button" onClick={() => void pip.open(source.current)}>
+      <div ref={mount} data-testid="mount" />
+      {createPortal(
+        <button type="button" onClick={() => setClicks((value) => value + 1)}>
+          执行台 {clicks}
+        </button>,
+        source
+      )}
+      <button type="button" onClick={() => void pip.open(source)}>
         画中画
       </button>
       <span data-testid="supported">{String(pip.supported)}</span>
@@ -54,13 +70,16 @@ describe("usePiP", () => {
     window.removeEventListener("unhandledrejection", unhandled);
   });
 
-  it("mirrors the execution node into the PiP document", async () => {
+  it("moves the live execution node into PiP so React controls remain interactive", async () => {
     const pipDocument = document.implementation.createHTMLDocument("pip");
+    let onPageHide: (() => void) | undefined;
     const pipWindow = {
       document: pipDocument,
       close: vi.fn(),
       focus: vi.fn(),
-      addEventListener: vi.fn()
+      addEventListener: vi.fn((name: string, handler: () => void) => {
+        if (name === "pagehide") onPageHide = handler;
+      })
     } as unknown as Window;
     (window as { documentPictureInPicture?: FakeApi }).documentPictureInPicture = {
       requestWindow: vi.fn().mockResolvedValue(pipWindow),
@@ -68,9 +87,17 @@ describe("usePiP", () => {
     };
 
     render(<Harness />);
+    const source = screen.getByTestId("source");
     await userEvent.click(screen.getByRole("button", { name: "画中画" }));
 
-    expect(pipDocument.querySelector(".pip-surface")?.textContent).toContain("执行台");
+    expect(pipDocument.querySelector(".pip-surface")?.firstElementChild).toBe(source);
+    const pipButton = pipDocument.querySelector("button");
+    expect(pipButton?.textContent).toBe("执行台 0");
+    act(() => (pipButton as HTMLButtonElement).click());
+    expect(pipButton?.textContent).toBe("执行台 1");
+
+    act(() => onPageHide?.());
+    expect(screen.getByTestId("mount")).toContainElement(source);
   });
 });
 
@@ -89,16 +116,8 @@ describe("usePiP cleanup", () => {
       window: null
     };
 
-    function Opener() {
-      const pip = usePiP();
-      const source = useRef<HTMLDivElement>(null);
-      useEffect(() => {
-        void pip.open(source.current);
-      }, [pip]);
-      return <div ref={source}>执行台</div>;
-    }
-
-    const view = render(<Opener />);
+    const view = render(<Harness />);
+    await userEvent.click(screen.getByRole("button", { name: "画中画" }));
     await vi.waitFor(() => expect(pipDocument.querySelector(".pip-surface")).not.toBeNull());
     view.unmount();
 

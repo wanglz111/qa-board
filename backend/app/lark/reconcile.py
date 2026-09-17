@@ -15,7 +15,7 @@ from app.execution import allocate_attempt
 from app.lark.client import LarkClient, LarkError, get_lark_client
 from app.lark.history import parse_case_reference, record_case_text, record_fields
 from app.lark.target import target_for
-from app.models import Attempt, Group, GroupCase, LarkHistoryRef, ReconcileMark
+from app.models import Attempt, Group, GroupCase, LarkHistoryRef, ReconcileMark, SyncJob
 
 
 router = APIRouter(prefix="/api", dependencies=[Depends(require_admin)])
@@ -49,13 +49,14 @@ def remote_row(record: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
-def local_row(attempt: Any) -> dict[str, Any]:
+def local_row(attempt: Any, remote_record_id: str | None = None) -> dict[str, Any]:
     return {
         "attempt_id": str(attempt.id),
         "case_code": attempt.group_case.code,
         "label": attempt.label,
         "result": attempt.result,
         "console_text": attempt.console_text,
+        "remote_record_id": remote_record_id,
     }
 
 
@@ -78,11 +79,27 @@ def reconcile_rows(
     """
 
     local_by_label = {row["label"]: row for row in local}
+    local_by_record_id = {
+        row["remote_record_id"]: row
+        for row in local
+        if row.get("remote_record_id")
+    }
+    parsed_remote = [parsed for record in remote if (parsed := remote_row(record))]
     remote_by_label: dict[str, dict[str, Any]] = {}
-    for record in remote:
-        parsed = remote_row(record)
-        if parsed is not None:
-            remote_by_label[parsed["label"]] = parsed
+
+    # Durable record IDs are stronger than labels from old rows. Reserve those
+    # keys first so Lark's return order cannot pair an attempt with a legacy row.
+    for parsed in parsed_remote:
+        linked = local_by_record_id.get(parsed["record_id"])
+        if linked is not None:
+            remote_by_label[linked["label"]] = parsed
+    for parsed in parsed_remote:
+        if parsed["record_id"] in local_by_record_id:
+            continue
+        key = parsed["label"]
+        if key in remote_by_label:
+            key = f"{key}@{parsed['record_id'] or len(remote_by_label) + 1}"
+        remote_by_label[key] = parsed
 
     rows: list[dict[str, Any]] = []
     for label in sorted(set(local_by_label) | set(remote_by_label)):
@@ -162,7 +179,17 @@ def read_reconcile(
     if db.get(Group, group_id) is None:
         raise HTTPException(status_code=404, detail="Group not found")
     target = target_for(db, group_id)
-    local = [local_row(attempt) for attempt in _attempts(db, group_id)]
+    attempts = _attempts(db, group_id)
+    remote_ids = {
+        attempt_id: record_id
+        for attempt_id, record_id in db.execute(
+            select(SyncJob.attempt_id, SyncJob.new_exec_record_id).where(
+                SyncJob.attempt_id.in_([attempt.id for attempt in attempts]),
+                SyncJob.new_exec_record_id.is_not(None),
+            )
+        ).all()
+    }
+    local = [local_row(attempt, remote_ids.get(attempt.id)) for attempt in attempts]
     known_codes = set(
         db.scalars(select(GroupCase.code).where(GroupCase.group_id == group_id)).all()
     )

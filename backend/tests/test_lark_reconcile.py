@@ -7,15 +7,21 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.lark.reconcile import reconcile_rows
-from app.models import Attempt, ReconcileMark
+from app.models import Attempt, ReconcileMark, SyncJob
 
 
-def _local(label: str, result: str, console: str | None = None) -> dict:
+def _local(
+    label: str,
+    result: str,
+    console: str | None = None,
+    remote_record_id: str | None = None,
+) -> dict:
     return {
         "label": label,
         "result": result,
         "console_text": console,
         "attempt_id": f"a-{label}",
+        "remote_record_id": remote_record_id,
     }
 
 
@@ -67,6 +73,99 @@ def test_retest_labels_match_exactly():
     )
     assert [row["key"] for row in rows] == ["B-001-R0918-01"]
     assert rows[0]["status"] == "same"
+
+
+def test_record_ids_match_retests_when_lark_titles_hide_internal_labels():
+    first = _remote("B-001 管理员登录", "不通过")
+    first["record_id"] = "run-1"
+    retest = _remote("B-001 管理员登录", "通过")
+    retest["record_id"] = "run-2"
+
+    rows = reconcile_rows(
+        local=[
+            _local("B-001", "不通过", remote_record_id="run-1"),
+            _local("B-001-Rgroup-4e98c0-01", "通过", remote_record_id="run-2"),
+        ],
+        remote=[first, retest],
+        known_codes={"B-001"},
+    )
+
+    assert [row["key"] for row in rows] == ["B-001", "B-001-Rgroup-4e98c0-01"]
+    assert [row["status"] for row in rows] == ["same", "same"]
+
+
+def test_record_id_match_wins_over_an_older_visible_retest_label():
+    old = _remote("B-001-Rgroup-4e98c0-01 管理员登录", "不通过")
+    old["record_id"] = "legacy-run"
+    current = _remote("B-001 管理员登录", "通过")
+    current["record_id"] = "run-2"
+
+    rows = reconcile_rows(
+        local=[
+            _local("B-001-Rgroup-4e98c0-01", "通过", remote_record_id="run-2")
+        ],
+        remote=[old, current],
+        known_codes={"B-001"},
+    )
+    by_key = {row["key"]: row for row in rows}
+
+    assert by_key["B-001-Rgroup-4e98c0-01"]["status"] == "same"
+    assert by_key["B-001-Rgroup-4e98c0-01@legacy-run"]["status"] == "remote_only"
+
+
+def test_live_read_uses_sync_record_ids_when_visible_titles_repeat(
+    lark_fake, authenticated_client, confirmed_group, failed_attempt, db_session
+):
+    case = failed_attempt.group_case
+    retest = Attempt(
+        group_case=case,
+        label="B-001-Rgroup-4e98c0-01",
+        sequence=2,
+        state="committed",
+        result="通过",
+        idempotency_key="reconcile-clean-title-retest",
+    )
+    db_session.add(retest)
+    db_session.flush()
+    db_session.add_all(
+        [
+            SyncJob(
+                attempt_id=failed_attempt.id,
+                state="synced",
+                new_exec_record_id="run-1",
+            ),
+            SyncJob(
+                attempt_id=retest.id,
+                state="synced",
+                new_exec_record_id="run-2",
+            ),
+        ]
+    )
+    db_session.commit()
+    title = f"{case.code} {case.title}"
+    lark_fake.records = [
+        {
+            "record_id": "run-1",
+            "fields": {
+                "用例": title,
+                "结果": failed_attempt.result,
+                "控制台": failed_attempt.console_text,
+            },
+        },
+        {
+            "record_id": "run-2",
+            "fields": {"用例": title, "结果": "通过", "控制台": None},
+        },
+    ]
+
+    body = authenticated_client.get(
+        f"/api/groups/{confirmed_group.id}/reconcile?source=live"
+    ).json()
+
+    assert [(row["key"], row["status"]) for row in body["rows"]] == [
+        ("B-001", "same"),
+        ("B-001-Rgroup-4e98c0-01", "same"),
+    ]
 
 
 def test_an_empty_remote_result_is_a_conflict_not_a_failure():

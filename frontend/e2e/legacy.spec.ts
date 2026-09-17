@@ -11,7 +11,11 @@ const CASE = {
   preconditions: null,
   test_data: null,
   steps: "1. 打开登录页\n2. 绑定钱包",
-  expected: "钱包绑定成功"
+  expected: "钱包绑定成功",
+  expect_absent: [],
+  visual_check: "text_and_visual",
+  prototype_note: null,
+  reference_assets: []
 };
 
 type LegacyState = "verified" | "ambiguous" | "unavailable";

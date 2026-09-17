@@ -337,8 +337,8 @@ class FakeLark:
     def create_bug(self, fields: dict[str, Any]) -> str:
         return self._gateway.create_bug(fields)
 
-    def find_execution_ids(self, label: str) -> list[str]:
-        return self._gateway.find_execution_ids(label)
+    def find_execution_ids(self, fields: dict[str, Any]) -> list[str]:
+        return self._gateway.find_execution_ids(fields)
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path

@@ -1,4 +1,4 @@
-import { forwardRef, useImperativeHandle, useRef, useState } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { ImagePlus, LoaderCircle, RotateCcw, Save, X } from "lucide-react";
 
 import type { AttemptResult } from "../api";
@@ -29,6 +29,43 @@ type Props = {
 };
 
 const RESULTS: AttemptResult[] = ["通过", "不通过", "未执行"];
+
+function ImagePreview({
+  file,
+  disabled,
+  onRemove
+}: {
+  file: File;
+  disabled: boolean;
+  onRemove: () => void;
+}) {
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const displayName = file.name || "粘贴的截图";
+
+  useEffect(() => {
+    const objectUrl = URL.createObjectURL(file);
+    setPreviewUrl(objectUrl);
+    return () => URL.revokeObjectURL(objectUrl);
+  }, [file]);
+
+  return (
+    <li className="attachment-preview">
+      <div className="attachment-preview-frame">
+        {previewUrl ? <img src={previewUrl} alt={`缺陷截图：${displayName}`} /> : null}
+        <button
+          type="button"
+          className="attachment-remove"
+          aria-label={`移除 ${displayName}`}
+          disabled={disabled}
+          onClick={onRemove}
+        >
+          <X size={15} />
+        </button>
+      </div>
+      <span className="attachment-name" title={displayName}>{displayName}</span>
+    </li>
+  );
+}
 
 export const OutcomeForm = forwardRef<OutcomeFormHandle, Props>(function OutcomeForm(
   { onSave, submitting, images, onImagesChange, status, onRetryUpload },
@@ -147,17 +184,12 @@ export const OutcomeForm = forwardRef<OutcomeFormHandle, Props>(function Outcome
       {images.length > 0 ? (
         <ul className="attachment-list">
           {images.map((file, index) => (
-            <li key={`${file.name}-${index}`}>
-              <span>{file.name || "粘贴的截图"}</span>
-              <button
-                type="button"
-                className="icon-button"
-                aria-label={`移除 ${file.name || "粘贴的截图"}`}
-                onClick={() => onImagesChange(images.filter((_, position) => position !== index))}
-              >
-                <X size={15} />
-              </button>
-            </li>
+            <ImagePreview
+              key={`${file.name}-${file.size}-${file.lastModified}-${index}`}
+              file={file}
+              disabled={submitting}
+              onRemove={() => onImagesChange(images.filter((_, position) => position !== index))}
+            />
           ))}
         </ul>
       ) : null}

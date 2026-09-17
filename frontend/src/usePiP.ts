@@ -1,9 +1,13 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useLayoutEffect, useRef, useState } from "react";
 
 type PipWindow = Window & { document: Document };
 
 type DocumentPictureInPictureApi = {
-  requestWindow: (options?: { width?: number; height?: number }) => Promise<PipWindow>;
+  requestWindow: (options?: {
+    width?: number;
+    height?: number;
+    disallowReturnToOpener?: boolean;
+  }) => Promise<PipWindow>;
   window: PipWindow | null;
 };
 
@@ -46,33 +50,39 @@ export function copyStyles(from: Document, to: Document): void {
   }
 }
 
-// React re-renders in place, so the PiP document mirrors the live node instead
-// of copying a snapshot that would silently go stale.
-export function mirrorNode(source: HTMLElement, container: HTMLElement): void {
-  const clone = source.cloneNode(true) as HTMLElement;
-  clone.querySelectorAll("[id]").forEach((node) => node.removeAttribute("id"));
-  clone.removeAttribute("id");
-  container.replaceChildren(clone);
-}
-
+// The caller supplies a stable portal host. Moving that exact node preserves
+// React state and the event delegation installed on the portal container.
 export function usePiP(): PipWindowHandle {
   const [supported] = useState(() => isPiPSupported());
   const [pipWindow, setPipWindow] = useState<PipWindow | null>(null);
   const current = useRef<PipWindow | null>(null);
-  const observer = useRef<MutationObserver | null>(null);
+  const home = useRef<{ parent: Node; nextSibling: ChildNode | null } | null>(null);
+  const moved = useRef<HTMLElement | null>(null);
   const previousFocus = useRef<HTMLElement | null>(null);
+
+  const restore = useCallback(() => {
+    const source = moved.current;
+    const location = home.current;
+    moved.current = null;
+    home.current = null;
+    if (!source || !location) return;
+    if (location.nextSibling?.parentNode === location.parent) {
+      location.parent.insertBefore(source, location.nextSibling);
+    } else {
+      location.parent.appendChild(source);
+    }
+  }, []);
 
   const close = useCallback(() => {
     const open = current.current;
-    observer.current?.disconnect();
-    observer.current = null;
     current.current = null;
     setPipWindow(null);
+    restore();
     if (open) open.close();
-    const restore = previousFocus.current;
+    const focusTarget = previousFocus.current;
     previousFocus.current = null;
-    if (restore && typeof restore.focus === "function") restore.focus();
-  }, []);
+    if (focusTarget && typeof focusTarget.focus === "function") focusTarget.focus();
+  }, [restore]);
 
   const open = useCallback(
     async (source: HTMLElement | null): Promise<PipWindow | null> => {
@@ -87,24 +97,32 @@ export function usePiP(): PipWindowHandle {
       // command then simply does nothing instead of raising an unhandled error.
       let pip: PipWindow;
       try {
-        pip = await documentPictureInPicture.requestWindow({ width: 420, height: 620 });
+        pip = await documentPictureInPicture.requestWindow({
+          width: 420,
+          height: 760,
+          disallowReturnToOpener: true
+        });
       } catch {
         return null;
       }
       copyStyles(document, pip.document);
+      pip.document.documentElement.lang = document.documentElement.lang || "zh-CN";
+      pip.document.title = "TestDeck - 用例执行";
+      pip.document.body.className = "pip-body";
       const container = pip.document.createElement("div");
       container.className = "pip-surface";
       pip.document.body.append(container);
       previousFocus.current = (document.activeElement as HTMLElement | null) ?? null;
-      mirrorNode(source, container);
-
-      const sync = new MutationObserver(() => mirrorNode(source, container));
-      sync.observe(source, { childList: true, subtree: true, characterData: true, attributes: true });
-      observer.current = sync;
+      if (!source.parentNode) {
+        pip.close();
+        return null;
+      }
+      home.current = { parent: source.parentNode, nextSibling: source.nextSibling };
+      moved.current = source;
+      container.append(source);
 
       pip.addEventListener("pagehide", () => {
-        observer.current?.disconnect();
-        observer.current = null;
+        restore();
         current.current = null;
         setPipWindow(null);
       });
@@ -113,7 +131,7 @@ export function usePiP(): PipWindowHandle {
       setPipWindow(pip);
       return pip;
     },
-    []
+    [restore]
   );
 
   const toggle = useCallback(
@@ -124,12 +142,12 @@ export function usePiP(): PipWindowHandle {
     [close, open]
   );
 
-  useEffect(() => () => {
-    observer.current?.disconnect();
-    observer.current = null;
-    current.current?.close();
+  useLayoutEffect(() => () => {
+    const open = current.current;
     current.current = null;
-  }, []);
+    restore();
+    open?.close();
+  }, [restore]);
 
   return { supported, pipWindow, open, close, toggle };
 }

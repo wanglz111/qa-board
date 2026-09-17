@@ -19,7 +19,7 @@ class LarkWriteGateway(Protocol):
 
     def create_bug(self, fields: dict[str, Any]) -> str: ...
 
-    def find_execution_ids(self, label: str) -> list[str]: ...
+    def find_execution_ids(self, fields: dict[str, Any]) -> list[str]: ...
 
 
 def _milliseconds(value: datetime) -> int:
@@ -30,7 +30,7 @@ def _milliseconds(value: datetime) -> int:
 
 def execution_fields(attempt: Attempt, case: GroupCase, reporter: str) -> dict[str, Any]:
     return {
-        "用例": f"{attempt.label} {case.title}",
+        "用例": f"{case.code} {case.title}",
         "结果": attempt.result or "",
         "优先级": case.priority or "",
         "负责人": reporter,
@@ -43,7 +43,7 @@ def execution_fields(attempt: Attempt, case: GroupCase, reporter: str) -> dict[s
 
 def bug_fields(attempt: Attempt, case: GroupCase, reporter: str) -> dict[str, Any]:
     note = (attempt.note or "").strip()
-    description = f"{AUTO_BUG_MARKER}{attempt.label} {case.title}"
+    description = f"{AUTO_BUG_MARKER}{case.code} {case.title}"
     if note:
         description = f"{description}\n{note}"
     return {
@@ -56,13 +56,20 @@ def bug_fields(attempt: Attempt, case: GroupCase, reporter: str) -> dict[str, An
     }
 
 
-def record_matches_label(record: dict[str, Any], label: str) -> bool:
-    from app.lark.history import parse_case_reference, record_case_text
+def record_matches_execution(record: dict[str, Any], expected: dict[str, Any]) -> bool:
+    from app.lark.history import record_fields
 
-    reference = parse_case_reference(record_case_text(record))
-    if reference is None:
-        return False
-    return f"{reference.code}{reference.retest_label or ''}" == label
+    actual = record_fields(record)
+    try:
+        same_date = int(actual.get("日期")) == int(expected.get("日期"))
+    except (TypeError, ValueError):
+        same_date = False
+    return (
+        actual.get("用例") == expected.get("用例")
+        and str(actual.get("结果") or "") == str(expected.get("结果") or "")
+        and str(actual.get("控制台") or "") == str(expected.get("控制台") or "")
+        and same_date
+    )
 
 
 class HttpLarkWriteGateway:
@@ -91,10 +98,10 @@ class HttpLarkWriteGateway:
         record = self.client.create_record(self.bug_app_token, self.bug_table_id, fields)
         return str(record["record_id"])
 
-    def find_execution_ids(self, label: str) -> list[str]:
+    def find_execution_ids(self, fields: dict[str, Any]) -> list[str]:
         records = self.client.list_records(self.run_app_token, self.run_table_id)
         return [
             str(record.get("record_id"))
             for record in records
-            if record.get("record_id") and record_matches_label(record, label)
+            if record.get("record_id") and record_matches_execution(record, fields)
         ]

@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Keyboard, LoaderCircle, PictureInPicture2, PlayCircle } from "lucide-react";
 
 import type {
@@ -88,10 +89,19 @@ export function ExecutionView({
   const [lastAttemptId, setLastAttemptId] = useState<string | null>(null);
   const [sync, setSync] = useState<SyncStatus | null>(null);
   const caseRequest = useRef(0);
-  const deskRef = useRef<HTMLDivElement>(null);
+  const deskMountRef = useRef<HTMLDivElement>(null);
+  const [deskHost] = useState(() => {
+    const host = document.createElement("div");
+    host.className = "execution-desk";
+    return host;
+  });
   const formRef = useRef<OutcomeFormHandle>(null);
   const keyFor = useIdempotencyKey();
   const pip = usePiP();
+
+  useLayoutEffect(() => {
+    deskMountRef.current?.append(deskHost);
+  }, [deskHost]);
   // Stable per-group loader: a fresh closure here would re-fetch on every render.
   const legacyLoader = useCallback(
     (code: string) => {
@@ -290,7 +300,7 @@ export function ExecutionView({
     onPrevious: () => void showCase(caseIndex - 1),
     onNext: () => void showCase(caseIndex + 1),
     onBack: () => void showCase(caseIndex - 1),
-    onTogglePiP: () => void pip.toggle(deskRef.current),
+    onTogglePiP: () => void pip.toggle(deskHost),
     onEscape: () => pip.close()
   };
   const keyHandlersRef = useRef(keyHandlers);
@@ -328,7 +338,9 @@ export function ExecutionView({
         )}
       </aside>
 
-      <div className="execution-desk" ref={deskRef}>
+      <div className="execution-desk-mount" ref={deskMountRef} />
+      {createPortal(
+        <>
         <div className="execution-toolbar">
           <span className="shortcut-hint" title="Enter 通过 · Backspace 不通过 · Ctrl+B 未执行 · ←/→ 切换用例 · Ctrl+P 画中画">
             <Keyboard size={15} />
@@ -340,7 +352,7 @@ export function ExecutionView({
             disabled={!pip.supported}
             aria-pressed={pip.pipWindow !== null}
             title={pip.supported ? "在独立小窗口中查看当前用例（Ctrl+P）" : "当前浏览器不支持画中画"}
-            onClick={() => void pip.toggle(deskRef.current)}
+            onClick={() => void pip.toggle(deskHost)}
           >
             <PictureInPicture2 size={16} />
             {pip.pipWindow ? "关闭画中画" : "画中画"}
@@ -410,7 +422,9 @@ export function ExecutionView({
         ) : (
           <div className="empty-list"><span>该测试组暂无用例</span></div>
         )}
-      </div>
+        </>,
+        deskHost
+      )}
     </section>
   );
 }

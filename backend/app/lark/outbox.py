@@ -216,14 +216,13 @@ def run_job(
         return job
 
     if job.new_exec_record_id is None:
+        fields = execution_fields(attempt, case, reporter)
         try:
-            job.new_exec_record_id = gateway.create_execution(
-                execution_fields(attempt, case, reporter)
-            )
+            job.new_exec_record_id = gateway.create_execution(fields)
         except LarkTimeout:
             # The create may have landed; only a single provable match may be
             # adopted, otherwise a human has to look before anything retries.
-            matches = gateway.find_execution_ids(attempt.label)
+            matches = gateway.find_execution_ids(fields)
             if len(matches) == 1:
                 job.new_exec_record_id = matches[0]
             else:

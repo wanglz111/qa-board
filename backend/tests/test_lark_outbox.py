@@ -13,6 +13,7 @@ from app.lark.outbox import (
     run_job,
 )
 from app.lark.target import target_for
+from app.lark.write import record_matches_execution
 from app.models import Attempt, GroupCase, LarkTarget, SyncJob
 from app.worker import build_gateway, process_one_job, run_once
 
@@ -65,7 +66,7 @@ class _RecordingGateway:
     def create_bug(self, fields) -> str:
         return "rec-bug-1"
 
-    def find_execution_ids(self, label) -> list[str]:
+    def find_execution_ids(self, fields) -> list[str]:
         return []
 
 
@@ -79,6 +80,25 @@ def _withdraw_approval(db_session, group) -> None:
     )
     target.confirmed_at = None
     db_session.commit()
+
+
+def test_timeout_match_normalizes_lark_empty_text_and_date_encoding():
+    expected = {
+        "用例": "B-001 管理员登录",
+        "结果": "通过",
+        "日期": 1789603200000,
+        "控制台": "",
+    }
+    record = {
+        "record_id": "run-1",
+        "fields": {
+            "用例": "B-001 管理员登录",
+            "结果": "通过",
+            "日期": "1789603200000",
+        },
+    }
+
+    assert record_matches_execution(record, expected)
 
 
 def test_old_records_and_bugs_are_never_updated(fake_lark, confirmed_group, failed_attempt):
@@ -121,8 +141,34 @@ def test_passing_attempt_creates_only_an_execution_record(
 
     assert fake_lark.created_execution == 1
     assert fake_lark.created_bug == 0
-    assert fake_lark.created_records[0]["fields"]["用例"].startswith("B-001-R0918-01")
+    assert fake_lark.created_records[0]["fields"]["用例"] == "B-001 管理员登录"
     assert fake_lark.created_records[0]["fields"]["结果"] == "通过"
+
+
+def test_failed_retest_keeps_internal_label_out_of_both_lark_tables(
+    fake_lark, confirmed_group, db_session
+):
+    case = db_session.scalar(
+        select(GroupCase).where(GroupCase.group_id == confirmed_group.id)
+    )
+    attempt = Attempt(
+        group_case=case,
+        label="B-001-Rgroup-4e98c0-01",
+        sequence=2,
+        state="committed",
+        result="不通过",
+        note="登录接口返回 500",
+        idempotency_key="failed-retest-title",
+    )
+    db_session.add(attempt)
+    db_session.commit()
+
+    assert process_one_job(fake_lark, attempt) == "synced"
+
+    execution, bug = fake_lark.created_records
+    assert execution["fields"]["用例"] == "B-001 管理员登录"
+    assert bug["fields"]["问题描述"].startswith("【自动提】B-001 管理员登录\n")
+    assert "Rgroup-4e98c0-01" not in str(fake_lark.created_records)
 
 
 def test_timeout_after_remote_create_binds_the_single_match(
