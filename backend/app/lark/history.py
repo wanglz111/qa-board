@@ -20,6 +20,7 @@ from app.lark.fields import (
     DATE_FIELD_CANDIDATES,
     DESCRIPTION_FIELDS,
     LINK_FIELDS,
+    REMARK_FIELDS,
 )
 from app.lark.names import read_target_names
 from app.lark.target import target_for
@@ -100,6 +101,21 @@ def parse_labelled_case_reference(text: str | None) -> CaseReference | None:
     if not text:
         return None
     return parse_case_reference(LEADING_MARKER.sub("", text))
+
+
+# The remark names the case after a label ("用例：B-001 管理员登录"), so the code is
+# not at the start of the text; the same token rules apply from the label on. Both
+# colons are accepted so a hand-edited row is still readable.
+CASE_LABEL = re.compile(r"用例\s*[:：]\s*")
+
+
+def parse_remark_case_reference(text: str | None) -> CaseReference | None:
+    if not text:
+        return None
+    match = CASE_LABEL.search(text)
+    if match is None:
+        return None
+    return parse_case_reference(text[match.end() :])
 
 
 def record_fields(record: dict[str, Any]) -> dict[str, Any]:
@@ -200,6 +216,12 @@ def match_bugs(bug_records: list[dict[str, Any]], code: str) -> list[dict[str, A
         if matched_by is None:
             for name in DESCRIPTION_FIELDS:
                 reference = parse_labelled_case_reference(str(fields.get(name) or ""))
+                if reference is not None and reference.code == code:
+                    matched_by = name
+                    break
+        if matched_by is None:
+            for name in REMARK_FIELDS:
+                reference = parse_remark_case_reference(str(fields.get(name) or ""))
                 if reference is not None and reference.code == code:
                     matched_by = name
                     break

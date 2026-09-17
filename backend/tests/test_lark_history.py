@@ -1,6 +1,7 @@
 from uuid import UUID
 
 from app.lark.history import match_bugs, parse_case_reference
+from app.lark.write import bug_fields
 
 
 def test_old_b001_is_not_b001_retest_and_adapter_never_writes(lark_fake):
@@ -131,7 +132,11 @@ def test_old_bug_is_matched_read_only(lark_fake):
 
 
 def test_bug_this_tool_created_is_matched_through_its_marker():
-    """The outbox writes 【自动提】 rows, so the read must see through it."""
+    """Legacy rows were once filed under a 【自动提】 marker, so the read sees through it.
+
+    The writer drops that marker now, but the rows it already shipped are still
+    in the table and must not read as "未匹配到旧缺陷".
+    """
 
     records = [
         {
@@ -156,6 +161,104 @@ def test_bug_this_tool_created_is_matched_through_its_marker():
     matches = match_bugs(records, "B-005")
 
     assert [match["record_id"] for match in matches] == ["auto1", "legacy"]
+
+
+def test_a_defect_row_this_tool_wrote_is_matched_through_its_remark():
+    """问题描述 holds only the failure now, so the case is read from 备注."""
+
+    records = [
+        {
+            "record_id": "new1",
+            "fields": {
+                "问题描述": "登录接口返回 500",
+                "备注": "用例：B-001 管理员登录\n步骤：1. 打开登录页\n控制台：wallet.bind timeout",
+                "进展状态": "待修复",
+            },
+        }
+    ]
+
+    matches = match_bugs(records, "B-001")
+
+    assert [match["record_id"] for match in matches] == ["new1"]
+    assert matches[0]["matched_by"] == "备注"
+    assert matches[0]["description"] == "登录接口返回 500"
+
+
+def test_the_writer_output_round_trips_through_the_matcher(failed_attempt):
+    """The row the writer ships today must be findable by the reader today.
+
+    The fields come from the real writer rather than a hand-copied literal, so
+    this fails the day the two sides drift apart instead of the day someone
+    remembers to update a fixture.
+    """
+
+    case = failed_attempt.group_case
+    fields = bug_fields(failed_attempt, case, reporter="Max", attachments=[])
+    record = {"record_id": "rt", "fields": fields}
+
+    matches = match_bugs([record], case.code)
+
+    assert [match["record_id"] for match in matches] == ["rt"]
+    assert matches[0]["matched_by"] == "备注"
+    assert matches[0]["description"] == "绑定未触发"
+
+
+def test_the_remark_label_keeps_the_code_boundary():
+    records = [
+        {"record_id": "ten", "fields": {"备注": "用例：B-0010 另一个用例"}},
+        {"record_id": "one", "fields": {"备注": "用例：B-001 管理员登录"}},
+    ]
+
+    matches = match_bugs(records, "B-001")
+
+    assert [match["record_id"] for match in matches] == ["one"]
+    assert matches[0]["matched_by"] == "备注"
+
+
+def test_a_remark_without_the_label_is_not_a_match():
+    """Free text in a remark never reads as a case code — only the label counts."""
+
+    records = [
+        {"record_id": "bare", "fields": {"备注": "B-001 管理员登录"}},
+        {"record_id": "labelled", "fields": {"备注": "用例：B-001 管理员登录"}},
+    ]
+
+    matches = match_bugs(records, "B-001")
+
+    assert [match["record_id"] for match in matches] == ["labelled"]
+
+
+def test_the_remark_label_is_read_past_a_hand_edited_prefix():
+    """The label is sought, not anchored: a hand-edited row may lead with prose.
+
+    A half-width colon counts too — the writer emits the full-width one, but a
+    person typing the remark by hand does not have to.
+    """
+
+    records = [
+        {"record_id": "second-line", "fields": {"备注": "复现见下\n用例：B-001 管理员登录"}},
+        {"record_id": "half-width", "fields": {"备注": "用例: B-001 管理员登录"}},
+    ]
+
+    matches = match_bugs(records, "B-001")
+
+    assert [match["record_id"] for match in matches] == ["second-line", "half-width"]
+
+
+def test_existing_description_matching_still_works():
+    """The remark pass is added beside the description pass, not in place of it."""
+
+    records = [
+        {"record_id": "legacy", "fields": {"问题描述": "B-001 绑定未触发"}},
+        {"record_id": "alt", "fields": {"缺陷描述": "B-001 另一列"}},
+    ]
+
+    matches = match_bugs(records, "B-001")
+
+    assert {match["record_id"]: match["matched_by"] for match in matches} == {
+        "legacy": "问题描述",
+        "alt": "缺陷描述",
+    }
 
 
 def test_read_audit_is_get_only(lark_fake):

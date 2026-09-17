@@ -75,6 +75,9 @@ REQUIRED_BUG_FIELD_TYPES: dict[str, tuple[int, ...]] = {
 
 DATE_FIELD_CANDIDATES = ("日期", "反馈时间", "执行时间", "修改时间")
 DESCRIPTION_FIELDS = ("问题描述", "缺陷描述", "描述")
+# The remark is where this tool now files the case a defect came from, so the
+# read-back has to look there too — the description carries only the failure.
+REMARK_FIELDS = ("备注",)
 LINK_FIELDS = ("关联用例", "用例编号", "用例")
 
 
