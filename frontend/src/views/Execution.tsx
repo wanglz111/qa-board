@@ -195,6 +195,13 @@ export function ExecutionView({
     // enough for a save still in flight to repaint this group's cases under the
     // new selection and, by moving a case, abort the very load meant to replace
     // them.
+    // `caseIndexRef` is cleared alongside it, deliberately: the save guard ANDs
+    // the two halves, and the group half is the one that actually decides — this
+    // ref is read nowhere else, and `loadedGroup` is already null in the only
+    // window where the index could be stale, so the index conjunct can never see
+    // a stale value. Keep the defensive pair together rather than "cleaning up"
+    // the half no test can see: it costs nothing, it keeps the ref truthful about
+    // what is on screen, and it is what would matter if this clearing ever changed.
     loadedGroup.current = null;
     setCaseIndex(0);
     caseIndexRef.current = 0;

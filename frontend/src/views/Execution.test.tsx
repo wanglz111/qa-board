@@ -323,7 +323,11 @@ it("stays on the case when the result saved but the screenshot did not", async (
   });
 
   expect(await screen.findByText("第一条")).toBeVisible();
-  await userEvent.click(screen.getByRole("button", { name: "通过" }));
+  // 不通过 on purpose: it forces a note into 失败说明, which is what makes the
+  // reset observable. A 通过 save leaves the box empty either way, so it could
+  // not tell whether the guard reset the form at all.
+  await userEvent.click(screen.getByRole("button", { name: "不通过" }));
+  await userEvent.type(screen.getByLabelText("失败说明"), "截图没有传上去");
   await userEvent.upload(
     screen.getByLabelText("上传截图"),
     new File(["png"], "shot.png", { type: "image/png" })
@@ -339,6 +343,12 @@ it("stays on the case when the result saved but the screenshot did not", async (
   // to: `showCase` would clear `images` and hand this case's retry to the next.
   expect(screen.getByText("第一条")).toBeVisible();
   expect(screen.queryByText("第二条")).not.toBeInTheDocument();
+  // The submit succeeded — only the upload failed — so the save must reset the
+  // form regardless: the note is already stored server-side, and leaving it on
+  // screen invites the operator to submit it again. This path never moves the
+  // desk, so `showCase`'s own reset never runs and the guard's reset is the only
+  // thing that can clear this box.
+  expect(screen.getByLabelText("失败说明")).toHaveValue("");
 
   const retry = screen.getByRole("button", { name: /重试上传截图/ });
   expect(retry).toBeVisible();
