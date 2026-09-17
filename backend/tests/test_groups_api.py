@@ -4,6 +4,10 @@ from sqlalchemy import select
 
 from app.models import Group, ImportTicket
 
+# The same verdict-to-tally mapping execution.group_progress uses, so a case's
+# latest_result can be folded into the counts the page shows next to it.
+RESULT_TALLY = {"通过": "passed", "不通过": "failed", "未执行": "skipped"}
+
 
 def preview_csv(client, csv_book, name="0918.csv"):
     return client.post(
@@ -190,3 +194,85 @@ def test_latest_committed_attempt_wins_over_an_earlier_one(
 
     cases = authenticated_client.get(f"/api/groups/{group_id}/cases").json()
     assert {case["code"]: case["latest_result"] for case in cases}["B-002"] == "通过"
+
+
+def test_a_reserved_retest_does_not_hide_the_committed_result(
+    authenticated_client, csv_book
+):
+    """A page reopened mid-retest must still show what the case last reported."""
+
+    preview = preview_csv(authenticated_client, csv_book).json()
+    created = authenticated_client.post(
+        "/api/import/confirm",
+        json={"ticket_id": preview["ticket_id"], "name": "0918"},
+    ).json()
+    group_id = created["id"]
+
+    saved = authenticated_client.post(
+        f"/api/groups/{group_id}/cases/B-002/attempts",
+        json={"result": "通过", "idempotency_key": "reserved-prev"},
+    )
+    assert saved.status_code == 201, saved.text
+
+    reserved = authenticated_client.post(f"/api/groups/{group_id}/cases/B-002/retest")
+    assert reserved.status_code == 201, reserved.text
+    assert reserved.json()["state"] == "started"
+
+    cases = authenticated_client.get(f"/api/groups/{group_id}/cases").json()
+    assert {case["code"]: case["latest_result"] for case in cases}["B-002"] == "通过"
+
+
+def test_a_reservation_alone_does_not_look_like_a_result(
+    authenticated_client, csv_book
+):
+    """An unsubmitted retest has no verdict, so the case must still read as unrun."""
+
+    preview = preview_csv(authenticated_client, csv_book).json()
+    created = authenticated_client.post(
+        "/api/import/confirm",
+        json={"ticket_id": preview["ticket_id"], "name": "0918"},
+    ).json()
+    group_id = created["id"]
+
+    reserved = authenticated_client.post(f"/api/groups/{group_id}/cases/B-001/retest")
+    assert reserved.status_code == 201, reserved.text
+
+    cases = authenticated_client.get(f"/api/groups/{group_id}/cases").json()
+    assert {case["code"]: case["latest_result"] for case in cases}["B-001"] is None
+
+
+def test_cases_and_progress_tally_the_same_results(authenticated_client, csv_book):
+    """Both numbers sit side by side in the UI, so they must never disagree."""
+
+    preview = preview_csv(authenticated_client, csv_book).json()
+    created = authenticated_client.post(
+        "/api/import/confirm",
+        json={"ticket_id": preview["ticket_id"], "name": "0918"},
+    ).json()
+    group_id = created["id"]
+
+    for code, result, key in (
+        ("B-001", "通过", "tally-1"),
+        ("B-002", "未执行", "tally-2"),
+        ("B-004", "通过", "tally-3"),
+    ):
+        saved = authenticated_client.post(
+            f"/api/groups/{group_id}/cases/{code}/attempts",
+            json={"result": result, "idempotency_key": key},
+        )
+        assert saved.status_code == 201, saved.text
+    # B-003 is never run; B-004 is parked in a retest the operator may abandon.
+    retest = authenticated_client.post(f"/api/groups/{group_id}/cases/B-004/retest")
+    assert retest.status_code == 201, retest.text
+
+    cases = authenticated_client.get(f"/api/groups/{group_id}/cases").json()
+    progress = authenticated_client.get(f"/api/groups/{group_id}/progress").json()
+
+    tallies = {"passed": 0, "failed": 0, "skipped": 0, "untested": 0}
+    for case in cases:
+        tallies[RESULT_TALLY.get(case["latest_result"], "untested")] += 1
+
+    # group14.csv holds B-001..B-014, so the eleven other cases stay unrun.
+    assert len(cases) == 14
+    assert tallies == {"passed": 2, "failed": 0, "skipped": 1, "untested": 11}
+    assert tallies == progress

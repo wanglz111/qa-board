@@ -205,6 +205,10 @@ def list_group_cases(
     # One row per case: its highest-sequence committed attempt. The same shape
     # group_progress counts, but kept per case so the page can open on the first
     # case nobody has run instead of always on the first row.
+    #
+    # ``started`` rows are deliberately excluded: a retest the operator reserved
+    # but never submitted carries no result, and letting it win the max would
+    # fabricate a verdict — or erase the one the case already reported.
     latest_sequences = (
         select(
             Attempt.group_case_id,
