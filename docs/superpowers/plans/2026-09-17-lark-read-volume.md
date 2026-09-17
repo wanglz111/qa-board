@@ -611,6 +611,52 @@ def test_the_cached_list_is_not_handed_out_for_mutation():
     got.append({"record_id": "injected"})
 
     assert lark_cache.read_records("app-exec", "tbl-runs", lambda: []) == stored
+
+
+class _Target:
+    execution_base_token = "app-exec"
+    execution_table_id = "tbl-runs"
+    bug_base_token = "app-bug"
+    bug_table_id = "tbl-defects"
+
+
+def test_the_table_names_are_snapshotted_too():
+    lark_cache.clear()
+    calls = []
+
+    def fetch():
+        calls.append(1)
+        return {"execution_table_name": "执行记录"}
+
+    first = lark_cache.read_names(_Target(), fetch)
+    second = lark_cache.read_names(_Target(), fetch)
+
+    assert first == {"execution_table_name": "执行记录"}
+    assert second == first
+    assert len(calls) == 1
+    # A caller must not be able to edit the snapshot through what it was handed.
+    second["execution_table_name"] = "tampered"
+    assert lark_cache.read_names(_Target(), fetch)["execution_table_name"] == "执行记录"
+
+
+def test_invalidate_target_drops_the_names_with_the_records():
+    lark_cache.clear()
+    names_calls = []
+    record_calls = []
+
+    def fetch_names():
+        names_calls.append(1)
+        return {}
+
+    target = _Target()
+    lark_cache.read_names(target, fetch_names)
+    lark_cache.read_records("app-exec", "tbl-runs", lambda: record_calls.append(1) or [])
+    lark_cache.invalidate_target(target)
+    lark_cache.read_names(target, fetch_names)
+    lark_cache.read_records("app-exec", "tbl-runs", lambda: record_calls.append(1) or [])
+
+    assert len(names_calls) == 2
+    assert len(record_calls) == 2
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
