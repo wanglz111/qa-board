@@ -182,21 +182,35 @@ def test_invalidate_target_leaves_another_target_s_snapshots_alone():
     other = _OtherTarget()
     lark_cache.read_names(first, fetch_names("first"))
     lark_cache.read_names(other, fetch_names("other"))
-    lark_cache.read_records("app-exec", "tbl-other", lambda: record_calls.append(1) or [])
+    lark_cache.read_records(
+        "app-exec", "tbl-other", lambda: record_calls.append("other") or []
+    )
 
     lark_cache.invalidate_target(first)
 
     assert lark_cache.read_names(other, fetch_names("other")) == {
         "execution_table_name": "other"
     }
-    assert lark_cache.read_records("app-exec", "tbl-other", lambda: []) == []
+    # The other target's records still come from its own snapshot: a blanket
+    # wipe would fetch here a second time.
+    assert (
+        lark_cache.read_records(
+            "app-exec", "tbl-other", lambda: record_calls.append("other") or []
+        )
+        == []
+    )
     # …while the invalidated target really did lose its own.
     assert lark_cache.read_names(first, fetch_names("first")) == {
         "execution_table_name": "first"
     }
-    assert lark_cache.read_records("app-exec", "tbl-runs", lambda: []) == []
+    assert (
+        lark_cache.read_records(
+            "app-exec", "tbl-runs", lambda: record_calls.append("runs") or []
+        )
+        == []
+    )
     assert names_calls == ["first", "other", "first"]
-    assert len(record_calls) == 1
+    assert record_calls == ["other", "runs"]
 
 
 def test_a_raising_fetch_stores_nothing():
