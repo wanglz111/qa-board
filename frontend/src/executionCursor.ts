@@ -56,12 +56,36 @@ export function startIndexFor(cases: GroupCase[], cursor: Cursor | null, groupId
   const rememberedCode = cursor && cursor.groupId === groupId ? cursor.code : null;
   if (rememberedCode) {
     const remembered = cases.findIndex((item) => item.code === rememberedCode);
-    if (remembered >= 0) return remembered;
+    // A remembered case that already has a result is not where the work is:
+    // resuming on it would park the operator on a finished row, which is the
+    // one thing this page must never do.
+    if (remembered >= 0 && !isDone(cases[remembered])) return remembered;
   }
   const untested = cases.findIndex((item) => !isDone(item));
   // Everything done: the last row is the most useful place to land, and the
   // page says so out loud rather than pretending there is work left.
   return untested >= 0 ? untested : cases.length - 1;
+}
+
+// The next case nobody has run, starting after `from` and wrapping once to the
+// top of the group. `null` means no unrun case other than `from` itself (`from`
+// is skipped by design), so "the group is finished" stays `allTested`'s call.
+// A `from` outside the array behaves like `-1`: the search starts at the top.
+export function nextUntestedIndex(cases: GroupCase[], from: number): number | null {
+  const start = Math.max(from, -1);
+  for (let index = start + 1; index < cases.length; index += 1) {
+    if (!isDone(cases[index])) return index;
+  }
+  // An out-of-range `from` means "from the beginning", i.e. it behaves exactly
+  // like `from = -1` and the wrap loop must cover the whole group. Clamping to
+  // `length - 1` would hide the last row from an out-of-range caller and report
+  // a group with only that row left as finished. For an in-range `from` this is
+  // the same bound as `length - 1`.
+  const ceiling = Math.min(start, cases.length);
+  for (let index = 0; index < ceiling; index += 1) {
+    if (!isDone(cases[index])) return index;
+  }
+  return null;
 }
 
 export function allTested(cases: GroupCase[]): boolean {
