@@ -590,3 +590,30 @@ def test_a_table_must_exist_in_the_base_the_payload_names(
             LarkTargetRevision.group_id == imported_group.id
         )
     ) is None
+
+
+def test_reading_a_target_in_one_base_reads_that_base_once(
+    lark_fake, authenticated_client, confirmed_group, db_session
+):
+    """Both roles in one base: the base metadata and its table list are read once."""
+
+    target = db_session.scalar(
+        select(LarkTarget).where(LarkTarget.group_id == confirmed_group.id)
+    )
+    # ``confirmed_group`` deliberately puts the two roles in different bases
+    # (app-exec / app-bug), and reading two different bases once each is already
+    # what the code does. This case is the one worth pinning: one operator who
+    # points both roles at the same base.
+    target.bug_base_token = "app-exec"
+    target.bug_base_name = "执行库"
+    target.bug_table_id = "tbl-bugs"
+    target.bug_table_name = "缺陷记录"
+    db_session.commit()
+    lark_fake.requests.clear()
+
+    response = authenticated_client.get(f"/api/groups/{confirmed_group.id}/lark/target")
+
+    assert response.status_code == 200, response.text
+    paths = [request["path"] for request in lark_fake.requests]
+    assert paths.count("/open-apis/bitable/v1/apps/app-exec") == 1
+    assert paths.count("/open-apis/bitable/v1/apps/app-exec/tables") == 1

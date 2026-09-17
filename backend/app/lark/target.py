@@ -154,10 +154,17 @@ def resolve_link(client: LarkClient, url: str) -> dict[str, Any]:
 def read_draft_state(client: LarkClient, draft: TargetDraft) -> dict[str, Any]:
     """Read both tables' live names and fields; never returns credentials."""
 
-    execution_base = client.app_metadata(draft.execution_base_token)
-    bug_base = client.app_metadata(draft.bug_base_token)
-    execution_tables = client.list_tables(draft.execution_base_token)
-    bug_tables = client.list_tables(draft.bug_base_token)
+    # Both roles usually live in one base, and reading it twice is two identical
+    # round trips. Each distinct base is read once and the second role reuses it.
+    base_reads: dict[str, tuple[dict[str, Any], list[dict[str, Any]]]] = {}
+
+    def _base(token: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        if token not in base_reads:
+            base_reads[token] = (client.app_metadata(token), client.list_tables(token))
+        return base_reads[token]
+
+    execution_base, execution_tables = _base(draft.execution_base_token)
+    bug_base, bug_tables = _base(draft.bug_base_token)
     execution_fields = client.list_fields(
         draft.execution_base_token, draft.execution_table_id
     )
