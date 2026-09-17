@@ -293,7 +293,7 @@ def test_case_history_endpoint_reports_a_target_that_cannot_be_read(
 ):
     """An unreadable stored target is reported instead of raising."""
 
-    lark_fake.fields_error = True
+    lark_fake.bases_error = True
 
     body = authenticated_client.get(
         f"/api/groups/{confirmed_group.id}/cases/B-001/lark-history"
@@ -343,3 +343,31 @@ def test_case_history_endpoint_says_when_no_target_is_chosen(
     assert body["available"] is False
     assert body["read_errors"] == ["该组尚未选择 Lark 表"]
     assert body["original"] == []
+
+
+def test_opening_one_case_reads_each_table_once_and_no_fields(
+    authenticated_client, lark_fake, confirmed_group
+):
+    """The read the page repeats most: two record reads and nothing else."""
+
+    lark_fake.records = [
+        {"record_id": "old1", "fields": {"用例": "B-001 Login", "结果": "不通过"}}
+    ]
+    lark_fake.requests.clear()
+
+    response = authenticated_client.get(
+        f"/api/groups/{confirmed_group.id}/cases/B-001/lark-history"
+    )
+
+    assert response.status_code == 200, response.text
+    paths = [
+        request["path"] for request in lark_fake.requests if request["method"] == "GET"
+    ]
+    assert [path for path in paths if path.endswith("/fields")] == []
+    assert [path for path in paths if path.endswith("/records")] == [
+        "/open-apis/bitable/v1/apps/app-exec/tables/tbl-runs/records",
+        "/open-apis/bitable/v1/apps/app-bug/tables/tbl-defects/records",
+    ]
+    body = response.json()
+    assert body["source_table_name"] == "执行记录"
+    assert body["bug_table_name"] == "缺陷记录"

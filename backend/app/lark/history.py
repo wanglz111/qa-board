@@ -18,6 +18,7 @@ from app.lark.fields import (
     DESCRIPTION_FIELDS,
     LINK_FIELDS,
 )
+from app.lark.names import read_target_names
 from app.lark.target import TargetDraft, read_draft_state, target_for
 from app.models import GroupCase, LarkHistoryRef, LarkTarget
 
@@ -337,7 +338,7 @@ def case_lark_history(
     if target is None:
         return _unavailable_history(code, ["该组尚未选择 Lark 表"], "该组尚未选择 Lark 表")
 
-    state = read_target_state(client, target)
+    state = read_target_names(client, target)
     if state["read_errors"]:
         return _unavailable_history(code, state["read_errors"], "Lark 目标表不可读")
 

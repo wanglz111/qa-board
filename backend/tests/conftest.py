@@ -317,6 +317,9 @@ class FakeLark:
         self.media_unauthorized = False
         self.upload_error = False
         self.fields_error = False
+        # A base the app cannot read at all: metadata and the table listing
+        # both refuse, which is what an unreadable target looks like.
+        self.bases_error = False
         self.field_create_error = False
         self.client = LarkClient(
             base_url="https://open.feishu.test",
@@ -444,6 +447,8 @@ class FakeLark:
     def handle(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
         self.requests.append({"method": request.method, "path": path})
+        if self.bases_error and "/apps/" in path and "/tables/" not in path:
+            return httpx.Response(500, json={"code": 1, "msg": "base unavailable"})
         authorization = request.headers.get("Authorization")
         if authorization:
             carried = authorization.removeprefix("Bearer ")
