@@ -784,12 +784,25 @@ def _rebuild_counts(db: Session, group_id: UUID) -> dict[str, int]:
 
     Every committed result of the group is re-filed into the execution table;
     only the failed ones raise a defect row.
+
+    "Result" means an execution-sourced attempt, the same set
+    ``enqueue_group_attempts`` queues: a row adopted from the table
+    (``source="reconcile"``) must never be written back, so counting it would
+    promise a write the rebuild will not make. The number still has one known
+    bound on the high side: an execution attempt committed before the group's
+    target was confirmed never got a ``SyncJob``, and a rebuild re-files jobs
+    rather than attempts, so such pre-confirmation history is counted here but
+    not written. Exact parity would join against ``SyncJob`` instead.
     """
 
     committed = (
         select(func.count(Attempt.id))
         .join(GroupCase, Attempt.group_case_id == GroupCase.id)
-        .where(GroupCase.group_id == group_id, Attempt.state == "committed")
+        .where(
+            GroupCase.group_id == group_id,
+            Attempt.state == "committed",
+            Attempt.source == "execution",
+        )
     )
     failed = committed.where(Attempt.result == "不通过")
     return {

@@ -1380,3 +1380,81 @@ def test_the_plan_says_how_many_rows_a_rebuild_would_rewrite(
 
     # 执行表重写每一条本地结果；缺陷表只重写「不通过」的那一条。
     assert plan["rebuild"] == {"execution": 2, "bug": 1}
+
+
+def test_a_row_adopted_from_the_table_is_not_counted_as_a_rebuild_row(
+    lark_fake, authenticated_client, provision_group
+):
+    """A reconcile-sourced row is never queued back, so it is not re-filed."""
+
+    first = authenticated_client.post(
+        f"/api/groups/{provision_group.id}/cases/B-001/attempts",
+        json={"result": "通过", "idempotency_key": "adopted-count-1"},
+    )
+    assert first.status_code == 201, first.text
+    second = authenticated_client.post(
+        f"/api/groups/{provision_group.id}/cases/B-002/attempts",
+        json={
+            "result": "不通过",
+            "note": "登录按钮没反应",
+            "idempotency_key": "adopted-count-2",
+        },
+    )
+    assert second.status_code == 201, second.text
+
+    # B-001 disagrees with the table, so a fresh read offers a conflict and
+    # 「use_remote」 appends the table's 不通过 as a reconcile-sourced attempt.
+    lark_fake.records = [
+        {
+            "record_id": "rec-adopted",
+            "fields": {"用例": "B-001 管理员登录", "结果": "不通过"},
+        }
+    ]
+    applied = authenticated_client.post(
+        f"/api/groups/{provision_group.id}/reconcile/apply",
+        json={"decisions": [{"key": "B-001", "action": "use_remote"}]},
+    ).json()
+    assert applied["pulled"] == 1, applied
+
+    plan = authenticated_client.get(
+        f"/api/groups/{provision_group.id}/lark/provision"
+    ).json()
+
+    # The adopted 不通过 is invisible to both counts: a rebuild will not queue
+    # it back, so it must not appear in the cost the dialog shows.
+    assert plan["rebuild"] == {"execution": 2, "bug": 1}
+
+
+def test_a_reserved_retest_is_not_counted_as_a_rebuild_row(
+    lark_fake, authenticated_client, provision_group
+):
+    """A reserved row carries no result, so a rebuild does not re-file it."""
+
+    first = authenticated_client.post(
+        f"/api/groups/{provision_group.id}/cases/B-001/attempts",
+        json={"result": "通过", "idempotency_key": "reserved-count-1"},
+    )
+    assert first.status_code == 201, first.text
+    second = authenticated_client.post(
+        f"/api/groups/{provision_group.id}/cases/B-002/attempts",
+        json={
+            "result": "不通过",
+            "note": "登录按钮没反应",
+            "idempotency_key": "reserved-count-2",
+        },
+    )
+    assert second.status_code == 201, second.text
+
+    reserved = authenticated_client.post(
+        f"/api/groups/{provision_group.id}/cases/B-001/retest"
+    )
+    assert reserved.status_code == 201, reserved.text
+    assert reserved.json()["state"] == "started"
+
+    plan = authenticated_client.get(
+        f"/api/groups/{provision_group.id}/lark/provision"
+    ).json()
+
+    # The reservation has no result yet: it is not one of the rows a rebuild
+    # writes again.
+    assert plan["rebuild"] == {"execution": 2, "bug": 1}
