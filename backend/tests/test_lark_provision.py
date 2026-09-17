@@ -1231,7 +1231,13 @@ def test_a_table_whose_headers_are_in_the_wrong_order_still_rebuilds(
     """The case the feature exists for: 优先级 first, everything else off."""
 
     rows = _reference_layout("execution")
-    lark_fake.fields = [rows[2], rows[0], *rows[1:2], *rows[3:]]
+    # The pre-fix tables were created alphabetically, and Lark takes the primary
+    # column from whichever field was created first — so 优先级 leads *and* is
+    # the primary one. Sorting the reference names reproduces that table.
+    lark_fake.fields = [
+        {**row, "is_primary": index == 0}
+        for index, row in enumerate(sorted(rows, key=lambda row: row["field_name"]))
+    ]
 
     response = authenticated_client.post(
         f"/api/groups/{provision_group.id}/lark/provision/rebuild",
@@ -1239,3 +1245,100 @@ def test_a_table_whose_headers_are_in_the_wrong_order_still_rebuilds(
     )
 
     assert response.status_code == 200, response.text
+
+
+def test_a_table_reordered_within_one_type_still_rebuilds(
+    lark_fake, authenticated_client, provision_group
+):
+    """Isolate the ordered-name clause.
+
+    The alphabetical table above is also caught by the type comparison: 用例's
+    spec never pairs with 优先级's live type, so a loosened name check still
+    rebuilds it by accident. Two columns that share a type, swapped, leave every
+    pairwise type in place — only the name comparison can tell this table from
+    the reference layout, so this is what pins that clause.
+    """
+
+    rows = _reference_layout("execution")
+    rows[0], rows[3] = rows[3], rows[0]  # 用例 and 负责人 are both text columns.
+    rows[0]["is_primary"] = True  # The swapped-in first column leads the table.
+    rows[3]["is_primary"] = False
+    lark_fake.fields = rows
+
+    response = authenticated_client.post(
+        f"/api/groups/{provision_group.id}/lark/provision/rebuild",
+        json={"role": "execution", "acknowledge": True},
+    )
+
+    assert response.status_code == 200, response.text
+    assert lark_fake.created_tables
+
+
+def test_a_reference_table_without_the_primary_marker_still_rebuilds(
+    lark_fake, authenticated_client, provision_group
+):
+    """A match we cannot confirm must not be refused on a guess."""
+
+    rows = _reference_layout("execution")
+    rows[0]["is_primary"] = False
+    lark_fake.fields = rows
+
+    response = authenticated_client.post(
+        f"/api/groups/{provision_group.id}/lark/provision/rebuild",
+        json={"role": "execution", "acknowledge": True},
+    )
+
+    assert response.status_code == 200, response.text
+    assert lark_fake.created_tables
+
+
+def test_a_reference_table_with_a_wrong_type_still_rebuilds(
+    lark_fake, authenticated_client, provision_group
+):
+    """Right names, order and primary — but one column's type is off."""
+
+    rows = _reference_layout("execution")
+    rows[3]["type"] = 3  # 负责人 is a person column, not 单选.
+    lark_fake.fields = rows
+
+    response = authenticated_client.post(
+        f"/api/groups/{provision_group.id}/lark/provision/rebuild",
+        json={"role": "execution", "acknowledge": True},
+    )
+
+    assert response.status_code == 200, response.text
+    assert lark_fake.created_tables
+
+
+def test_a_reference_table_with_a_stray_column_still_rebuilds(
+    lark_fake, authenticated_client, provision_group
+):
+    """No delete-column API: a rebuild is the only way to drop an extra column."""
+
+    lark_fake.fields = [
+        *_reference_layout("execution"),
+        {"field_id": "fld-extra", "field_name": "单选", "type": 3, "is_primary": False},
+    ]
+
+    response = authenticated_client.post(
+        f"/api/groups/{provision_group.id}/lark/provision/rebuild",
+        json={"role": "execution", "acknowledge": True},
+    )
+
+    assert response.status_code == 200, response.text
+    assert lark_fake.created_tables
+
+
+def test_rebuilding_a_table_reports_a_field_read_failure(
+    lark_fake, authenticated_client, provision_group
+):
+    lark_fake.fields_error = True
+
+    response = authenticated_client.post(
+        f"/api/groups/{provision_group.id}/lark/provision/rebuild",
+        json={"role": "execution", "acknowledge": True},
+    )
+
+    assert response.status_code == 409, response.text
+    assert "读取数据表字段失败" in response.json()["detail"]
+    assert lark_fake.created_tables == []

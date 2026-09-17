@@ -602,6 +602,10 @@ def layout_matches(fields: Iterable[dict[str, Any]], role: str) -> bool:
         # Without the primary flag we cannot claim the layout is right, and a
         # refusal based on a guess would be worse than letting it run.
         return False
+    # Matching is deliberately type-only, the same contract ``retype_plan``
+    # uses: Lark mints its own option ids, so a table whose 单选 vocabulary
+    # differs still counts as the reference layout and is rebuilt only when
+    # the administrator forces it.
     return all(
         ROLE_SCHEMA[role][name].matches(field) for name, field in zip(order, rows)
     )
@@ -682,14 +686,15 @@ def rebuild_table(
         live_fields = client.list_fields(base_token, table_id)
     except LarkError as error:
         raise HTTPException(
-            status_code=409, detail=f"读取数据表字段失败：{error}"
+            status_code=409, detail=f"{READ_FIELDS_FAILED}：{error}"
         ) from None
     if not payload.force and layout_matches(live_fields, payload.role):
         raise HTTPException(
             status_code=409,
             detail=(
                 "这张表已经是参考表头（列序、主列与类型都对），重建只会新建一张一样的表"
-                "并把全部记录重写一遍；如果确实要一张干净的新表，请勾选「强制重建」"
+                "并把全部记录重写一遍；如果确实要一张干净的新表，或想把全部记录按当前"
+                "写法（表头、截图等）重写一遍，请勾选「强制重建」"
             ),
         )
 
