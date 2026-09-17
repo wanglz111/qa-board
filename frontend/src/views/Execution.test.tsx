@@ -1,4 +1,4 @@
-import { act, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { vi } from "vitest";
 
@@ -479,8 +479,10 @@ it("remembers the case the operator walks to, not only the one it landed on", as
     JSON.stringify({ groupId: "0918-id", code: "B-002" })
   );
 
-  // Stepping back to re-read a finished case is part of "where the operator
-  // is"; reopening after that must not send them forward again.
+  // Stepping back to re-read a finished case still moves the cursor: it is
+  // written on every case change, finished or not. Reopening does not follow it
+  // forward, though — startIndexFor refuses to resume a case that already has a
+  // result, so the next open lands on the first unrun case instead.
   await userEvent.click(screen.getByRole("button", { name: "上一条用例" }));
   expect(await screen.findByText("第一条")).toBeVisible();
   expect(window.localStorage.getItem("testdeck.execution.cursor")).toBe(
@@ -512,4 +514,151 @@ it("drops a cursor that names a group the server no longer lists", async () => {
   // The group is gone, so the cursor can never be honoured again: keeping it
   // would silently steer every later open.
   expect(window.localStorage.getItem("testdeck.execution.cursor")).toBeNull();
+});
+
+it("moves to the next unrun case after a save", async () => {
+  renderExecution({
+    initialGroupId: "0918-id",
+    loadCases: async () => [
+      testCase("c1", "第一条", null, "B-001", "通过"),
+      testCase("c2", "第二条", null, "B-002", null),
+      testCase("c3", "第三条", null, "B-003", null)
+    ]
+  });
+
+  expect(await screen.findByText("第二条")).toBeVisible();
+  await userEvent.click(screen.getByRole("button", { name: "通过" }));
+  await userEvent.click(screen.getByRole("button", { name: /保存结果/ }));
+
+  // The save's own case is done now, so the work that is left is the third one.
+  expect(await screen.findByText("第三条")).toBeVisible();
+  expect(screen.queryByText("第二条")).not.toBeInTheDocument();
+});
+
+it("keeps the save confirmation visible on the case it moved to", async () => {
+  renderExecution({
+    initialGroupId: "0918-id",
+    loadCases: async () => [
+      testCase("c1", "第一条", null, "B-001", "通过"),
+      testCase("c2", "第二条", null, "B-002", null),
+      testCase("c3", "第三条", null, "B-003", null)
+    ]
+  });
+
+  expect(await screen.findByText("第二条")).toBeVisible();
+  await userEvent.click(screen.getByRole("button", { name: "通过" }));
+  await userEvent.click(screen.getByRole("button", { name: /保存结果/ }));
+
+  // Moving on is exactly what clears the status on a manual switch; on a save it
+  // has to survive, and name the case it is about, or the operator cannot tell
+  // whether the note they just typed was stored.
+  expect(await screen.findByText(/B-002 已保存到本地/)).toBeVisible();
+});
+
+it("wraps to the earliest unrun case when the tail is finished", async () => {
+  window.localStorage.setItem(
+    "testdeck.execution.cursor",
+    JSON.stringify({ groupId: "0918-id", code: "B-003" })
+  );
+  renderExecution({
+    initialGroupId: "0918-id",
+    loadCases: async () => [
+      testCase("c1", "第一条", null, "B-001", null),
+      testCase("c2", "第二条", null, "B-002", "通过"),
+      testCase("c3", "第三条", null, "B-003", null)
+    ]
+  });
+
+  expect(await screen.findByText("第三条")).toBeVisible();
+  await userEvent.click(screen.getByRole("button", { name: "通过" }));
+  await userEvent.click(screen.getByRole("button", { name: /保存结果/ }));
+
+  // The last unrun case was the one on screen; the only work left is above it.
+  expect(await screen.findByText("第一条")).toBeVisible();
+});
+
+it("stays put and says the group is finished when nothing is left", async () => {
+  renderExecution({
+    initialGroupId: "0918-id",
+    loadCases: async () => [
+      testCase("c1", "第一条", null, "B-001", "通过"),
+      testCase("c2", "第二条", null, "B-002", null)
+    ]
+  });
+
+  expect(await screen.findByText("第二条")).toBeVisible();
+  await userEvent.click(screen.getByRole("button", { name: "通过" }));
+  await userEvent.click(screen.getByRole("button", { name: /保存结果/ }));
+
+  expect(await screen.findByText("本组已全部测过")).toBeVisible();
+  // No unrun case to move to: the desk stays where the operator left it instead
+  // of walking off the end of the group.
+  expect(screen.getByText("第二条")).toBeVisible();
+});
+
+it("does not submit the previous case's note after moving on", async () => {
+  const { submit } = renderExecution({
+    initialGroupId: "0918-id",
+    loadCases: async () => [
+      testCase("c1", "第一条", null, "B-001", null),
+      testCase("c2", "第二条", null, "B-002", null)
+    ]
+  });
+
+  expect(await screen.findByText("第一条")).toBeVisible();
+  await userEvent.type(screen.getByLabelText("失败说明"), "第一条的失败说明");
+  await userEvent.click(screen.getByRole("button", { name: "下一条用例" }));
+  expect(await screen.findByText("第二条")).toBeVisible();
+
+  await userEvent.click(screen.getByRole("button", { name: "通过" }));
+  await userEvent.click(screen.getByRole("button", { name: /保存结果/ }));
+  await screen.findByText(/已保存到本地/);
+
+  // A note written for 第一条 must not be stored as 第二条's.
+  expect(submit).toHaveBeenCalledWith("0918-id", "B-002", expect.objectContaining({ note: null }));
+});
+
+it("leaves the case the operator moved to alone when the save lands", async () => {
+  const pendingSave = deferred<Attempt>();
+  const submit = vi.fn<(groupId: string, code: string, payload: SubmitPayload) => Promise<Attempt>>();
+  submit.mockReturnValue(pendingSave.promise);
+  renderExecution({
+    initialGroupId: "0918-id",
+    submit,
+    loadCases: async () => [
+      testCase("c1", "第一条", null, "B-001", null),
+      testCase("c2", "第二条", null, "B-002", null),
+      testCase("c3", "第三条", null, "B-003", null)
+    ]
+  });
+
+  await screen.findByText("第一条");
+  await userEvent.click(screen.getByRole("button", { name: "通过" }));
+  await userEvent.click(screen.getByRole("button", { name: /保存结果/ }));
+
+  // A save takes several awaits. The ←/→ buttons stay clickable throughout, so
+  // the operator can leave the case the save belongs to and end up somewhere the
+  // save has no business deciding about. Two steps, so the place they chose is
+  // not also the place an unguarded auto-advance would pick.
+  await userEvent.click(screen.getByRole("button", { name: "下一条用例" }));
+  await userEvent.click(screen.getByRole("button", { name: "下一条用例" }));
+  expect(await screen.findByText("第三条")).toBeVisible();
+
+  // fireEvent, not userEvent.type: the form disables its fields while a save is
+  // in flight, and userEvent honours the disabled attribute. The guard is about
+  // a draft that exists when the save lands, however it got there.
+  fireEvent.change(screen.getByLabelText("失败说明"), { target: { value: "给下一条的话" } });
+
+  await act(async () => {
+    pendingSave.resolve(committed("attempt-1", "B-001", "通过", null));
+    await pendingSave.promise;
+  });
+  await waitFor(() => expect(screen.getByText(/已保存到本地/)).toBeVisible());
+
+  // (a) Where the operator is, not where the save would have sent them: an
+  // unguarded advance lands on 第二条, the earliest unrun case after B-001.
+  expect(screen.getByText("第三条")).toBeVisible();
+  expect(screen.queryByText("第二条")).not.toBeInTheDocument();
+  // (b) And the draft belongs to the case on screen, not to the save.
+  expect(screen.getByLabelText("失败说明")).toHaveValue("给下一条的话");
 });

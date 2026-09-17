@@ -23,7 +23,7 @@ import {
   type SaveInput,
   type SaveStatus
 } from "../components/OutcomeForm";
-import { allTested, clearCursor, readCursor, startIndexFor, writeCursor } from "../executionCursor";
+import { allTested, clearCursor, nextUntestedIndex, readCursor, startIndexFor, writeCursor } from "../executionCursor";
 import { dispatchCaseKey, useCaseKeys, type CaseKeyHandlers } from "../useCaseKeys";
 import { usePiP } from "../usePiP";
 
@@ -97,6 +97,10 @@ export function ExecutionView({
   const [sync, setSync] = useState<SyncStatus | null>(null);
   const [legacyVersion, setLegacyVersion] = useState(0);
   const caseRequest = useRef(0);
+  // The live index, so a save that outlives several awaits can tell whether the
+  // operator has moved on. `caseIndex` inside `save()` is a render-time snapshot
+  // and cannot answer that.
+  const caseIndexRef = useRef(0);
   // Which group the cases currently in state were loaded for. A save outlives
   // several awaits while the group list stays clickable, so it has to check this
   // before touching a list the operator may already have replaced.
@@ -190,6 +194,8 @@ export function ExecutionView({
     setReserved(null);
     setImages([]);
     setStatus(null);
+    // A group switch must not carry the previous case's note into the new one.
+    formRef.current?.reset();
     setFailure("");
     setSync(null);
     setLoadingCase(true);
@@ -207,6 +213,7 @@ export function ExecutionView({
       // must not mean re-reading the first row of the group.
       const start = startIndexFor(result, readCursor(), groupId);
       setCaseIndex(start);
+      caseIndexRef.current = start;
       const current = result[start];
       if (current) {
         writeCursor({ groupId, code: current.code });
@@ -220,16 +227,22 @@ export function ExecutionView({
     }
   }
 
-  async function showCase(index: number) {
+  async function showCase(index: number, options: { keepStatus?: boolean } = {}) {
     const target = cases[index];
     if (!target || !selectedGroupId) return;
     const requestId = ++caseRequest.current;
+    caseIndexRef.current = index;
     setCaseIndex(index);
     writeCursor({ groupId: selectedGroupId, code: target.code });
     setAttempts([]);
     setReserved(null);
     setImages([]);
-    setStatus(null);
+    // Moving on by hand abandons the previous save message; moving on because the
+    // save just landed keeps it, so the operator sees the proof on the case they
+    // were sent to.
+    if (!options.keepStatus) setStatus(null);
+    // A note typed for one case must never be submitted under the next one.
+    formRef.current?.reset();
     setLoadingCase(true);
     try {
       const history = await loadAttempts(selectedGroupId, target.code);
@@ -265,7 +278,8 @@ export function ExecutionView({
     // awaits below are long enough for the operator to switch groups, and two
     // groups can hold the same code.
     const savedGroupId = selectedGroupId;
-    const saved = cases[caseIndex];
+    const savedIndex = caseIndex;
+    const saved = cases[savedIndex];
     if (!saved || !savedGroupId) return;
     const signature = JSON.stringify([saved.code, input.result, input.note, input.consoleText, reserved?.id ?? null]);
     const payload: SubmitPayload = {
@@ -276,6 +290,7 @@ export function ExecutionView({
     };
     setSubmitting(true);
     setStatus(null);
+    let advanceTo: number | null = null;
     try {
       const attempt = reserved && commitReserved
         ? await commitReserved(reserved.id, payload)
@@ -288,14 +303,13 @@ export function ExecutionView({
       // The cases were loaded once. Without this the operator who just recorded
       // the last result would not see 本组已全部测过 until they reloaded. The
       // response is the authority on the result, and the list is only touched
-      // while it is still this group's.
-      setCases((current) =>
-        loadedGroup.current !== savedGroupId
-          ? current
-          : current.map((item) =>
-              item.code === saved.code ? { ...item, latest_result: attempt.result } : item
-            )
+      // while it is still this group's. One array drives both the state and the
+      // advance decision: reading the state back would be a render behind, and
+      // the decision belongs to this save, not to whatever the page shows next.
+      const updated = cases.map((item) =>
+        item.code === saved.code ? { ...item, latest_result: attempt.result } : item
       );
+      if (loadedGroup.current === savedGroupId) setCases(updated);
       let confirmed = sync?.confirmed ?? false;
       if (loadSync) {
         try {
@@ -309,22 +323,38 @@ export function ExecutionView({
         }
       }
       const uploaded = await uploadAll(attempt.id, images);
+      // The confirmation follows the operator to the next case, so it names the
+      // case it is about.
       setStatus(
         uploaded
           ? {
               tone: "saved",
               text: confirmed
-                ? "已保存到本地 · 将新增到 Lark 旧表"
-                : "已保存到本地 · 尚未确认 Lark 目标表"
+                ? `${saved.code} 已保存到本地 · 将新增到 Lark 旧表`
+                : `${saved.code} 已保存到本地 · 尚未确认 Lark 目标表`
             }
-          : { tone: "error", text: "结果已保存到本地，但截图上传失败" }
+          : { tone: "error", text: `${saved.code} 结果已保存到本地，但截图上传失败` }
       );
       if (uploaded) setImages([]);
+      // One guard for both effects. `save()` outlives a case switch (it takes
+      // several awaits while the ←/→ buttons stay clickable), so by now the form
+      // on screen may belong to a *different* case: clearing it would throw away
+      // what the operator typed there, and jumping would steal their choice of
+      // where to be. This is the mirror of the bug being fixed — a lost draft
+      // instead of a misattributed one.
+      if (loadedGroup.current === savedGroupId && caseIndexRef.current === savedIndex) {
+        formRef.current?.reset();
+        advanceTo = nextUntestedIndex(updated, savedIndex);
+      }
     } catch (reason) {
+      // The submit request itself was rejected: nothing was stored, so the form
+      // must keep the note for the retry.
       setStatus({ tone: "error", text: `保存失败：${message(reason)}，可重试` });
     } finally {
       setSubmitting(false);
     }
+    // After the spinner is down, so 「保存中」 never covers the case we land on.
+    if (advanceTo !== null) await showCase(advanceTo, { keepStatus: true });
   }
 
   async function retryUpload() {
