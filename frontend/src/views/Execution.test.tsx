@@ -311,6 +311,44 @@ it("keeps the saved result when a screenshot upload fails and offers a retry", a
   expect(screen.getByRole("button", { name: /重试上传截图/ })).toBeVisible();
 });
 
+it("stays on the case when the result saved but the screenshot did not", async () => {
+  const uploadScreenshot = vi.fn().mockRejectedValue(new Error("上传失败"));
+  renderExecution({
+    initialGroupId: "0918-id",
+    uploadScreenshot,
+    loadCases: async () => [
+      testCase("c1", "第一条", null, "B-001", null),
+      testCase("c2", "第二条", null, "B-002", null)
+    ]
+  });
+
+  expect(await screen.findByText("第一条")).toBeVisible();
+  await userEvent.click(screen.getByRole("button", { name: "通过" }));
+  await userEvent.upload(
+    screen.getByLabelText("上传截图"),
+    new File(["png"], "shot.png", { type: "image/png" })
+  );
+  await userEvent.click(screen.getByRole("button", { name: /保存结果/ }));
+
+  expect(await screen.findByText(/结果已保存到本地，但截图上传失败/)).toBeVisible();
+  // The advance runs after the spinner drops, so give its chain its turns before
+  // deciding where the desk ended up.
+  await settle();
+  // The unrun next case is exactly where the unguarded advance would have gone.
+  // Staying put is what keeps the screenshot attached to the attempt it belongs
+  // to: `showCase` would clear `images` and hand this case's retry to the next.
+  expect(screen.getByText("第一条")).toBeVisible();
+  expect(screen.queryByText("第二条")).not.toBeInTheDocument();
+
+  const retry = screen.getByRole("button", { name: /重试上传截图/ });
+  expect(retry).toBeVisible();
+  await userEvent.click(retry);
+  expect(uploadScreenshot).toHaveBeenCalledWith(
+    "attempt-1",
+    expect.objectContaining({ name: "shot.png" })
+  );
+});
+
 it("marks a history row adopted from the table as table-sourced", async () => {
   renderExecution({
     initialGroupId: "0918-id",

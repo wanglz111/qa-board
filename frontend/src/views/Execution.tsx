@@ -343,6 +343,9 @@ export function ExecutionView({
             }
           : { tone: "error", text: `${saved.code} 结果已保存到本地，但截图上传失败` }
       );
+      // A failed upload keeps the attachments: the reset below only clears the
+      // form's own four fields, so the file stays on screen for 重试上传截图 and
+      // the retry still names this attempt — the desk does not move on either.
       if (uploaded) setImages([]);
       // One guard for both effects. `save()` outlives a case switch (it takes
       // several awaits while the ←/→ buttons stay clickable), so by now the form
@@ -352,7 +355,11 @@ export function ExecutionView({
       // instead of a misattributed one.
       if (loadedGroup.current === savedGroupId && caseIndexRef.current === savedIndex) {
         formRef.current?.reset();
-        advanceTo = nextUntestedIndex(updated, savedIndex);
+        // The text is stored, but the evidence is not: staying on this case is
+        // what keeps the screenshot attached to the attempt it belongs to and
+        // the retry button pointed at the right record. Advancing here would
+        // hand the next case a retry that uploads into this one.
+        advanceTo = uploaded ? nextUntestedIndex(updated, savedIndex) : null;
       }
     } catch (reason) {
       // The submit request itself was rejected: nothing was stored, so the form
