@@ -592,6 +592,9 @@ def rebuild_table(
       「用例」/「问题描述」 is the first and primary column;
     * the group is pointed at it, which drops the write approval — the
       administrator re-confirms the same way a re-pointed target always is;
+      rebuilding both roles one after the other is an ordinary thing to do, so
+      the second rebuild is allowed even though the first one already cleared
+      that approval (nothing is written into an unapproved table anyway);
     * every local result of that role is re-queued, so its row is written
       again by the current writer: right types, the screenshot, and the
       marker-free wording.
@@ -606,11 +609,6 @@ def rebuild_table(
     if payload.role not in ROLE_REQUIRED:
         raise HTTPException(status_code=422, detail="未知的表角色")
     target = _require_group_target(db, group_id)
-    if target.confirmed_at is None:
-        # Rebuilding moves the destination, so a group nobody approved is not
-        # the case this is for: the administrator confirms the table they have
-        # first and then decides whether it needs replacing.
-        raise HTTPException(status_code=409, detail="请先确认写入，再重建数据表")
     if running_job_count(db, group_id) > 0:
         # A job in flight is writing into the table this call is about to
         # replace, and its create may land after the stored id was cleared.

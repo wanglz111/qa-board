@@ -1068,25 +1068,40 @@ def test_rebuilding_a_table_needs_the_acknowledgement(
     assert lark_fake.created_tables == []
 
 
-def test_rebuilding_a_table_is_refused_before_the_group_is_confirmed(
+def test_rebuilding_one_role_leaves_the_other_role_rebuildable(
     lark_fake, authenticated_client, provision_group, db_session
 ):
-    """Rebuilding moves the destination; a group nobody approved has none."""
+    """A rebuild clears the write approval, and the next role still rebuilds.
 
-    target = db_session.scalar(
-        select(LarkTarget).where(LarkTarget.group_id == provision_group.id)
-    )
-    target.confirmed_at = None
-    db_session.commit()
+    Rebuilding both tables of a group is an ordinary thing to do, so the second
+    call may not be refused for the state the first one created: nothing is
+    written into an unapproved table, and the group is confirmed again once,
+    at the end, against both rebuilt tables.
+    """
 
-    response = authenticated_client.post(
+    first = authenticated_client.post(
         f"/api/groups/{provision_group.id}/lark/provision/rebuild",
         json={"role": "execution", "acknowledge": True},
     )
+    assert first.status_code == 200, first.text
+    assert first.json()["target"]["confirmed"] is False
 
-    assert response.status_code == 409, response.text
-    assert response.json()["detail"] == "请先确认写入，再重建数据表"
-    assert lark_fake.created_tables == []
+    second = authenticated_client.post(
+        f"/api/groups/{provision_group.id}/lark/provision/rebuild",
+        json={"role": "bug", "acknowledge": True},
+    )
+
+    assert second.status_code == 200, second.text
+    assert second.json()["replaced"] == {"table_id": "tbl-defects", "name": "缺陷记录"}
+    db_session.expire_all()
+    stored = db_session.scalar(
+        select(LarkTarget).where(LarkTarget.group_id == provision_group.id)
+    )
+    assert stored is not None
+    assert stored.execution_table_id == "tbl-new"
+    assert stored.bug_table_id == "tbl-new"
+    # Two tables exist now, and neither of them is approved by accident.
+    assert stored.confirmed_at is None
 
 
 def test_rebuilding_a_table_waits_for_a_running_job(
