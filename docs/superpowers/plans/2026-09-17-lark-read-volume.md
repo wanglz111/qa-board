@@ -681,16 +681,49 @@ def invalidate(base_token: str, table_id: str) -> None:
 
 
 def invalidate_target(target: Any) -> None:
-    """Drop both roles of one group's target."""
+    """Drop both roles of one group's target, names included."""
 
+    with _lock:
+        _names.pop(_names_key(target), None)
     invalidate(target.execution_base_token, target.execution_table_id)
     invalidate(target.bug_base_token, target.bug_table_id)
+
+
+def _names_key(target: Any) -> tuple[str, str, str, str]:
+    return (
+        target.execution_base_token,
+        target.execution_table_id,
+        target.bug_base_token,
+        target.bug_table_id,
+    )
+
+
+def read_names(target: Any, fetch: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+    """The target's live base/table names, from the snapshot while it is fresh.
+
+    Without this the panel still pays four name reads per case open (base
+    metadata and table listing for each role) — the record snapshot alone only
+    removes the two record reads.
+    """
+
+    key = _names_key(target)
+    with _lock:
+        entry = _names.get(key)
+        if entry is not None and time.monotonic() < entry[0]:
+            return dict(entry[1])
+    names = fetch()
+    with _lock:
+        _names[key] = (time.monotonic() + DEFAULT_TTL_SECONDS, dict(names))
+    return dict(names)
 
 
 def clear() -> None:
     with _lock:
         _entries.clear()
+        _names.clear()
 ```
+
+（并在 `_entries` 旁边加 `_names: dict[tuple[str, str, str, str], tuple[float, dict[str, Any]]] = {}`。）
 
 - [ ] **Step 4: 跑测试确认通过**
 
@@ -830,6 +863,21 @@ Expected: 两个新测试 FAIL（还没接快照；第二个读到的是旧快�
 `backend/app/lark/reconcile.py`：live 分支里的 `client.list_records(...)` 同样包一层
 `lark_cache.read_records(...)`，并加同一个 import。
 
+`backend/app/lark/names.py` 的 `read_target_names`：把整个读取包进快照，这样热缓存下一次开用例
+**一次 Lark 请求都不用发**（名字与记录各自 60 秒，失效事件相同）：
+
+```python
+def read_target_names(client: LarkClient, target: Any) -> dict[str, Any]:
+    """The live names of a target's two tables, never its schema."""
+
+    from app.lark import cache as lark_cache
+
+    return lark_cache.read_names(target, lambda: _read_target_names(client, target))
+```
+
+原函数体整体改名成私有的 `_read_target_names`（内容不变），`case_lark_history` 仍然调 `read_target_names`。
+`lark_cache.invalidate_target(target)` 已经会把这个 key 一起丢掉，所以写入口与「队列排空」的失效不用再加。
+
 `backend/app/execution.py` 加一个 helper（放在 `_attempt_payload` 附近）：
 
 ```python
@@ -877,6 +925,10 @@ Expected: PASS
 
 Run: `cd backend && TEST_DATABASE_URL='postgresql+psycopg://testdeck:testdeck@127.0.0.1:5433/testdeck_test' .venv/bin/python -m pytest -q`
 Expected: PASS。断言「读了几次 records」的旧测试会因命中快照而变少，更新断言并注明它依赖快照。
+Task 3 留下的 `test_opening_one_case_reads_each_table_once_and_no_fields` 断言的是完整 6 条 GET 清单，
+而它只开一个用例、且 Task 4 的 conftest 每个测试前清空快照，所以**它仍然应该通过**（冷读就是这 6 条）。
+真正要改的是**在同一个测试里读两次**的断言（例如 Task 5 新增的两条），按「第一次 6 条、第二次 0 条」写，
+并在注释里写明它依赖快照。不要为了让旧断言通过而把快照拆掉。
 
 - [ ] **Step 6: 提交**
 
@@ -1041,10 +1093,15 @@ git commit -m "perf(lark): download a legacy attachment once and let the browser
 - [ ] 后端全套 + 前端 `npx vitest run` + `npm run build` 全绿，`git diff --check` 干净。
 - [ ] 打 tag（`v0.1.10`），等 `Publish TestDeck images` 成功，再 `./deploy.sh v0.1.10`。
 - [ ] 用线上凭证复测（与审计同一手法：给 `client._send` 打点、数路径）：
-  - 打开一个用例只剩 `{执行表}/records` + `{缺陷表}/records`（同 base 时 `tables` 一次）。
-  - 连续打开 3 个用例：两张 `records` 各只读一次。
+  - **冷启动**（缓存为空）打开一个用例：4 次名字读取（两个角色的 base 元数据 + 表清单，同 base 时各一次）
+    + 2 次 records；**热缓存**下再打开用例：**0 次**（名字与记录都在快照里）。
+  - 连续打开 3 个用例：两张 `records` 各只读一次，名字也只在第一个用例时读。
   - 提交一条「不通过」，队列排空后再看面板：能看到自己刚写的那条（验证失效链路）。
   - 同一张旧表截图连点两次：`/medias/.../download` 只出现一次。
+
+> 数字口径的更正：这份计划第一版把目标写成「打开一个用例只剩 2 条 requests」，那只有**记录下来**才成立——
+> Task 4/5 原本只缓存 records，不缓存 base/表名，多 base 的组每次开用例仍有 4 次名字读取。现已把名字快照
+> 一并纳入 Task 4 的缓存与 Task 5 的接线，所以热缓存下才是 0；这也正是「少打 Lark」这个目标的实际落点。
 - [ ] 在 `docs/HANDOFF-RELEASE.md` 追加一节：请求数前后对比、失效策略、回滚 tag。
 
 ## Self-Review
