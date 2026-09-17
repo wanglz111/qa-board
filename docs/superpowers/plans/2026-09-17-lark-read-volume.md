@@ -324,7 +324,8 @@ git commit -m "perf(lark): read one base once when both roles live in it"
 `case_lark_history` 为了拿两个表名去读两个表的 fields，然后才读 records。把「只要名字」拆成独立函数。
 
 **Files:**
-- Create: `backend/app/lark/names.py`
+- Create: `backend/app/lark/names.py`（含两边共用的 `read_bases` helper）
+- Modify: `backend/app/lark/target.py`（把 Task 2 的私有 base 记忆换成共用 helper）
 - Modify: `backend/app/lark/history.py`（`case_lark_history`）
 - Test: `backend/tests/test_lark_history.py`（追加）
 
@@ -368,7 +369,9 @@ Expected: FAIL — GET 清单里出现两条 `/fields`。
 
 - [ ] **Step 3: 实现**
 
-新建 `backend/app/lark/names.py`：
+新建 `backend/app/lark/names.py`。**注意**：Task 2 已经在 `target.py` 里写了一份私有的
+base 记忆（`base_reads` + `_base`），而这里需要的是**同样两次调用**。所以 helper 放在本模块里由两边共用，
+而不是复制第二份——评审明确指出两份私有副本会各自漂移：
 
 ```python
 """Table and base names without paying for the schema.
@@ -376,6 +379,9 @@ Expected: FAIL — GET 清单里出现两条 `/fields`。
 The execution page asks for the same group's table names on every case it
 opens. Reading the fields to answer that is a round trip per table that nothing
 on the page uses, so names are read on their own.
+
+The base memo lives here as well: ``read_draft_state`` needs exactly the same
+two calls per base, and one copy beats two that can drift apart.
 """
 
 from __future__ import annotations
@@ -385,7 +391,19 @@ from typing import Any
 from app.lark.client import LarkClient, LarkError
 
 
-def _table_name(tables: list[dict[str, Any]], table_id: str) -> str | None:
+def read_bases(
+    client: LarkClient, tokens: list[str]
+) -> dict[str, tuple[dict[str, Any], list[dict[str, Any]]]]:
+    """Each distinct base's metadata and table listing, read once per call."""
+
+    reads: dict[str, tuple[dict[str, Any], list[dict[str, Any]]]] = {}
+    for token in tokens:
+        if token not in reads:
+            reads[token] = (client.app_metadata(token), client.list_tables(token))
+    return reads
+
+
+def table_name(tables: list[dict[str, Any]], table_id: str) -> str | None:
     for table in tables:
         if str(table.get("table_id") or "") == table_id:
             name = table.get("name")
@@ -396,20 +414,8 @@ def _table_name(tables: list[dict[str, Any]], table_id: str) -> str | None:
 def read_target_names(client: LarkClient, target: Any) -> dict[str, Any]:
     """The live names of a target's two tables, never its schema."""
 
-    base_reads: dict[str, tuple[str, list[dict[str, Any]]]] = {}
-
-    def _base(token: str) -> tuple[str, list[dict[str, Any]]]:
-        if token not in base_reads:
-            metadata = client.app_metadata(token)
-            base_reads[token] = (
-                str((metadata.get("app") or {}).get("name") or ""),
-                client.list_tables(token),
-            )
-        return base_reads[token]
-
     try:
-        execution_base_name, execution_tables = _base(target.execution_base_token)
-        bug_base_name, bug_tables = _base(target.bug_base_token)
+        reads = read_bases(client, [target.execution_base_token, target.bug_base_token])
     except LarkError as error:
         return {
             "execution_base_name": None,
@@ -419,8 +425,16 @@ def read_target_names(client: LarkClient, target: Any) -> dict[str, Any]:
             "read_errors": [str(error)],
         }
 
-    execution_table_name = _table_name(execution_tables, target.execution_table_id)
-    bug_table_name = _table_name(bug_tables, target.bug_table_id)
+    execution_base, execution_tables = reads[target.execution_base_token]
+    bug_base, bug_tables = reads[target.bug_base_token]
+
+    def _base_name(metadata: dict[str, Any]) -> str:
+        return str((metadata.get("app") or {}).get("name") or "")
+
+    execution_base_name = _base_name(execution_base)
+    bug_base_name = _base_name(bug_base)
+    execution_table_name = table_name(execution_tables, target.execution_table_id)
+    bug_table_name = table_name(bug_tables, target.bug_table_id)
     read_errors: list[str] = []
     if execution_table_name is None:
         read_errors.append(f"Lark 中找不到执行记录表 {target.execution_table_id}")
@@ -434,6 +448,22 @@ def read_target_names(client: LarkClient, target: Any) -> dict[str, Any]:
         "read_errors": read_errors,
     }
 ```
+
+同一个任务里把 Task 2 那份私有实现换成共用 helper——`target.py` 的 `read_draft_state` 开头改成：
+
+```python
+    reads = read_bases(client, [draft.execution_base_token, draft.bug_base_token])
+    execution_base, execution_tables = reads[draft.execution_base_token]
+    bug_base, bug_tables = reads[draft.bug_base_token]
+    execution_fields = client.list_fields(
+        draft.execution_base_token, draft.execution_table_id
+    )
+    bug_fields = client.list_fields(draft.bug_base_token, draft.bug_table_id)
+```
+
+并把 `target.py` 顶部已有的 `_table_name` 用法保持原样（它是另一个函数），只删掉刚加进去的 `base_reads` /
+`_base` 局部实现与 `from app.lark.names import read_bases` 的 import。改完 `tests/test_lark_target.py::test_reading_a_target_in_one_base_reads_that_base_once`
+必须仍然通过（这正是它存在的意义），否则说明 helper 的语义变了。
 
 `backend/app/lark/history.py` 里 `case_lark_history` 的这一段：
 
