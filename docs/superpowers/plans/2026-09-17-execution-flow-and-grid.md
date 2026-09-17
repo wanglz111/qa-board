@@ -778,3 +778,19 @@ git commit -m "test(e2e): cover auto-advance and the progress line inside the Pi
 - [ ] 派一个**独立**的最终 reviewer 子代理（只读）做整体复审：①逐条对照 spec 的行为规格；②区分「实现缺陷」与「spec 本身的缺口」；③允许它说「spec 没写但应该写」。
 - [ ] 更新 `task_plan.md` / `progress.md`（勾掉任务、记 commit 与测试数字）。
 - [ ] 把实现分支的去留（合并 / PR / 保留）交回人类决定——**不要自己合进 `main`**。
+
+
+---
+
+## 实施期修正汇总（Task 3–8，权威以 spec 的「二、F」与附录 D1 为准）
+
+本计划正文里 Task 3/4/5 的代码片段在实施与两段评审后有几处**已被证伪或收紧**，后来者请以本节 + spec 为准，不要照抄正文片段：
+
+1. **Task 3 的守卫不是下标而是访问令牌**：`const savedVisit = caseRequest.current`，用例范围的写入用 `loadedGroup.current === savedGroupId && caseRequest.current === savedVisit`；`caseIndexRef` 已删除（下标分不出「一直没走开」与「走开又回到同一下标」）。
+2. **Task 3 的迟到写入全部要同一对守卫**，不止跳转：`setAttempts`、`setLastAttemptId`、`setImages([])`、表单复位、`startRetest` 的迟到预留，全部（`503ec7e`、`6309db4`、`ade273d`）。`setStatus` 刻意不门控（它是事件通知、自带编号）。`setCases`/`setSync` 只按组门控（见附录 O9 的残留风险）。
+3. **截图没传成功就不前进**：`advanceTo = uploaded ? nextUntestedIndex(updated, savedIndex) : null`（`d94ccf5`）。
+4. **Task 4 的组件类型**：`Record<string, string>` 在 `strict` 下 TS7053，必须用字面量联合 `Tone`；并且这套分类只允许存在一份（`frontend/src/caseTone.ts`，网格与 desk 计数共用，`e26e5a7`）。
+5. **Task 5 的进度行**：四计数全写出（含跳过），不是 `✓/✗/○` 三符号版（`8c80b7a`）。
+6. **Task 5 的 `onJump` 必须短路同下标**；并且 `cases` 进入 state 前要经 `asCaseList()` 挡住非数组载荷（`622fb6b`）。
+7. **Task 6/7 的读回规则**：「`备注` 第一行标签权威 + 描述已识别编号则否决松散兜底」（`af72c36` → `8c80b7a`）。计划正文描述的「第三轮扫描」单独一条**不够**，会同时产生错配与漏配。
+8. 测试夹具强度：进度/计数类断言的夹具必须让计数**两两不同**，否则 `✓`/`✗` 互换也能全绿（`574ab12` 的夹具缺「未执行」行即为此例）。
