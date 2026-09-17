@@ -453,6 +453,7 @@ def legacy_attachment(
             client,
             file_token,
             directory=cache_directory(settings.upload_dir),
+            max_bytes=MAX_ATTACHMENT_BYTES,
         )
     except LarkError as error:
         raise HTTPException(status_code=502, detail=str(error)) from None

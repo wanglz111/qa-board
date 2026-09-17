@@ -1,25 +1,6 @@
-from dataclasses import replace
 from uuid import UUID
 
-import pytest
-
-from app.config import settings
-from app.lark import history as lark_history_module
 from app.lark.history import match_bugs, parse_case_reference
-
-
-@pytest.fixture(autouse=True)
-def isolated_attachment_cache(tmp_path, monkeypatch):
-    """Give every test its own on-disk attachment cache.
-
-    ``legacy_attachment`` caches each download beside ``settings.upload_dir``,
-    which the suite leaves at its relative default. Shared, one test's cached
-    picture would answer the next test's fetch — stale bytes (or a stale 200
-    where a 502 is expected) for the very token the next test sets up.
-    """
-
-    patched = replace(settings, upload_dir=str(tmp_path / "uploads"))
-    monkeypatch.setattr(lark_history_module, "settings", patched)
 
 
 def test_old_b001_is_not_b001_retest_and_adapter_never_writes(lark_fake):
@@ -1010,25 +991,69 @@ def test_the_same_legacy_attachment_is_downloaded_once(
     assert first.headers["cache-control"] == "private, max-age=86400"
 
 
-def test_a_lapsed_attachment_cache_entry_is_fetched_again(lark_fake, tmp_path):
-    from app.lark.attachments import cached_download
+def _legacy_ref_with_one_screenshot(authenticated_client, lark_fake, confirmed_group) -> str:
+    """One legacy record holding ``file-old``; returns its history ref id."""
 
-    directory = tmp_path / "lark-attachments"
-    lark_fake.media["file-old"] = (b"one", "image/png")
-    assert cached_download(lark_fake.client, "file-old", directory=directory) == (
-        b"one",
-        "image/png",
-    )
+    lark_fake.media["file-old"] = (b"\x89PNG\r\n\x1a\n", "image/png")
+    lark_fake.records = [
+        {
+            "record_id": "old1",
+            "fields": {
+                "用例": "B-001 Login",
+                "结果": "不通过",
+                "截图": [
+                    {"file_token": "file-old", "name": "shot.png", "type": "image/png"}
+                ],
+            },
+        }
+    ]
+    body = authenticated_client.get(
+        f"/api/groups/{confirmed_group.id}/cases/B-001/lark-history"
+    ).json()
+    return body["original"][0]["ref_id"]
 
-    # A token's bytes never change, so inside the TTL the disk copy answers;
-    # once the entry lapses the picture is re-downloaded rather than trusted
-    # forever.
-    lark_fake.media["file-old"] = (b"two", "image/png")
-    assert cached_download(lark_fake.client, "file-old", directory=directory) == (
-        b"one",
-        "image/png",
-    )
-    assert cached_download(lark_fake.client, "file-old", directory=directory, ttl=0) == (
-        b"two",
-        "image/png",
-    )
+
+def test_a_sidecar_less_entry_is_refetched_as_an_image(
+    authenticated_client, lark_fake, confirmed_group, isolated_attachment_cache
+):
+    ref_id = _legacy_ref_with_one_screenshot(authenticated_client, lark_fake, confirmed_group)
+    url = f"/api/lark/history/{ref_id}/attachments/0"
+
+    first = authenticated_client.get(url)
+    assert first.status_code == 200, first.text
+    assert first.headers["content-type"].startswith("image/png")
+
+    # The bytes survived but the sidecar that vouches for them did not: the
+    # entry has to be refused rather than answered as a nameless octet-stream.
+    for sidecar in isolated_attachment_cache.glob("*.json"):
+        sidecar.unlink()
+
+    second = authenticated_client.get(url)
+    assert second.status_code == 200, second.text
+    assert second.headers["content-type"].startswith("image/png")
+    downloads = [
+        request["path"]
+        for request in lark_fake.requests
+        if "/medias/" in request["path"] and request["path"].endswith("/download")
+    ]
+    assert downloads == ["/open-apis/drive/v1/medias/file-old/download"] * 2
+
+
+def test_an_unwritable_attachment_cache_still_serves(
+    authenticated_client, lark_fake, confirmed_group, monkeypatch
+):
+    from app.lark import attachments
+
+    ref_id = _legacy_ref_with_one_screenshot(authenticated_client, lark_fake, confirmed_group)
+    url = f"/api/lark/history/{ref_id}/attachments/0"
+
+    def refuse_replace(source, target):
+        raise OSError("the volume is full")
+
+    monkeypatch.setattr(attachments.os, "replace", refuse_replace)
+
+    response = authenticated_client.get(url)
+
+    assert response.status_code == 200, response.text
+    assert response.content == b"\x89PNG\r\n\x1a\n"
+    assert response.headers["content-type"].startswith("image/png")

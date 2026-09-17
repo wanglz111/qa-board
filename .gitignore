@@ -25,6 +25,7 @@ frontend/vite.config.d.ts
 
 # Local runtime data and exports
 uploads/
+lark-attachments/
 shots/
 backups/
 *.sqlite3

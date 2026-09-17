@@ -35,6 +35,8 @@ from app.main import app
 from app import case_assets, screenshots
 from app.config import settings
 from app.lark import client as lark_client_module
+from app.lark import history as lark_history_module
+from app.lark.attachments import cache_directory
 from app.lark.client import LarkClient, get_lark_client
 from app.lark.fields import REQUIRED_BUG_FIELD_TYPES, REQUIRED_RUN_FIELD_TYPES
 from app.lark.history import history_for
@@ -692,6 +694,23 @@ def clean_lark_state():
     yield
     lark_cache.clear()
     lark_client_module.reset_shared_client()
+
+
+@pytest.fixture(autouse=True)
+def isolated_attachment_cache(tmp_path, monkeypatch) -> Path:
+    """Give every test its own on-disk cache for legacy attachment bytes.
+
+    ``legacy_attachment`` stores each download beside ``settings.upload_dir``,
+    which the suite would otherwise leave at its relative default — one shared
+    ``backend/lark-attachments`` for the whole run. A picture cached by one test
+    would then answer the next test's fetch (stale bytes, or a stale 200 where
+    a 502 is expected) for the very token the next test sets up.
+    """
+
+    upload_dir = tmp_path / "uploads"
+    patched = replace(settings, upload_dir=str(upload_dir))
+    monkeypatch.setattr(lark_history_module, "settings", patched)
+    return cache_directory(str(upload_dir))
 
 
 @pytest.fixture
