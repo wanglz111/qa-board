@@ -475,6 +475,9 @@ def legacy_attachment(
             client,
             file_token,
             directory=cache_directory(settings.upload_dir),
+            # The size check below is what refuses this attachment; the cache
+            # must not keep a copy the panel can never show.
+            max_bytes=MAX_ATTACHMENT_BYTES,
         )
     except LarkError as error:
         raise HTTPException(status_code=502, detail=str(error)) from None

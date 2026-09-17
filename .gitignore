@@ -27,6 +27,10 @@ frontend/vite.config.d.ts
 uploads/
 shots/
 backups/
+# The legacy-attachment disk cache sits beside the screenshots (UPLOAD_DIR's
+# parent), so a local run against a real base would otherwise leave untracked
+# binaries in the checkout.
+lark-attachments/
 *.sqlite3
 *.db
 
