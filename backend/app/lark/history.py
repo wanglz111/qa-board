@@ -19,8 +19,8 @@ from app.lark.fields import (
     LINK_FIELDS,
 )
 from app.lark.names import read_target_names
-from app.lark.target import TargetDraft, read_draft_state, target_for
-from app.models import GroupCase, LarkHistoryRef, LarkTarget
+from app.lark.target import target_for
+from app.models import GroupCase, LarkHistoryRef
 
 
 router = APIRouter(prefix="/api", dependencies=[Depends(require_admin)])
@@ -410,34 +410,6 @@ def _unavailable_history(
         "unknown_count": 0,
         "ambiguous": False,
     }
-
-
-def read_target_state(client: LarkClient, target: LarkTarget) -> dict[str, Any]:
-    """Read the stored target's live names and field types, never secrets."""
-
-    draft = TargetDraft(
-        execution_base_token=target.execution_base_token,
-        execution_table_id=target.execution_table_id,
-        execution_view_id=target.execution_view_id,
-        bug_base_token=target.bug_base_token,
-        bug_table_id=target.bug_table_id,
-    )
-    try:
-        return read_draft_state(client, draft)
-    except LarkError as error:
-        # A target the app can no longer read stays a read error on the page
-        # instead of an exception the administrator cannot act on.
-        return {
-            "execution_base_name": None,
-            "execution_table_name": None,
-            "bug_base_name": None,
-            "bug_table_name": None,
-            "execution_fields": {},
-            "bug_fields": {},
-            "schema_errors": [],
-            "schema_fingerprint": None,
-            "read_errors": [str(error)],
-        }
 
 
 @router.get("/lark/history/{history_ref_id}/attachments/{index}")
