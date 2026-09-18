@@ -92,18 +92,21 @@ class FieldSpec:
 
 
 # A header's type per role. 结果/优先级/进展状态 are single-select with the same
-# vocabulary a person picks from in Lark, 反馈人 is a person column, and 截图 is
-# an attachment. Leaving them text is what made the generated tables unreadable
-# next to the hand-built ones.
+# vocabulary a person picks from in Lark, 反馈人/跟进人/负责人/报告人 are person
+# columns, and 截图 is an attachment. Leaving them text is what made the
+# generated tables unreadable next to the hand-built ones.
 #
 # The order is load-bearing: a new table is created from these headers in this
-# order, and it is the column order of the reference table the team fills by
-# hand (用例 first and primary, then the result, the priority, the owner, the
-# screenshot, the console, the reporter, the date / 问题描述 first and primary,
-# then the status, the assignee, the priority, the screenshot, the reporter,
-# the reported time, the remark). Sorting these names instead is what made the
-# generated headers come out 优先级/反馈人/反馈时间/… — nothing like the table
-# beside them.
+# order, and it is the column order of the table the team hands over. The
+# execution table follows the reference base (用例 first and primary, then the
+# result, the priority, the owner, the screenshot, the console, the reporter,
+# the date). The defect table follows the template base an administrator
+# pastes rows from (问题描述 first and primary, then the priority, the status,
+# the reported time, the reporter, the assignee, the remark, the screenshot) —
+# a different order is what makes a pasted block land one column to the left
+# and silently mint junk options on every single-select column. Sorting these
+# names instead is what made the generated headers come out
+# 优先级/反馈人/反馈时间/… — nothing like the table beside them.
 RUN_SCHEMA: dict[str, FieldSpec] = {
     "用例": FieldSpec(1),
     "结果": FieldSpec(3, _select(PASS_RESULT_OPTIONS)),
@@ -117,13 +120,13 @@ RUN_SCHEMA: dict[str, FieldSpec] = {
 
 BUG_SCHEMA: dict[str, FieldSpec] = {
     "问题描述": FieldSpec(1),
-    "进展状态": FieldSpec(3, _select(BUG_STATUS_OPTIONS)),
-    "跟进人": FieldSpec(11, PERSON_PROPERTY),
     "优先级": FieldSpec(3, _select(BUG_PRIORITY_OPTIONS)),
-    "截图": FieldSpec(17),
-    "反馈人": FieldSpec(11, PERSON_PROPERTY),
+    "进展状态": FieldSpec(3, _select(BUG_STATUS_OPTIONS)),
     "反馈时间": FieldSpec(5, DATE_PROPERTY),
+    "反馈人": FieldSpec(11, PERSON_PROPERTY),
+    "跟进人": FieldSpec(11, PERSON_PROPERTY),
     "备注": FieldSpec(1),
+    "截图": FieldSpec(17),
 }
 
 ROLE_SCHEMA: dict[str, dict[str, FieldSpec]] = {

@@ -270,15 +270,16 @@ def test_a_created_table_keeps_the_reference_column_order(
 ):
     """A generated table reads in the same order as the hand-built one.
 
-    Read off the reference base on 2026/09/17: the execution table is 用例 结果
-    优先级 负责人 截图 控制台 报告人 日期, and the defect table is 问题描述 进展状态
-    跟进人 优先级 截图 反馈人 反馈时间 备注. Sorting the names instead is what put
-    优先级/反馈人/… at the front and 问题描述 last.
+    Read off the template base the team hands over on 2026/09/18: the
+    execution table is 用例 结果 优先级 负责人 截图 控制台 报告人 日期, and the
+    defect table is 问题描述 优先级 进展状态 反馈时间 反馈人 跟进人 备注 截图.
+    Sorting the names instead is what put 优先级/反馈人/… at the front and
+    问题描述 last.
     """
 
     expected = {
         "execution": ["用例", "结果", "优先级", "负责人", "截图", "控制台", "报告人", "日期"],
-        "bug": ["问题描述", "进展状态", "跟进人", "优先级", "截图", "反馈人", "反馈时间", "备注"],
+        "bug": ["问题描述", "优先级", "进展状态", "反馈时间", "反馈人", "跟进人", "备注", "截图"],
     }
     for role, names in expected.items():
         lark_fake.created_tables.clear()
@@ -1262,12 +1263,15 @@ def test_a_table_reordered_within_one_type_still_rebuilds(
     rebuilds it by accident. Two columns that share a type, swapped, leave every
     pairwise type in place — only the name comparison can tell this table from
     the reference layout, so this is what pins that clause.
+
+    用例 and 控制台 are the pair: both are plain text, so swapping them keeps
+    every pairwise type intact no matter what the person columns' types are.
     """
 
     rows = _reference_layout("execution")
-    rows[0], rows[3] = rows[3], rows[0]  # 用例 and 负责人 are both text columns.
+    rows[0], rows[5] = rows[5], rows[0]  # 用例 and 控制台 are both text columns.
     rows[0]["is_primary"] = True  # The swapped-in first column leads the table.
-    rows[3]["is_primary"] = False
+    rows[5]["is_primary"] = False
     lark_fake.fields = rows
 
     response = authenticated_client.post(
