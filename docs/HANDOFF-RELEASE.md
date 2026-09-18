@@ -80,11 +80,11 @@ cd /home/lucascool/qa-board
 # 1) 和 CI 一致的验证（后端需要一个本地 PostgreSQL 测试库）
 cd backend
 TEST_DATABASE_URL=postgresql+psycopg://testdeck:testdeck@127.0.0.1:5433/testdeck_test \
-  .venv/bin/python -m pytest -q          # 期望 504 passed（v0.1.16）
+  .venv/bin/python -m pytest -q          # 期望 518 passed（v0.1.17）
 cd ../frontend
-npx vitest run                            # 期望 256 passed（21 文件）
-npm run build                             # tsc -b + vite build；产物文件名是内容 hash，部署后拿来比对
-npx playwright test                       # 期望 31 passed
+npx vitest run                            # 期望 337 passed（31 文件）；CI 的 verify 会跑它，见 §26 的抖动修复
+npm run build                             # tsc -b + vite build；产物 index-BpPhBQGX.js / index-DnO6G41C.css，部署后拿来比对
+npx playwright test                       # 期望 37 passed
 cd ..
 
 # 2) 推送 main 和版本 tag（推送 tag 才会触发镜像发布）
@@ -514,7 +514,9 @@ live base `LIhnb0ok7a1TMksi3t1jrVoLpke` 现有 5 张表，其中这两张是本�
 - 重建时若把 `reset_jobs_for_rebuilt_table` 改成「补齐缺失 job」，新表还能带上目标确认前写入的行——那会改变重建的语义（写入之前被确认闸门挡住的行），属产品决策，未做。
 - 面板失败路径的「不留半写状态」目前依赖 session teardown 回滚；生产正确，但性质不显式。
 
-## 19. 未发布：同步卡住时看不到原因、排入同步推不动卡住的行、面板按钮错位
+## 19. 同步卡住时看不到原因、排入同步推不动卡住的行、面板按钮错位（**已上线**：迁移 `0012_sync_job_last_error` 随 v0.1.12 生效，人员列写入随 v0.1.16）
+
+> 本节的标题原先写的是「未发布」，那是写作时的状态。事实上两条线都已上线（`alembic_version` 从 v0.1.12 起就是 `0012` 起步，v0.1.16 到了 `0016`），所以标题与这句话在 v0.1.17 发版时改正。
 
 起源于线上那一条：「不知道原因，一直有这个问题，提交同步不了，大概在 v1.7 就出现了。待同步 3 · 已同步 0 · 失败 1 · 待人工确认 0 · 待管理员处理 3 · 最近错误 create_execution_failed」。
 
@@ -812,4 +814,74 @@ ALTER TABLE import_tickets SET (
 - **cleanup 脚本新增的两条分支没有仓库内测试**（`tests/` 从不驱动该脚本，验证用的假对象探针只存在于 /tmp 且已删）。
 - **`downgrade()` 在整个测试套件里零覆盖**（仓库既有全局缺口，非本次引入）。
 - 设置页标题缺兄弟视图都有的 `<p className="eyebrow">`；加载失败后视图内没有"重试"入口（切走再回来会重新挂载）。
+
+## 26. v0.1.17：「Lark 检查」页改成状态条 + 4 步向导，判决按当前选中的表派生（已上线）
+
+计划与规格：`docs/superpowers/plans/2026-09-18-lark-check-page-redesign.md`、`docs/superpowers/specs/2026-09-18-lark-check-page-redesign-design.md`。19 个提交 / 34 个文件（+6798 / −2889）。
+
+### 这次改了什么
+
+**根治用户报的那个 bug：换表后旧表的红字不销。**
+
+- 现象：粘贴链接读取后，在下拉里换执行表，**上一张表**的「缺少必填字段…」红字一直挂着。
+- 根因：旧页面把两种**寿命不同**的数据塞进同一个 `resolved` state —— base 级（`tables` / `base_name`，切表后仍有效）与 table 级（`selected` / `execution_fields` / `schema_errors`，切表即失效）。判决被存在 base 级作用域里，于是「针对一张已被丢弃的表」的判决，永久贴在「刚选中的表」头上。旧实现在 `LarkCheck.tsx` 里直接 map `resolved.schema_errors`，**不读当前选中的表**，而 `onChange` 只 `setExecutionTableId`。
+- 修法（结构性，不是再加一个清除条件）：判决改由 `probes[`${table_id}:${role}`]` 在**渲染时按当前选中的表**派生；非当前表的判决路径不可达。没校验过的表显示「尚未校验这张表」+ 校验入口 —— 不借邻居表的结论，也不显示空白。链接框被编辑即作废该 role 的 base 与判决（`baseIsCurrent`）。
+- 后端新增只读 `POST /api/lark/table-schema`：按 `table_id` + `role` 现读字段并算缺失表头；happy path 只 1 次 Lark 请求，只有读失败时才补一次 `list_tables` 以区分「表没了」(422) 与「没权限」(409)；与 `/lark/resolve` 同 router（继承 admin + 归档组拦截）；两个入参走与保存路径**同一套**路径注入校验。**无迁移、无新增依赖、不写库。**
+
+**顺带：页面从「三块 panel 全摊开」改成「一行状态条 + 4 步向导」**（`LarkCheck.tsx` 849 行 → 336 行）。
+
+- 健康态 = 1 行状态条 + 4 行步骤标题；两条必吵醒的异常（表头失效 / 同步失败·待人工确认）由状态条变红/黄 + **对应步自动展开**定位，不再靠顶部堆红字。
+- 946 行的 `HeaderSetup.tsx` 拆成 `components/lark/` 下的三个破坏性弹窗（设置表头 / 修正表头类型 / 重建数据表）+ `StepHeaders`。**三个动作的确认流程与 `acknowledge` 语义逐字保留**：删掉的旧文件里 30 条 CJK 文案，在新 UI 里 0 条缺失；`acknowledge: true` 仍是 4 处。
+- 新增 `larkDraft.ts`（纯逻辑，可单测）与 `useLarkDraft` hook（唯一改 draft 的地方）。
+- 死代码清理：删除 `.lark-healthy` / `.lark-facts` / `.lark-fields` / `.lark-field` / `.lark-roles`（逐条 grep 证明无引用，且没有动态拼接能重新生成它们）。**共享遮罩行一个字未动**（`.target-change-overlay, .header-setup-overlay, .reconcile-overlay, .group-archive-overlay` 那两行）—— 它们与目标切换 / 对账 / 归档三个弹窗同行，删掉**不会有任何测试变红**，但会让那三个弹窗失去遮罩。
+
+### 本地验证（`c395be3`，即合并进 main 的那一点）
+
+- 后端 **518 passed**；前端 vitest **337 passed / 31 文件**（连跑 3 次全绿）；`npm run build` 通过，产物 **`index-BpPhBQGX.js` / `index-DnO6G41C.css`**；Playwright **37 passed**；`tsc -b --force` exit 0。
+- **门 1 是先红后绿**：红输出 `expected <p class="inline-status error" role="alert">缺少必填字段「截图」</p> to be null`，是在**产品代码一行未动、只改测试文件**的那次提交里跑出来的；对应 e2e 用例名是「switching the execution table clears the old table's red banner」。
+- 发布前最后一轮复审又抓出并修掉两处，都值得记：
+  1. **页面测试有一次 1/3 的抖动。** 唤醒步的自动展开原先只交给一个被动 effect，于是「数据落地的那一帧」`chosen` 还是空的，目标步先被渲染成 `attention`、下一帧才变 `open`；测试是同步断言的，读到的就是 `attention`。这不只是测试问题 —— 它会打中 **CI 的 `verify`**（`publish: needs: verify`），让 tag 推送偶发失败、卡住发版。改成把 `openStep` 派生出来之后：修前 35/1（36 次），修后 **36/36**，全量套件 6/6。
+  2. **`readLink` 的失败路径缺代际闸门**：换组时还在飞的 `resolve` 被拒，会在**新组**的页面上凭空印一行旧组的「读取 Lark 表格失败」。成功路径早有这道闸门，失败路径漏了；现在补上（`onError` 之前判断），并配了一条修前必红、修后必绿的用例。
+
+### 上线记录
+
+- `main` 从 `2b373ad` **快进**到 `c395be3`（19 个提交，与仓库既有的线性历史习惯一致），tag **`v0.1.17`**；远端 `main` 与 tag 均已推送（本机 `origin` 仍是 https 且无凭据，照例用 SSH 地址推）。
+- CI run [#35379356813](https://github.com/wanglz111/qa-board/actions/runs/35379356813) **success**（`head_sha` = `c395be31a70175bfd92351737840063952d0aaea`，18:17:54 → 18:20:38，约 2 分 44 秒）：`verify` 103s success、`publish (api)` success、`publish (web)` success。
+- 镜像 `ghcr.io/wanglz111/qa-board-{api,web}` 的 **`v0.1.17`** 与 **`sha-c395be3…`** 都已存在（匿名 `docker manifest inspect` 确认）。
+- 服务器：部署前数据库备份 `backups/backup-2026-09-19-022114.sql.gz`（502005 字节，`gzip -t` 通过），`.env` 由 `deploy.sh` 自动留档为 `.env.bak-<时间戳>`；`./deploy.sh v0.1.17`，`migrate` 退出码 **0**（**本次没有新迁移**）。
+
+升级后的实测结果：
+
+| 检查 | 结果 |
+| --- | --- |
+| `docker compose ps` | api（healthy）、worker、web 全部 `ghcr.io/wanglz111/qa-board-*:v0.1.17`，db healthy |
+| `GET /health/ready` | 200 `{"ok":true}`（容器刚起来的瞬间 502，`deploy.sh` 的重试循环随后通过） |
+| 一次性 `migrate` | 退出码 0；`alembic_version` = `0016_lark_people`（与 v0.1.16 相同，本次没有迁移） |
+| 数据完好 | `groups` 14、`group_cases` 617、`attempts` 14、`screenshots` 8（部署前后一致） |
+| 匿名 `GET /api/groups` | 401 |
+| 匿名 `POST /api/lark/table-schema` | **401**（新路由确实存在，且要求管理员）；同路径 `GET` 405（只接受 POST） |
+| 部署的 SPA 资源 | `assets/index-BpPhBQGX.js` / `assets/index-DnO6G41C.css` —— 内容 hash 与本地验证过的构建产物同名，即同一份产物 |
+| api / worker 日志 | 部署后 300 行内 error / traceback 计数 **0 / 0** |
+| 管理员登录 | **没有在生产上登录**（沿用 v0.1.13 起的口径：不把生产口令写进终端与会话记录）；登录后的行为由本地 518/337/37 覆盖 |
+
+回滚：`cd /home/ubuntu/testdeck && ./deploy.sh v0.1.16`。本次**无 schema 变更**，回滚不需要恢复数据库。
+
+### 需要你决定的两件事（有意记录，不藏）
+
+1. **规格 §5.2 与 §4.1 有一处不自洽。** §5.2 把第 ① 步的完成条件写成「两表都已校验并选中」，但 probes 是**会话内**的（§4.1）；于是对**回访**的管理员来说，§1.2 那句「配完（4 步全 ✓）→ 页面自然安静」在结构上达不到 —— 一个已确认且健康的组，第 ① 步仍然是展开的（实测状态 `["open","done","done","done"]`）。门 4 的「健康态预算」仍然成立（1 行状态条 + 4 行标题、健康态无 `role="alert"`，我把第 ① 步展开的更强状态也量过，同样是 0 个 alert）。两条路：**(a)** 接受并写进文档；**(b)** 把 ① 的完成条件放宽成「已选中 &&（两表都 ok ‖ 已有保存目标且 live 健康）」—— 后者不违反「判决只有一个来源」。
+2. **同族的一帧闪烁（未修，已记录）。** `chosen` 已经有值之后，若分类又移到另一步，那一步仍会先画一帧 `attention`。从页面测试断言的冷启动路径（`chosen === undefined`）不可达，所以按设计决定留给你；另外 `data-state="attention"` 全仓**没有任何断言**。
+
+### 其他已知未做（都验证过属"可发"，列出来是为了不自嗨）
+
+- **三个弹窗各自带一份 23 行的 `trapFocus`**，外加跨弹窗 import 的 `refusalOf`，形成 `StepHeaders ↔ dialogs` 环形引用。计划逐字冻结了文件清单、把抽公共模块列为备选，所以本轮按计划保留。将来讨论时请注意：这三个弹窗**本来就从 `StepHeaders` import** `messageOf` / `ROLE_LABELS` / `rebuiltNameOf`，所以"抽出来会有设计问题"不是理由；真正的理由是计划逐字冻结了文件清单。
+- **backend**：新接口没有一条用例断言 200 响应的**键集合**（加第五个键不会红）；**错类型**判决分支（`fields.py` 的 `字段「…」类型为 …`）全仓**零覆盖** —— 而本页那行红字正是它浮现的地方，属计划缺口。
+- **页面 6 条动作路径**（`LarkCheck.tsx` 的 persist / confirm / approve / queue / retry / refresh）没有换组代际守卫，晚到的响应可能把旧组的结果写进新组视图。**与重构前逐字同一结构**（不是本次引入），但和上面第 2 条是同一族，值得单开一条跟进。
+- 页面「目标表读取失败」只渲染一行裸 `role="alert"`（同面板标题里有「刷新」按钮可重试）。
+- mock 保真度（`mock-api.mjs`）：`required` 未排序（后端排序）、只查字段存在不查类型、新路由没有 `method === "POST"` 守卫。都是计划逐字代码，且前端不读 `required`，纯开发面。
+- e2e `lark-check.spec.ts:467` 的 `toContain` 不重试且紧跟一个 fire-and-forget 点击（窗口很窄、未复现抖动），建议改 `await expect.poll(...)`。
+- 陈旧注释：`components/lark/StepHeaders.tsx:43` 仍指向已被删除的 `HeaderSetup.tsx`；`styles.css` 里「死规则清理在 Task 7」的注释在 Task 7 做完后过期了。
+
+### 一个环境陷阱（与本次改动无关，但会骗人）
+
+**这个 checkout 里 Playwright 报的是「编译后」的行号，不是源文件行号。** `--list` 会说 `e2e/lark-check.spec.ts:592`，而源码里这个用例在第 `428` 行（对着 `/tmp/playwright-transform-cache-*/` 的产物核过）。所以：**不要拿 Playwright 输出里的行号去 grep 源码**。我在开工前的基线核对里踩到过一次，Task 7 的实现者独立复现了同一现象。
 
