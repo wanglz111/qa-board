@@ -2,11 +2,15 @@ from dataclasses import replace
 from datetime import datetime, timezone
 
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import event, select, text
 
 import app.lark.target as lark_target
 from app.config import settings
-from app.lark.fields import schema_fingerprint
+from app.lark.fields import (
+    REQUIRED_BUG_FIELD_TYPES,
+    REQUIRED_RUN_FIELD_TYPES,
+    schema_fingerprint,
+)
 from app.models import LarkTarget, LarkTargetRevision
 
 
@@ -105,6 +109,262 @@ def test_resolve_requires_an_admin_session(lark_fake, anonymous_client):
     response = anonymous_client.post(
         "/api/lark/resolve", json={"url": lark_fake.wiki_url}
     )
+    assert response.status_code == 401
+    assert lark_fake.requests == []
+
+
+def _table_schema(client, *, base_token: str, table_id: str, role: str):
+    return client.post(
+        "/api/lark/table-schema",
+        json={"base_token": base_token, "table_id": table_id, "role": role},
+    )
+
+
+def test_table_schema_judges_one_table_by_the_role_that_asked(
+    lark_fake, authenticated_client
+):
+    """One table, two roles: the required set and the verdict both follow role."""
+
+    lark_fake.fields = [
+        field for field in lark_fake.fields if field["field_name"] != "截图"
+    ]
+
+    execution = _table_schema(
+        authenticated_client,
+        base_token="app-exec",
+        table_id="tbl-runs",
+        role="execution",
+    )
+    bug = _table_schema(
+        authenticated_client, base_token="app-exec", table_id="tbl-runs", role="bug"
+    )
+
+    assert execution.status_code == 200, execution.text
+    assert bug.status_code == 200, bug.text
+    assert execution.json()["table_id"] == "tbl-runs"
+    assert bug.json()["table_id"] == "tbl-runs"
+    # Both roles read the same table, so they see the same header.
+    assert execution.json()["fields"] == {
+        "用例": "text",
+        "结果": "text",
+        "优先级": "text",
+        "负责人": "text",
+        "报告人": "text",
+        "日期": "date",
+        "控制台": "text",
+    }
+    assert bug.json()["fields"] == execution.json()["fields"]
+    assert execution.json()["required"] == sorted(REQUIRED_RUN_FIELD_TYPES)
+    assert bug.json()["required"] == sorted(REQUIRED_BUG_FIELD_TYPES)
+    assert execution.json()["required"] != bug.json()["required"]
+    assert execution.json()["schema_errors"] == ["缺少必填字段「截图」"]
+    # 截图 is in REQUIRED_BUG_FIELD_TYPES as well (app/lark/fields.py:73), so the
+    # defect role reports the same missing column among its own: the list is
+    # asserted verbatim rather than assumed to be the execution role's.
+    assert bug.json()["schema_errors"] == [
+        "缺少必填字段「问题描述」",
+        "缺少必填字段「进展状态」",
+        "缺少必填字段「跟进人」",
+        "缺少必填字段「反馈时间」",
+        "缺少必填字段「备注」",
+        "缺少必填字段「反馈人」",
+        "缺少必填字段「截图」",
+    ]
+
+
+def test_table_schema_reports_a_table_the_base_does_not_have(
+    lark_fake, authenticated_client
+):
+    response = _table_schema(
+        authenticated_client,
+        base_token="app-exec",
+        table_id="tbl-gone",
+        role="execution",
+    )
+
+    assert response.status_code == 422, response.text
+    assert "tbl-gone" in response.json()["detail"]
+    # The field listing is the whole happy path; the table listing is bought only
+    # because that read failed, and only to tell "gone" from "no permission".
+    assert [
+        request["path"]
+        for request in lark_fake.requests
+        if request["path"].endswith("/fields")
+    ] == ["/open-apis/bitable/v1/apps/app-exec/tables/tbl-gone/fields"]
+    assert [
+        request["path"]
+        for request in lark_fake.requests
+        if request["path"].endswith("/tables")
+    ] == ["/open-apis/bitable/v1/apps/app-exec/tables"]
+
+
+@pytest.mark.parametrize(
+    ("break_it", "expected"),
+    [("fields", "协作者"), ("base", "多维表格")],
+)
+def test_table_schema_reports_a_read_the_app_is_not_allowed(
+    lark_fake, authenticated_client, break_it, expected
+):
+    """A refused read is a permission problem, never a table that does not exist."""
+
+    if break_it == "fields":
+        # The header listing refuses while the base itself still reads.
+        lark_fake.fields_error = True
+    else:
+        # The base is beyond the app's reach: the field read and the listing that
+        # would have explained it both refuse.
+        del lark_fake.bases["app-exec"]
+
+    response = _table_schema(
+        authenticated_client,
+        base_token="app-exec",
+        table_id="tbl-runs",
+        role="execution",
+    )
+
+    assert response.status_code == 409, response.text
+    assert expected in response.json()["detail"]
+
+
+def test_table_schema_refuses_a_role_it_does_not_know(
+    lark_fake, authenticated_client
+):
+    response = _table_schema(
+        authenticated_client,
+        base_token="app-exec",
+        table_id="tbl-runs",
+        role="defect",
+    )
+
+    assert response.status_code == 422, response.text
+    assert "execution" in response.json()["detail"]
+    assert lark_fake.requests == []
+
+
+@pytest.mark.parametrize(
+    ("base_token", "table_id"),
+    [
+        ("../../../../wiki/v2/spaces/get_node", "tbl-runs"),
+        ("app-exec/../app-bug", "tbl-runs"),
+        ("app-exec", "tbl-runs/../../records"),
+        ("app-exec", "tbl-runs/.."),
+        ("app-exec", "../tbl-runs"),
+    ],
+)
+def test_table_schema_refuses_ids_that_could_rewrite_the_request_path(
+    lark_fake, authenticated_client, base_token, table_id
+):
+    response = _table_schema(
+        authenticated_client,
+        base_token=base_token,
+        table_id=table_id,
+        role="execution",
+    )
+
+    assert response.status_code == 422, response.text
+    assert "多维表格标识" in response.json()["detail"]
+    assert lark_fake.requests == []
+
+
+def test_table_schema_writes_nothing_to_the_database(
+    lark_fake, authenticated_client, confirmed_group, db_session
+):
+    """The endpoint takes no session at all: the read is Lark-only."""
+
+    stored_before = _fresh_target(db_session, confirmed_group.id)
+    flushes: list[str] = []
+    commits: list[str] = []
+
+    def record_flush(*_args: object) -> None:
+        flushes.append("flush")
+
+    def record_commit(*_args: object) -> None:
+        commits.append("commit")
+
+    event.listen(db_session, "before_flush", record_flush)
+    event.listen(db_session, "before_commit", record_commit)
+    try:
+        response = _table_schema(
+            authenticated_client,
+            base_token="app-exec",
+            table_id="tbl-runs",
+            role="execution",
+        )
+    finally:
+        event.remove(db_session, "before_flush", record_flush)
+        event.remove(db_session, "before_commit", record_commit)
+
+    assert response.status_code == 200, response.text
+    assert flushes == []
+    assert commits == []
+    assert list(db_session.new) == []
+    stored_after = _fresh_target(db_session, confirmed_group.id)
+    assert stored_after.target_fingerprint == stored_before.target_fingerprint
+    assert stored_after.schema_fingerprint == stored_before.schema_fingerprint
+    assert stored_after.confirmed_at == stored_before.confirmed_at
+    assert (
+        db_session.scalars(
+            select(LarkTargetRevision).where(
+                LarkTargetRevision.group_id == confirmed_group.id
+            )
+        ).all()
+        == []
+    )
+
+
+def test_table_schema_asks_lark_once_on_the_happy_path(
+    lark_fake, authenticated_client
+):
+    response = _table_schema(
+        authenticated_client,
+        base_token="app-exec",
+        table_id="tbl-runs",
+        role="execution",
+    )
+
+    assert response.status_code == 200, response.text
+    assert [request["path"] for request in lark_fake.requests] == [
+        "/open-apis/auth/v3/tenant_access_token/internal",
+        "/open-apis/bitable/v1/apps/app-exec/tables/tbl-runs/fields",
+    ]
+    # Read-only: no record path is touched at all.
+    assert lark_fake.client.record_methods == []
+
+
+def test_table_schema_names_the_missing_credential_instead_of_a_permission_fix(
+    lark_fake, authenticated_client, monkeypatch
+):
+    monkeypatch.setattr(
+        lark_target,
+        "settings",
+        replace(settings, lark_app_id="", lark_app_secret=""),
+    )
+
+    response = _table_schema(
+        authenticated_client,
+        base_token="app-exec",
+        table_id="tbl-runs",
+        role="execution",
+    )
+
+    assert response.status_code == 409, response.text
+    assert "LARK_APP_ID" in response.json()["detail"]
+    assert "协作者" not in response.json()["detail"]
+    assert lark_fake.requests == []
+
+
+def test_table_schema_requires_an_admin_session(lark_fake, anonymous_client):
+    # The route hangs off the same router as /lark/resolve, so it inherits both
+    # router dependencies: the admin session here, and refuse_archived_group —
+    # which is a no-op for this path because no group_id is named in it
+    # (app/archive.py:53-63), there being nothing per-group to archive.
+    response = _table_schema(
+        anonymous_client,
+        base_token="app-exec",
+        table_id="tbl-runs",
+        role="execution",
+    )
+
     assert response.status_code == 401
     assert lark_fake.requests == []
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Annotated, Any
@@ -229,6 +230,89 @@ def resolve(
         raise HTTPException(status_code=409, detail=str(error)) from None
 
 
+class TableSchemaRequest(BaseModel):
+    base_token: str
+    table_id: str
+    role: str          # "execution" | "bug"
+
+
+# One role's table is judged against its own mandatory columns, and a refusal
+# names the same identity parts the save path names, so the same bad value reads
+# the same wherever it was pasted.
+TABLE_SCHEMA_ROLES: dict[str, tuple[str, str, dict[str, tuple[int, ...]]]] = {
+    "execution": ("执行库 App Token", "执行记录表 id", REQUIRED_RUN_FIELD_TYPES),
+    "bug": ("缺陷库 App Token", "缺陷表 id", REQUIRED_BUG_FIELD_TYPES),
+}
+
+
+def read_table_schema(
+    client: LarkClient, base_token: str, table_id: str, role: str
+) -> dict[str, Any]:
+    """One table's live header, judged against the mandatory set for ``role``.
+
+    Read-only, and one request in the happy path: the field listing alone answers
+    the question. Only a failed listing buys the base's table listing — one more
+    request — so that a table which no longer exists is never reported as a
+    permission problem, and a read the app is not allowed to make is never
+    reported as a table that does not exist.
+    """
+
+    try:
+        base_label, table_label, required = TABLE_SCHEMA_ROLES[role]
+    except KeyError:
+        raise LookupError('role 必须是 "execution" 或 "bug"') from None
+    # The same path-injection refusal the save path applies, on the same
+    # characters: both ids are interpolated into a path carrying the token.
+    _refuse_bad_token(base_label, base_token, SOURCE_ID)
+    _refuse_bad_token(table_label, table_id, TABLE_ID)
+
+    missing = _missing_credential()
+    if missing:
+        raise PermissionError(missing)
+
+    try:
+        fields = client.list_fields(base_token, table_id)
+    except LarkError as error:
+        try:
+            tables = client.list_tables(base_token)
+        except LarkError:
+            raise PermissionError(f"无法读取多维表格：{error}") from None
+        if not any(str(table.get("table_id")) == table_id for table in tables):
+            raise LookupError(
+                f"该多维表格里没有数据表 {table_id}，请重新读取 Lark 链接后选择"
+            ) from None
+        raise PermissionError(
+            f"无法读取数据表字段，请确认应用仍是协作者：{error}"
+        ) from None
+
+    return {
+        "table_id": table_id,
+        "fields": describe_fields(fields),
+        "required": sorted(required),
+        "schema_errors": missing_required_fields(fields, required),
+    }
+
+
+@router.post("/lark/table-schema")
+def table_schema(
+    payload: TableSchemaRequest,
+    client: Annotated[LarkClient, Depends(get_lark_client)],
+) -> dict[str, Any]:
+    """200 → {"table_id": str, "fields": {字段名: 类型名}, "required": [str], "schema_errors": [str]}
+       422 → 找不到该表 / role 非法 / token 形状非法
+       409 → 应用不是协作者（PermissionError）
+    """
+
+    try:
+        return read_table_schema(
+            client, payload.base_token, payload.table_id, payload.role
+        )
+    except LookupError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from None
+    except PermissionError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from None
+
+
 def target_for(db: Session, group_id: UUID) -> LarkTarget | None:
     """The group's stored target, unlocked, for read-only callers."""
 
@@ -332,6 +416,16 @@ def _draft_from(payload: TargetRequest) -> TargetDraft:
     )
 
 
+def _refuse_bad_token(label: str, value: str, pattern: re.Pattern[str]) -> None:
+    """Refuse one id that could rewrite the authenticated Lark request path."""
+
+    if pattern.match(value) is None:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{label} 不是有效的多维表格标识，请重新读取并粘贴 Lark 链接",
+        )
+
+
 def _validate_target_tokens(payload: TargetRequest) -> None:
     """Refuse ids that could rewrite the authenticated Lark request path.
 
@@ -351,11 +445,7 @@ def _validate_target_tokens(payload: TargetRequest) -> None:
     if payload.execution_view_id:
         checks.append(("视图 id", payload.execution_view_id, VIEW_ID))
     for label, value, pattern in checks:
-        if pattern.match(value) is None:
-            raise HTTPException(
-                status_code=422,
-                detail=f"{label} 不是有效的多维表格标识，请重新读取并粘贴 Lark 链接",
-            )
+        _refuse_bad_token(label, value, pattern)
 
 
 def _require_group(db: Session, group_id: UUID) -> None:
