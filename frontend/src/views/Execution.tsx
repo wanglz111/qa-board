@@ -615,20 +615,26 @@ export function ExecutionView({
             selectedId={selectedGroupId}
             progress={progress}
             onSelect={(groupId) => void selectGroup(groupId)}
+            // The squares count the group on the row they hang from, so they are
+            // handed to that row rather than parked after the whole list, where
+            // the reader has to walk back up the page to find whose progress
+            // this is.
+            selectedDetail={
+              cases.length > 0 ? (
+                <CaseGrid
+                  cases={cases}
+                  caseIndex={caseIndex}
+                  // Clicking the square of the case already on screen must be a
+                  // no-op: `showCase` resets the form, so re-entering the current
+                  // case would silently wipe a half-typed 失败说明.
+                  onJump={(index) => {
+                    if (index !== caseIndex) void showCase(index);
+                  }}
+                />
+              ) : null
+            }
           />
         )}
-        {cases.length > 0 ? (
-          <CaseGrid
-            cases={cases}
-            caseIndex={caseIndex}
-            // Clicking the square of the case already on screen must be a
-            // no-op: `showCase` resets the form, so re-entering the current
-            // case would silently wipe a half-typed 失败说明.
-            onJump={(index) => {
-              if (index !== caseIndex) void showCase(index);
-            }}
-          />
-        ) : null}
       </aside>
 
       <div className="execution-desk-mount" ref={deskMountRef} />

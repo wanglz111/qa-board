@@ -289,3 +289,62 @@ test("a save moves the desk on and the confirmation names the case it is about",
   const noOverflow = await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth);
   expect(noOverflow).toBe(true);
 });
+
+// Where the squares sit is a geometry question the unit suite cannot answer: the
+// same markup renders either way, and only a laid-out page can say whether the
+// panel is under the focused row or under the whole list.
+test("the squares hang off the focused group's row, not off the end of the list", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await mockApi(page, MIXED_CASES);
+  await page.goto("/");
+
+  await expect(page.locator(".case-square")).toHaveCount(5);
+  // The default fixture's first group carries the cases, so the focused row is
+  // not the last one: "under the focused row" and "at the end of the list" are
+  // two different places on this page.
+  const active = page.locator(".group-row.active");
+  await expect(active).toContainText("Sprint 0918");
+  const panel = page.locator(".group-row-detail");
+  await expect(panel).toHaveCount(1);
+
+  const boxes = await Promise.all([
+    active.boundingBox(),
+    panel.boundingBox(),
+    page.locator(".group-list .group-row").last().boundingBox()
+  ]);
+  const [activeBox, panelBox, lastRowBox] = boxes;
+  expect(activeBox).not.toBeNull();
+  expect(panelBox).not.toBeNull();
+  expect(lastRowBox).not.toBeNull();
+  // Below the focused row ...
+  expect(panelBox!.y).toBeGreaterThanOrEqual(activeBox!.y + activeBox!.height - 1);
+  // ... and above the next group, i.e. inside the list rather than after it.
+  expect(panelBox!.y + panelBox!.height).toBeLessThanOrEqual(lastRowBox!.y + 1);
+  expect(await page.evaluate(() => document.querySelector(".group-list")?.lastElementChild?.className))
+    .toContain("group-row");
+
+  // Picking the other group takes the panel with it. No cases are mocked for
+  // that group, so the grid has to be gone: a panel left under the row it no
+  // longer counts is the failure this pins.
+  await page.getByText("Sprint 0922").click();
+  await expect(page.locator(".group-row.active")).toContainText("Sprint 0922");
+  await expect(page.locator(".group-row-detail")).toHaveCount(0);
+  await expect(page.locator(".case-square")).toHaveCount(0);
+
+  // Coming back puts it under that row again — not at the end of the list, which
+  // is where it used to sit and what the box above would no longer rule out.
+  await page.getByText("Sprint 0918").click();
+  await expect(page.locator(".case-square")).toHaveCount(5);
+  const backBoxes = await Promise.all([
+    page.locator(".group-row-detail").boundingBox(),
+    page.locator(".group-row.active").boundingBox(),
+    page.locator(".group-list .group-row").last().boundingBox()
+  ]);
+  const [back, backRow, backLast] = backBoxes;
+  expect(back).not.toBeNull();
+  expect(backRow).not.toBeNull();
+  expect(backLast).not.toBeNull();
+  expect(back!.y).toBeGreaterThanOrEqual(backRow!.y + backRow!.height - 1);
+  expect(back!.y + back!.height).toBeLessThanOrEqual(backLast!.y + 1);
+  await page.screenshot({ path: "test-results/grid-under-focused-group.png", fullPage: true });
+});

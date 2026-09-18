@@ -1460,3 +1460,45 @@ it("keeps the grid's container contract that the stylesheet selects", async () =
   expect(document.querySelector("aside.execution-groups")?.contains(grid)).toBe(true);
   expect(document.querySelector(".execution-desk")?.contains(grid)).toBe(false);
 });
+
+// The grid used to render after the whole group list, which left the reader to
+// walk back up the page and guess which row its squares counted. It now hangs
+// off the selected row. Placement is the only thing these two tests can see that
+// the tests above cannot: the same squares, colours and counts render either way.
+it("hangs the squares off the focused group's row, not off the list's end", async () => {
+  // The selected group is the FIRST of the default fixture's two, so "under the
+  // active row" and "at the end of the list" are different places. A fixture
+  // whose selected group happened to be last could not tell them apart.
+  renderExecution({ initialGroupId: "0918-id", loadCases: async () => gridCases() });
+
+  await screen.findByText("第二条");
+  const list = document.querySelector(".group-list");
+  const panel = document.querySelector(".group-row-detail");
+  const activeRow = list?.querySelector(".group-row.active");
+  expect(list).not.toBeNull();
+  expect(panel).not.toBeNull();
+  expect(activeRow).not.toBeNull();
+  expect(list?.contains(panel)).toBe(true);
+  expect(panel?.contains(document.querySelector(".case-grid"))).toBe(true);
+  // The panel is the active row's immediate next sibling...
+  expect(panel?.previousElementSibling).toBe(activeRow);
+  // ...which is not where the list ends, where it used to sit.
+  expect(list?.lastElementChild).not.toBe(panel);
+  expect((list?.lastElementChild as HTMLElement).className).toContain("group-row");
+});
+
+it("moves the squares with the selection instead of leaving them behind", async () => {
+  renderExecution({ initialGroupId: "0918-id" });
+
+  await screen.findByText("管理员登录");
+  await userEvent.click(screen.getByText("Sprint 0922"));
+  await screen.findByText("钱包绑定");
+
+  // One panel, under the newly active row: a panel left behind on the previous
+  // group would make two groups look like they own the grid on screen.
+  const panels = document.querySelectorAll(".group-row-detail");
+  expect(panels).toHaveLength(1);
+  const activeRow = document.querySelector(".group-list .group-row.active");
+  expect(activeRow?.textContent).toContain("Sprint 0922");
+  expect(panels[0].previousElementSibling).toBe(activeRow);
+});
