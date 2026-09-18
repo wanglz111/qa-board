@@ -78,17 +78,26 @@ function paint(layers, background) {
   return (x, y) => layers.reduce((hit, layer) => hit ?? layer(x, y), null) ?? background;
 }
 
-// 原型: a 后台登录 wireframe — header bar, a centred card, a filled button.
+// 原型: a 移动端 商品详情 page — deliberately TALL, because that is the shape
+// the viewer has to survive. A long prototype must arrive readable instead of
+// being squeezed into a strip: header, hero, rows, and a bottom action bar the
+// fixture's focus box points at.
 const PROTOTYPE_PNG = png(
   480,
-  320,
+  1600,
   paint(
     [
-      box(0, 0, 1, 0.12, [23, 107, 87]),
-      box(0.18, 0.26, 0.82, 0.86, [255, 255, 255]),
-      box(0.24, 0.36, 0.76, 0.41, [233, 236, 237]),
-      box(0.24, 0.5, 0.76, 0.55, [233, 236, 237]),
-      box(0.24, 0.64, 0.76, 0.72, [23, 107, 87])
+      box(0, 0, 1, 0.035, [23, 107, 87]),
+      box(0, 0.035, 1, 0.22, [233, 236, 237]),
+      box(0.06, 0.25, 0.78, 0.28, [30, 33, 36]),
+      box(0.06, 0.3, 0.52, 0.325, [138, 146, 151]),
+      box(0.06, 0.36, 0.94, 0.4, [246, 248, 249]),
+      box(0.06, 0.42, 0.94, 0.46, [246, 248, 249]),
+      box(0.06, 0.48, 0.94, 0.52, [246, 248, 249]),
+      box(0.06, 0.56, 0.45, 0.6, [30, 33, 36]),
+      box(0.06, 0.62, 0.94, 0.68, [233, 236, 237]),
+      box(0.06, 0.7, 0.94, 0.78, [233, 236, 237]),
+      box(0, 0.9, 1, 0.96, [23, 107, 87])
     ],
     [244, 246, 247]
   )
@@ -198,14 +207,20 @@ function mkCase({
           name: `${title}.png`,
           mime: "image/png",
           width: 480,
-          height: 320,
+          height: 1600,
           asset_type: "page",
           screen: module,
           state: "默认态",
           prototype_version: "v2.0",
           role: "expected",
           caption: `${title} — 期望界面`,
-          focus: []
+          // A real focus box, so 点击关注点 → 定位到该处 can be exercised locally
+          // instead of only in unit tests.
+          focus: [{
+            label: "底部主按钮",
+            note: "文案与按钮状态须与原型一致",
+            box: [0.08, 0.9, 0.84, 0.06]
+          }]
         }]
       : []
   };
