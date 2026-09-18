@@ -50,7 +50,8 @@ AssertionError: expected <p class="inline-status error">缺少必填字段「截
 - 单列 900px、三块 panel 顺序堆叠，**无任何折叠层**（`styles.css:109`）。
 - 全页 **27 个 `inline-status` 独立 `<p>` 行**（`LarkCheck.tsx` 13 + `HeaderSetup.tsx` 14）。
 - 「写入确认」单块面板满载时最多同屏 **12 个元素**：状态行、勾选框、按钮、队列统计、最近错误、最多 4 个 ghost 按钮、2–3 段灰字说明、notice、error。
-- **最长一段说明 194 字**（`LarkCheck.tsx:822-827`），另一段 78 字（`:818-820`），常驻显示但只在极窄分支下有意义。
+- **最长一段说明 124 字**（`LarkCheck.tsx:822-827`，去标签后的可见字符；其中中文与中文标点 117 个），另一段 43 字（`:818-820`），常驻显示但只在极窄分支下有意义。
+  - ⚠️ 初稿此处写的是「194 字 / 78 字」，**是错的**：当时的正则把 `) : null}` 这类 JSX 残渣一并计入了。由 Round 1 独立复审指出，已实测更正。
 - 重复信息：表名在「已保存的目标」（`:569-580`）、两个下拉、写入确认（`:730`）、切换弹窗里各出现一次。
 - 内嵌 `HeaderSetup` 946 行的组件，含 3 个弹窗入口。
 
@@ -59,7 +60,7 @@ AssertionError: expected <p class="inline-status error">缺少必填字段「截
 `LarkCheck.tsx` 被 11 次提交改过，其中至少 4 次的标题是"让它诚实"：
 
 ```
-3ca1bf9 fix(web): align the sync queue's buttons and say why rows are stuck   ← 194 字说明的出处
+3ca1bf9 fix(web): align the sync queue's buttons and say why rows are stuck   ← 那段 124 字说明的出处
 c079178 fix: make the connection page honest about stale and second-base selections
 c8fb147 fix: keep the header dialog reachable and its approval honest
 5743bb7 fix: keep the defect base and the parked copy honest
@@ -199,7 +200,8 @@ function verdictOf(p: Probe | "loading" | undefined): Verdict {
 
 | 文件 | 职责 | 目标规模 |
 |---|---|---|
-| `views/LarkCheck.tsx` | 编排、状态条、stepper 骨架 | < 250 行 |
+| `views/LarkCheck.tsx` | 编排、状态条、stepper 骨架，**以及 8 个从旧页面迁移过来的动作**（persist / saveSelection / confirmChange / approveWrites / queueSavedAttempts / retryQueuedJobs / 409 两分支 / refreshTarget） | **< 340 行**（含迁移动作） |
+| `views/useLarkCheckActions.ts`（可选，二期） | 若要把上面 8 个动作从页面抽出来，使 `LarkCheck.tsx` 回落到 250 行以内 | 不在本轮范围 |
 | `hooks/useLarkDraft.ts` | draft + probes + 校验/切表动作 | 新增 |
 | `components/lark/StepTables.tsx` | 第 ① 步 | 新增 |
 | `components/lark/StepHeaders.tsx` | 第 ② 步外壳 + plan 状态 | 新增 |
@@ -209,6 +211,8 @@ function verdictOf(p: Probe | "loading" | undefined): Verdict {
 | `components/TargetChangeDialog.tsx` | 不变 | — |
 
 `HeaderSetup.tsx`（946 行）拆分后删除。三个弹窗的 `acknowledge` 语义、失败分支、`ProvisionFailureDetail` 处理全部保留。
+
+> ⚠️ **一处口径更正**：本表初稿给 `LarkCheck.tsx` 写的是「< 250 行」。写实施计划时按真实代码块逐段计数，页面是 **328 行** —— 其中 8 个从旧页面迁移的动作约占 120 行、四步 props 与 `data-state` 约 45 行、Props 声明与 live 原因行约 25 行，纯排版最多再省 ~60 行。压到 250 只有两条路：删分支（触犯门 6）或把这 8 个动作抽成独立文件（`views/useLarkCheckActions.ts`，需改本表与计划）。**本轮选择如实修正数字**，把「抽出动作」列为二期可选项 —— 「250」是当初拍的目标，不是验收标准，不该为了凑它删代码。
 
 ## 7. 后端契约
 
