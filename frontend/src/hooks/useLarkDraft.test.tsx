@@ -593,4 +593,30 @@ describe("useLarkDraft", () => {
     });
     expect(verdictFor(result.current.draft, "execution")).toBe("ok");
   });
+
+  // 复审 A4：重建换掉的是表本身，两个 role 都指着它时必须一起跟随。
+  it("follows the rebuilt table in the other role when both roles named it", async () => {
+    const harness = setup();
+    await readLink(harness, "execution", URL);
+    // 让两个 role 都指向同一张表：缺陷表也选 tbl-runs
+    await act(async () => {
+      harness.result.current.setTable("bug", "tbl-runs");
+    });
+
+    await act(async () => {
+      harness.result.current.acceptRebuiltTable(
+        "execution",
+        { table_id: "tbl-new", name: "执行记录（新）" },
+        { table_id: "tbl-runs", name: "执行记录" }
+      );
+    });
+
+    expect(harness.result.current.draft.execution.tableId).toBe("tbl-new");
+    expect(harness.result.current.draft.bug.tableId).toBe("tbl-new");
+    expect(
+      harness.result.current.draft.execution.base?.tables.some(
+        (table) => table.table_id === "tbl-runs"
+      )
+    ).toBe(false);
+  });
 });

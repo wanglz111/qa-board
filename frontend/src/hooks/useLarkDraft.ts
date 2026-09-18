@@ -413,13 +413,30 @@ export function useLarkDraft(opts: Options): LarkDraftActions {
         probes
       };
       // 同上：withBase 最后做。
-      const selected = withRole(current, role, {
+      let next = withRole(current, role, {
         ...current[role],
         tableId: table.table_id,
         viewId: null
       });
-      setDraft(withBase(selected, base, nextBase));
+      // 另一个 role 若也指着被替换的这张表，必须一起跟随（复审 A4）：重建换掉的是表本身。
+      const other = otherRole(role);
+      const otherFollows = current[other].tableId === replaced.table_id;
+      if (otherFollows) {
+        next = withRole(next, other, {
+          ...next[other],
+          tableId: table.table_id,
+          viewId: null
+        });
+      }
+      const applied = withBase(next, base, nextBase);
+      setDraft(applied);
       void runCheck(role, base.base_token, table.table_id);
+      if (otherFollows) {
+        // 另一个 role 可能挂在别的 base 上：用改完之后对它真正生效的那个 base 去校验，
+        // 否则请求会发进一个不属于它的库（withSlot 会把结果丢掉）。
+        const otherBase = effectiveBase(applied, other);
+        if (otherBase) void runCheck(other, otherBase.base_token, table.table_id);
+      }
     },
     [runCheck, onError]
   );
