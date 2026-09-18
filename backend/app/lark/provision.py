@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.archive import refuse_archived_group
 from app.auth import require_admin
 from app.db import get_db
 from app.lark import cache as lark_cache
@@ -39,7 +40,10 @@ from app.lark.target import (
 from app.models import Attempt, Group, GroupCase, SyncJob
 
 
-router = APIRouter(prefix="/api", dependencies=[Depends(require_admin)])
+router = APIRouter(
+    prefix="/api",
+    dependencies=[Depends(require_admin), Depends(refuse_archived_group)],
+)
 
 PROVISION_VIEW_NAME = "TestDeck"
 TABLE_NAME_LIMIT = 100

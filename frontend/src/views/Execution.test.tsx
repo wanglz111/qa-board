@@ -25,7 +25,8 @@ function group(id: string, name: string, sourceName: string): Group {
     source_name: sourceName,
     source_version: "1",
     count: 1,
-    created_at: "2026-09-16T08:00:00Z"
+    created_at: "2026-09-16T08:00:00Z",
+    archived_at: null
   };
 }
 

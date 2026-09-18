@@ -10,6 +10,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app import screenshots
+from app.archive import refuse_archived_group
 from app.auth import require_admin
 from app.db import get_db
 from app.execution import allocate_attempt
@@ -28,7 +29,10 @@ from app.models import (
 )
 
 
-router = APIRouter(prefix="/api", dependencies=[Depends(require_admin)])
+router = APIRouter(
+    prefix="/api",
+    dependencies=[Depends(require_admin), Depends(refuse_archived_group)],
+)
 
 
 READABLE_RESULTS = ("通过", "不通过", "未执行")

@@ -65,7 +65,13 @@ export default function App() {
             referenceAssetUrl={api.referenceAssetUrl}
           />
         ) : view === "groups" ? (
-          <GroupsView loadGroups={api.groups} loadCases={api.cases} refreshKey={refreshKey} />
+          <GroupsView
+            loadGroups={api.groups}
+            loadCases={api.cases}
+            refreshKey={refreshKey}
+            archive={api.archiveGroup}
+            restore={api.restoreGroup}
+          />
         ) : view === "reports" ? (
           <ReportsView loadGroups={api.groups} reportUrl={api.reportUrl} />
         ) : view === "lark" ? (

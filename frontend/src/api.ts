@@ -63,6 +63,8 @@ export type Group = {
   source_version: string;
   count: number;
   created_at: string;
+  // The moment the group was retired, or null while it is still on the board.
+  archived_at: string | null;
 };
 
 export type GroupCase = PreviewCase & {
@@ -470,7 +472,12 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ticket_id: ticketId, name, mapping })
     }),
-  groups: () => request<Group[]>("/api/groups"),
+  groups: (includeArchived = false) =>
+    request<Group[]>(`/api/groups${includeArchived ? "?include_archived=true" : ""}`),
+  archiveGroup: (groupId: string) =>
+    mutation<Group>(`/api/groups/${groupId}/archive`, { method: "POST" }),
+  restoreGroup: (groupId: string) =>
+    mutation<Group>(`/api/groups/${groupId}/restore`, { method: "POST" }),
   cases: (groupId: string) => request<GroupCase[]>(`/api/groups/${groupId}/cases`),
   progress: (groupId: string) => request<GroupProgress>(`/api/groups/${groupId}/progress`),
   attempts: (groupId: string, code: string) =>

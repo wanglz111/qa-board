@@ -71,6 +71,10 @@ class Group(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+    # When the group was retired, or NULL while it is still on the board. A
+    # retired group is hidden and read-only — kept whole, because it holds the
+    # only local copy of the evidence its cases collected.
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     cases: Mapped[list[GroupCase]] = relationship(
         back_populates="group", cascade="all, delete-orphan", passive_deletes=True

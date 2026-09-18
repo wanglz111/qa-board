@@ -11,6 +11,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
+from app.archive import refuse_archived_group
 from app.auth import require_admin
 from app.config import settings
 from app.db import get_db
@@ -31,7 +32,10 @@ from app.models import (
 )
 
 
-router = APIRouter(prefix="/api", dependencies=[Depends(require_admin)])
+router = APIRouter(
+    prefix="/api",
+    dependencies=[Depends(require_admin), Depends(refuse_archived_group)],
+)
 
 # A worker that dies mid-job releases its work when the lease expires, and a
 # retriable failure backs off exponentially up to the retry ceiling.
@@ -288,6 +292,26 @@ def park_job_for_target_change(
     db.flush()
 
 
+def park_job_for_archived_group(
+    db: Session, job: SyncJob, *, now: datetime | None = None
+) -> None:
+    """Hold a claimed job whose group has been retired.
+
+    Same shape as a moved target, for the same reason: the row was queued by a
+    group that is no longer being worked on, so it waits instead of spending
+    retries. Restoring the group wakes it up by itself — no re-point, no retry
+    to press.
+    """
+
+    moment = now or _now()
+    job.state = "pending"
+    job.error_kind = "group_archived"
+    job.last_error = "该测试组已归档，这一行暂停写入；恢复测试组后会自动继续"
+    job.lease_until = None
+    job.next_retry_at = moment + timedelta(seconds=STALE_CONFIRMATION_SECONDS)
+    db.flush()
+
+
 def run_job(
     db: Session,
     job: SyncJob,
@@ -311,6 +335,15 @@ def run_job(
     job.state = "running"
     job.lease_until = moment + timedelta(seconds=LEASE_SECONDS)
     db.flush()
+
+    # A retired group is not being worked on, so nothing it queued goes out. The
+    # check comes before the target's: an archived group answers the same way
+    # whether or not its table is still the approved one, and the operator's
+    # action is to restore the group rather than to re-point it.
+    if db.scalar(select(Group.archived_at).where(Group.id == case.group_id)) is not None:
+        park_job_for_archived_group(db, job, now=moment)
+        db.commit()
+        return job
 
     target = target_for(db, case.group_id)
     if (

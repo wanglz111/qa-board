@@ -5,8 +5,8 @@ import type { Group } from "../api";
 import { ReportsView } from "./Reports";
 
 const GROUPS: Group[] = [
-  { id: "0918-id", name: "Sprint 0918", source_name: "0918.csv", source_version: "3", count: 14, created_at: "2026-09-16T08:00:00Z" },
-  { id: "0922-id", name: "Sprint 0922", source_name: "0922.json", source_version: "1", count: 6, created_at: "2026-09-16T08:00:00Z" }
+  { id: "0918-id", name: "Sprint 0918", source_name: "0918.csv", source_version: "3", count: 14, created_at: "2026-09-16T08:00:00Z", archived_at: null },
+  { id: "0922-id", name: "Sprint 0922", source_name: "0922.json", source_version: "1", count: 6, created_at: "2026-09-16T08:00:00Z", archived_at: null }
 ];
 
 it("downloads only the chosen group's report", async () => {

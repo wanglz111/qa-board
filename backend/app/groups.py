@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Annotated, Any
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from pydantic import BaseModel, Field, StringConstraints
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session, selectinload
@@ -165,25 +165,77 @@ def confirm_import(
     }
 
 
+def _group_payload(group: Group, count: int) -> dict[str, Any]:
+    return {
+        "id": group.id,
+        "name": group.name,
+        "source_name": group.source_name,
+        "source_version": group.source_version,
+        "count": count,
+        "created_at": group.created_at,
+        "archived_at": group.archived_at,
+    }
+
+
 @router.get("/groups")
-def list_groups(db: Annotated[Session, Depends(get_db)]) -> list[dict[str, Any]]:
-    rows = db.execute(
+def list_groups(
+    db: Annotated[Session, Depends(get_db)],
+    include_archived: Annotated[bool, Query()] = False,
+) -> list[dict[str, Any]]:
+    statement = (
         select(Group, func.count(GroupCase.id))
         .outerjoin(GroupCase)
         .group_by(Group.id)
         .order_by(Group.created_at.desc(), Group.id)
-    ).all()
-    return [
-        {
-            "id": group.id,
-            "name": group.name,
-            "source_name": group.source_name,
-            "source_version": group.source_version,
-            "count": count,
-            "created_at": group.created_at,
-        }
-        for group, count in rows
-    ]
+    )
+    if not include_archived:
+        # The board is what is being worked on. A retired group is one query
+        # away, which is the whole difference from deleting it.
+        statement = statement.where(Group.archived_at.is_(None))
+    rows = db.execute(statement).all()
+    return [_group_payload(group, count) for group, count in rows]
+
+
+def _group_or_404(db: Session, group_id: UUID) -> Group:
+    group = db.scalar(select(Group).where(Group.id == group_id).with_for_update())
+    if group is None:
+        raise HTTPException(status_code=404, detail="Group not found")
+    return group
+
+
+@router.post("/groups/{group_id}/archive")
+def archive_group(
+    group_id: UUID, db: Annotated[Session, Depends(get_db)]
+) -> dict[str, Any]:
+    """Retire a group: off the board, read-only, and whole.
+
+    Archiving is idempotent and keeps the first moment, so a second click (or a
+    reloaded tab) cannot move the timestamp that says when it was retired.
+    """
+
+    group = _group_or_404(db, group_id)
+    if group.archived_at is None:
+        group.archived_at = datetime.now(timezone.utc)
+    count = db.scalar(
+        select(func.count(GroupCase.id)).where(GroupCase.group_id == group.id)
+    )
+    db.commit()
+    db.refresh(group)
+    return _group_payload(group, count or 0)
+
+
+@router.post("/groups/{group_id}/restore")
+def restore_group(
+    group_id: UUID, db: Annotated[Session, Depends(get_db)]
+) -> dict[str, Any]:
+    group = _group_or_404(db, group_id)
+    group.archived_at = None
+    count = db.scalar(
+        select(func.count(GroupCase.id)).where(GroupCase.group_id == group.id)
+    )
+    db.commit()
+    db.refresh(group)
+    return _group_payload(group, count or 0)
 
 
 @router.get("/groups/{group_id}/cases")

@@ -10,6 +10,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.archive import refuse_archived_group
 from app.auth import require_admin
 from app.config import settings
 from app.db import get_db
@@ -27,7 +28,10 @@ from app.lark.names import base_name, read_bases, table_name
 from app.models import Group, LarkTarget, LarkTargetRevision
 
 
-router = APIRouter(prefix="/api", dependencies=[Depends(require_admin)])
+router = APIRouter(
+    prefix="/api",
+    dependencies=[Depends(require_admin), Depends(refuse_archived_group)],
+)
 
 
 # The four parts of a target's identity, in the order they appear in the stored

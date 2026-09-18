@@ -9,6 +9,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.archive import refuse_archived_group
 from app.auth import require_admin
 from app.db import get_db
 from app.lark import cache as lark_cache
@@ -17,7 +18,10 @@ from app.models import Attempt, Group, GroupCase
 from app.screenshots import screenshot_payload
 
 
-router = APIRouter(prefix="/api", dependencies=[Depends(require_admin)])
+router = APIRouter(
+    prefix="/api",
+    dependencies=[Depends(require_admin), Depends(refuse_archived_group)],
+)
 
 # The group-case row lock serialises ordinary callers; the retry covers the
 # residual race where two transactions still pick the same sequence or label,

@@ -13,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.archive import refuse_archived_group
 from app.auth import require_admin
 from app.config import settings
 from app.db import get_db
@@ -26,7 +27,10 @@ MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 FORMAT_SUFFIX = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}
 PILLOW_MIME = {"PNG": "image/png", "JPEG": "image/jpeg", "WEBP": "image/webp"}
 
-router = APIRouter(prefix="/api", dependencies=[Depends(require_admin)])
+router = APIRouter(
+    prefix="/api",
+    dependencies=[Depends(require_admin), Depends(refuse_archived_group)],
+)
 
 
 def _write_file(storage_path: Path, content: bytes) -> None:

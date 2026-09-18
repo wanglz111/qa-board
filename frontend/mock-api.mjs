@@ -444,14 +444,15 @@ function progressOf(group) {
   return progress;
 }
 
-function groupList() {
-  return STATE.groups.map((group) => ({
+function groupList(includeArchived) {
+  return STATE.groups.filter((group) => includeArchived || !group.archived_at).map((group) => ({
     id: group.id,
     name: group.name,
     source_name: group.source_name,
     source_version: group.source_version,
     count: group.cases.length,
-    created_at: group.created_at
+    created_at: group.created_at,
+    archived_at: group.archived_at ?? null
   }));
 }
 
@@ -534,7 +535,19 @@ const server = createServer(async (req, res) => {
   if (path === "/api/auth/csrf") return send(res, 200, { csrf_token: "mock-csrf-token" });
   if (path === "/api/auth/logout") return send(res, 204);
 
-  if (path === "/api/groups") return send(res, 200, groupList());
+  if (path === "/api/groups") {
+    return send(res, 200, groupList(url.searchParams.get("include_archived") === "true"));
+  }
+
+  if ((match = path.match(/^\/api\/groups\/([^/]+)\/(archive|restore)$/))) {
+    const group = groupOf(decodeURIComponent(match[1]));
+    if (!group) return send(res, 404, { detail: "Group not found" });
+    // Idempotent and keeps the first moment, like the server: a second click
+    // cannot move the timestamp that says when the group was retired.
+    if (match[2] === "archive") group.archived_at ??= new Date().toISOString();
+    else group.archived_at = null;
+    return send(res, 200, groupList(true).find((item) => item.id === group.id));
+  }
 
   if ((match = path.match(/^\/api\/groups\/([^/]+)\/cases$/))) {
     const group = groupOf(decodeURIComponent(match[1]));

@@ -18,6 +18,7 @@ const GROUP: Group = {
   source_name: "0918.csv",
   source_version: "1",
   count: 14,
+  archived_at: null,
   created_at: "2026-09-16T08:00:00Z"
 };
 
