@@ -111,10 +111,10 @@ RUN_SCHEMA: dict[str, FieldSpec] = {
     "用例": FieldSpec(1),
     "结果": FieldSpec(3, _select(PASS_RESULT_OPTIONS)),
     "优先级": FieldSpec(3, _select(RUN_PRIORITY_OPTIONS)),
-    "负责人": FieldSpec(1),
+    "负责人": FieldSpec(11, PERSON_PROPERTY),
     "截图": FieldSpec(17),
     "控制台": FieldSpec(1),
-    "报告人": FieldSpec(1),
+    "报告人": FieldSpec(11, PERSON_PROPERTY),
     "日期": FieldSpec(5, DATE_PROPERTY),
 }
 

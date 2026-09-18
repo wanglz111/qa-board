@@ -348,6 +348,41 @@ def test_a_new_execution_table_gives_the_attachment_a_null_property(
     }
 
 
+def test_a_new_execution_table_makes_its_people_person_columns(
+    lark_fake, authenticated_client, provision_group
+):
+    """负责人/报告人 hold a person, not a name.
+
+    A person column only accepts ``[{"id": "<open_id>"}]``, so the column has to
+    be created as one: a text column keeps receiving the display name and Lark
+    never links the person.
+    """
+
+    authenticated_client.post(
+        f"/api/groups/{provision_group.id}/lark/provision/table",
+        json={
+            "role": "execution",
+            "base_token": "app-exec",
+            "table_name": "执行记录",
+            "acknowledge": True,
+        },
+    )
+
+    fields = {
+        field["field_name"]: field for field in lark_fake.created_tables[0]["fields"]
+    }
+    assert fields["负责人"] == {
+        "field_name": "负责人",
+        "type": 11,
+        "property": {"multiple": True},
+    }
+    assert fields["报告人"] == {
+        "field_name": "报告人",
+        "type": 11,
+        "property": {"multiple": True},
+    }
+
+
 def test_a_created_header_always_carries_a_property(
     lark_fake, authenticated_client, provision_group
 ):
@@ -776,8 +811,8 @@ def test_the_retype_plan_is_empty_for_the_reference_schema(lark_fake, authentica
                 "用例": 1,
                 "结果": 3,
                 "优先级": 3,
-                "负责人": 1,
-                "报告人": 1,
+                "负责人": 11,
+                "报告人": 11,
                 "日期": 5,
                 "截图": 17,
                 "控制台": 1,
@@ -1307,7 +1342,7 @@ def test_a_reference_table_with_a_wrong_type_still_rebuilds(
     """Right names, order and primary — but one column's type is off."""
 
     rows = _reference_layout("execution")
-    rows[3]["type"] = 3  # 负责人 is a person column, not 单选.
+    rows[3]["type"] = 3  # 负责人 是人员列 (11)，单选 (3) 是错的。
     lark_fake.fields = rows
 
     response = authenticated_client.post(
@@ -1511,3 +1546,31 @@ def test_the_plan_promises_only_the_rows_the_rebuild_will_re_file(
     assert rebuilt["requeued"] == 0, rebuilt
     assert plan["rebuild"] == {"execution": 0, "bug": 0}
     assert plan["rebuild"]["execution"] == rebuilt["requeued"]
+
+
+def test_the_retype_plan_offers_to_convert_a_text_owner_into_a_person_column():
+    """The live tables carry 负责人/报告人 as text, so the plan has to name them.
+
+    An existing table cannot be rebuilt into this without re-filing its rows,
+    and a table with real data should be converted in place instead — that is
+    what this plan drives.
+    """
+
+    fields = [
+        {"field_id": "fld-用例", "field_name": "用例", "type": 1},
+        {"field_id": "fld-结果", "field_name": "结果", "type": 3},
+        {"field_id": "fld-优先级", "field_name": "优先级", "type": 3},
+        {"field_id": "fld-负责人", "field_name": "负责人", "type": 1},
+        {"field_id": "fld-截图", "field_name": "截图", "type": 17},
+        {"field_id": "fld-控制台", "field_name": "控制台", "type": 1},
+        {"field_id": "fld-报告人", "field_name": "报告人", "type": 1},
+        {"field_id": "fld-日期", "field_name": "日期", "type": 5},
+    ]
+
+    plan = {row["name"]: row for row in retype_plan(fields, "execution")}
+
+    assert set(plan) == {"负责人", "报告人"}
+    assert plan["负责人"]["type"] == 11
+    assert plan["负责人"]["current_type"] == 1
+    assert plan["负责人"]["properties"] == {"multiple": True}
+    assert plan["报告人"]["type"] == 11
