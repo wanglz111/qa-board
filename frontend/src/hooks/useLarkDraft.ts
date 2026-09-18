@@ -171,6 +171,9 @@ export function useLarkDraft(opts: Options): LarkDraftActions {
   // 登记表的渲染镜像：checking 由它 + 当前选中表派生，不再单独记一份状态。
   const [flightKeys, setFlightKeys] = useState<readonly string[]>([]);
 
+  // 双击「读取表格」不该发两次 resolve（复审 E1）。
+  const readInFlight = useRef<Set<TableRole>>(new Set());
+
   const syncFlightKeys = useCallback(() => {
     setFlightKeys([...inFlight.current.keys()]);
   }, []);
@@ -185,6 +188,7 @@ export function useLarkDraft(opts: Options): LarkDraftActions {
     setDraft(emptyDraft());
     setReading(null);
     inFlight.current.clear();
+    readInFlight.current.clear();
     setFlightKeys([]);
   }, [groupId]);
 
@@ -263,6 +267,9 @@ export function useLarkDraft(opts: Options): LarkDraftActions {
     async (role: TableRole): Promise<TableRole | null> => {
       const url = draftRef.current[role].url.trim();
       if (!url) return null;
+      // 双击「读取表格」不该发两次 resolve（复审 E1）。
+      if (readInFlight.current.has(role)) return null;
+      readInFlight.current.add(role);
       setReading(role);
       let result: TableRole | null = null;
       let pending: { role: TableRole; baseToken: string; tableId: string } | null = null;
@@ -308,6 +315,7 @@ export function useLarkDraft(opts: Options): LarkDraftActions {
         onError(messageOf(reason, role === "bug" ? "读取缺陷表失败" : "读取 Lark 表格失败"));
         result = null;
       } finally {
+        readInFlight.current.delete(role);
         setReading(null);
       }
       // 读取的 spinner 收掉之后再校验，页面不会同时转两个圈。

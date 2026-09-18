@@ -619,4 +619,61 @@ describe("useLarkDraft", () => {
       )
     ).toBe(false);
   });
+
+  // 复审 E1：双击「读取表格」不该发两次 resolve。
+  it("does not resolve twice when the read button is hit twice", async () => {
+    let release: (value: LarkResolved) => void = () => undefined;
+    const resolve = vi.fn(
+      () =>
+        new Promise<LarkResolved>((settle) => {
+          release = settle;
+        })
+    );
+    const harness = setup({ resolve });
+    await act(async () => {
+      harness.result.current.setLink("execution", URL);
+    });
+
+    let first: Promise<TableRole | null> = Promise.resolve(null);
+    let second: Promise<TableRole | null> = Promise.resolve(null);
+    await act(async () => {
+      first = harness.result.current.readLink("execution");
+      second = harness.result.current.readLink("execution");
+      release(RESOLVED);
+      await Promise.all([first, second]);
+    });
+
+    expect(resolve).toHaveBeenCalledTimes(1);
+  });
+
+  // 复审 B5：withSlot 的 base 守卫是这套设计里唯一非结构性的机制，必须有测试钉住。
+  it("a late response does not write a verdict into a base the box no longer holds", async () => {
+    let release: (value: LarkResolved) => void = () => undefined;
+    const resolve = vi.fn(
+      () =>
+        new Promise<LarkResolved>((settle) => {
+          release = settle;
+        })
+    );
+    const harness = setup({ resolve });
+    await act(async () => {
+      harness.result.current.setLink("execution", URL);
+    });
+
+    let pending: Promise<TableRole | null> = Promise.resolve(null);
+    await act(async () => {
+      pending = harness.result.current.readLink("execution");
+    });
+    // 请求还在飞的时候，管理员把链接框改成了另一段链接
+    await act(async () => {
+      harness.result.current.setLink("execution", OTHER_URL);
+    });
+    await act(async () => {
+      release(RESOLVED);
+      await pending;
+    });
+
+    // 迟到的那份响应属于旧链接：base 判为不当前，判决诚实地停在 unread
+    expect(verdictFor(harness.result.current.draft, "execution")).toBe("unread");
+  });
 });
