@@ -23,6 +23,7 @@ EXPECTED_TABLES = {
     "groups",
     "import_tickets",
     "lark_history_refs",
+    "lark_people",
     "lark_target_revisions",
     "lark_targets",
     "reconcile_marks",
@@ -35,7 +36,7 @@ def test_empty_test_schema_upgrades_to_head_twice(migrated_database):
     with migrated_database.connect() as connection:
         assert set(inspect(connection).get_table_names()) == EXPECTED_TABLES
         assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-            "0015_import_ticket_autovacuum"
+            "0016_lark_people"
         )
         # An uploaded bundle is one bytea, so it lives in TOAST, and the import
         # flow clears it as soon as the ticket is used. The dead TOAST that leaves
@@ -196,7 +197,7 @@ def test_short_code_backfill_keeps_existing_groups_addressable(database_at_0004)
 
     with database_at_0004.connect() as connection:
         assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-            "0015_import_ticket_autovacuum"
+            "0016_lark_people"
         )
         assert connection.scalar(
             text("SELECT short_code FROM groups WHERE id = :id"), {"id": group_id}

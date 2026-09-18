@@ -444,3 +444,28 @@ class ReconcileMark(Base):
     decided_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+
+class LarkPeople(Base):
+    """The open ids this deployment writes into Lark person columns.
+
+    One row, always. 报告人 and 反馈人 are the same person on both sides of a
+    group's target and 负责人 is one placeholder the team fills in later, so
+    there is nothing to key by — the CHECK constraint is what keeps "which row"
+    from becoming a second decision. An unset id is NULL, never a name: a person
+    column refuses anything that is not an open id, and the writer omits the
+    column instead of failing the whole row.
+    """
+
+    __tablename__ = "lark_people"
+    __table_args__ = (CheckConstraint("id = 1", name="ck_lark_people_singleton"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    reporter_open_id: Mapped[str | None] = mapped_column(String)
+    owner_open_id: Mapped[str | None] = mapped_column(String)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
