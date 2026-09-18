@@ -38,6 +38,9 @@ export function SettingsView({ load, save }: Props) {
   }, [load]);
 
   const submit = async () => {
+    // Nothing readable means nothing to compare against: a save here would send
+    // two empty strings, and empty is how this endpoint says "erase it".
+    if (state === null) return;
     setBusy(true);
     setNotice(null);
     setError(null);
@@ -55,8 +58,10 @@ export function SettingsView({ load, save }: Props) {
   };
 
   return (
-    <section className="panel settings-panel">
-      <h2><Users size={18} />人员设置</h2>
+    <section className="workspace-section settings-panel" aria-labelledby="settings-title">
+      <div className="section-heading">
+        <div><h2 id="settings-title"><Users size={18} />人员设置</h2></div>
+      </div>
       <p className="inline-status">
         执行记录的 报告人 / 负责人 和 缺陷记录的 反馈人 都是人员列，只接受本应用名下的
         open_id（<code>ou_</code> 开头）。姓名和邮箱会被 Lark 拒绝，服务端也会先挡下来。
@@ -87,9 +92,9 @@ export function SettingsView({ load, save }: Props) {
 
       <p className="inline-status">
         {`当前实际写入：报告人 `}
-        <code>{state?.effective_reporter_open_id || "（空）"}</code>
+        <code>{state === null ? "（未知）" : state.effective_reporter_open_id || "（空）"}</code>
         {` · 负责人 `}
-        <code>{state?.effective_owner_open_id || "（空）"}</code>
+        <code>{state === null ? "（未知）" : state.effective_owner_open_id || "（空）"}</code>
         {state && !state.reporter_open_id && state.env_reporter_open_id
           ? "（报告人用的还是环境变量里的兜底值）"
           : ""}
@@ -98,7 +103,7 @@ export function SettingsView({ load, save }: Props) {
       {notice ? <p className="inline-status saved" role="status">{notice}</p> : null}
       {error ? <p className="inline-status error" role="alert">{error}</p> : null}
 
-      <button type="button" className="primary" disabled={busy} onClick={() => void submit()}>
+      <button type="button" className="primary" disabled={busy || state === null} onClick={() => void submit()}>
         {busy ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />}
         保存人员设置
       </button>

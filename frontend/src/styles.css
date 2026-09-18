@@ -126,6 +126,7 @@ table { width: 100%; border-collapse: collapse; font-size: .8rem; } th { color: 
 .lark-roles { margin-top: 14px; }.lark-roles .inline-status { margin: 0 0 12px; }
 .reconcile-layout { max-width: 1040px; }
 .reconcile-layout .inline-status.reconcile-source-name { margin: 0; }
+.settings-panel { max-width: 900px; }
 .reconcile-source { display: inline-flex; flex-wrap: wrap; gap: 6px; margin: 0 0 4px; padding: 4px; background: #f2f4f4; border-radius: 999px; }
 .reconcile-source button { min-height: 32px; padding: 5px 14px; color: #5b6469; background: transparent; border: 1px solid transparent; border-radius: 999px; font-size: .8rem; font-weight: 700; }
 .reconcile-source button.active { color: #176b57; background: #fff; border-color: #bcdcd0; }
