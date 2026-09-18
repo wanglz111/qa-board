@@ -124,6 +124,45 @@ table { width: 100%; border-collapse: collapse; font-size: .8rem; } th { color: 
 .lark-panel-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
 .lark-panel-heading .ghost-button { min-height: 32px; }
 .lark-roles { margin-top: 14px; }.lark-roles .inline-status { margin: 0 0 12px; }
+/* Task 5：一行状态条 + 4 步向导的外壳（只新增；死规则的清理在 Task 7） */
+.lark-step { margin-bottom: 12px; background: #fff; border: 1px solid #dfe3e5; border-radius: 8px; }
+.lark-step-heading { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin: 0; padding: 12px 16px; font-size: .95rem; }
+.lark-step-title { display: inline-flex; align-items: center; gap: 8px; min-width: 0; padding: 0; color: #20242a; background: none; border: 0; font: inherit; font-weight: 750; text-align: left; }
+.lark-step-title:disabled { color: #9aa2a7; cursor: not-allowed; }
+.lark-step-index { flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; min-width: 24px; height: 22px; padding: 0 6px; color: #176b57; background: #eaf3f0; border-radius: 999px; font-size: .72rem; font-weight: 800; }
+.lark-step-summary { min-width: 0; color: #687178; font-size: .8rem; }
+.lark-step-body { padding: 0 16px 16px; }
+/* 四态：只改颜色与字重，序号胶囊的形状不变 —— 状态靠颜色说话，不靠布局跳动 */
+.lark-step-done .lark-step-title { color: #455158; font-weight: 700; }.lark-step-done .lark-step-index { color: #1c6b45; background: #e2f2e9; }
+.lark-step-open .lark-step-title { color: #176b57; }.lark-step-open .lark-step-index { color: #fff; background: #176b57; }
+.lark-step-todo .lark-step-title { color: #5b6469; }.lark-step-todo .lark-step-index { color: #7c858a; background: #f2f4f4; }
+.lark-step-attention .lark-step-title { color: #a23b36; }.lark-step-attention .lark-step-index { color: #a23b36; background: #fbeceb; }
+/* Task 5：状态条 —— 一行，颜色只沿用在用的色板 */
+.lark-health-strip { display: flex; align-items: center; gap: 7px; margin: 0 0 14px; }
+.lark-health-strip.ok { color: #1c6b45; }
+.lark-health-strip.warn { color: #8b620e; }
+.lark-health-strip.bad { color: #a23b36; }
+.lark-health-jump { padding: 0; color: inherit; background: none; border: 0; font: inherit; font-weight: 700; text-align: left; text-decoration: underline; }
+/* Task 5：第 ① 步 */
+.lark-step-tables { display: block; }
+.lark-role { margin-bottom: 14px; }.lark-role:last-of-type { margin-bottom: 6px; }
+.lark-role-tables { margin-top: 12px; }
+.lark-role-note { margin: 10px 0 0; color: #687178; font-size: .8rem; }
+.lark-verdict { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 10px; }
+.lark-verdict .inline-status { margin: 0; }
+/* Task 5：第 ③ 步 */
+.lark-approve .inline-status { margin: 0 0 8px; }
+/* Task 5：窄屏（骨架 §Global Constraints 第 9 条：360px 不许横向溢出）。
+   光靠 flex-wrap 不够：flex item 默认 min-width:auto，长行不会缩到内容盒以下，
+   所以标题与 summary 各自 min-width:0，并在 420px 以下各占一整行。 */
+@media (max-width: 420px) {
+  .lark-step-heading { padding: 10px 14px; }
+  .lark-step-body { padding: 0 14px 14px; }
+  .lark-step-title { flex: 1 1 100%; }
+  .lark-step-summary { flex: 1 1 100%; font-size: .76rem; }
+  .lark-health-strip { align-items: flex-start; }
+  .lark-role-note { font-size: .76rem; }
+}
 .reconcile-layout { max-width: 1040px; }
 .reconcile-layout .inline-status.reconcile-source-name { margin: 0; }
 .settings-panel { max-width: 900px; }
