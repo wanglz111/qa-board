@@ -22,6 +22,18 @@ def env_reporter(monkeypatch):
     )
 
 
+@pytest.fixture
+def no_env_reporter(monkeypatch):
+    """A deployment with no environment fallback, whatever the shell exported.
+
+    ``settings`` is built once at ``app.config``'s import from ``os.environ``, so
+    deleting the variable here would not reach it — the copy is what the module
+    actually reads.
+    """
+
+    monkeypatch.setattr(people, "settings", replace(settings, default_reporter_id=""))
+
+
 def test_an_unset_row_falls_back_to_the_environment_reporter(env_reporter, db_session):
     """A deployment that never opened the page keeps writing what it always did."""
 
@@ -73,7 +85,9 @@ def test_saving_twice_keeps_one_row(db_session):
 # endpoint commits), which is why ``effective_*`` is only meaningful after it.
 
 
-def test_the_settings_page_reads_and_writes_both_ids(authenticated_client, db_session):
+def test_the_settings_page_reads_and_writes_both_ids(
+    authenticated_client, db_session, no_env_reporter
+):
     assert authenticated_client.get("/api/lark/people").json() == {
         "reporter_open_id": "",
         "owner_open_id": "",
@@ -107,11 +121,14 @@ def test_a_name_where_an_open_id_belongs_is_refused(authenticated_client, db_ses
 
 
 # 约束 1 的边界：open_id 只认 ``^ou_[A-Za-z0-9_-]{1,64}\Z``，姓名、邮箱、
-# union_id 一律拒。每一类单独一条，红了就能看出漏的是哪一类。
+# union_id 一律拒。每一类单独一条，红了就能看出漏的是哪一类。两个量词边界
+# （``ou_`` 0 字符 / 65 字符）都在这里，上界 64 的"必须接受"在下面的
+# ``test_an_open_id_at_the_upper_bound_is_accepted``。
 REJECTED_OPEN_IDS = [
     "Max",  # 显示名
     "max@example.com",  # 邮箱
     "on_abc123",  # union_id 形状（不是 ou_ 前缀）
+    "ou_",  # 0 字符：量词下界，必须拒
     "ou_" + "a" * 65,  # 超长（64 是上限）
     "ou_ab c",  # 内部空格
     "ou_名字",  # 非 ASCII
@@ -121,7 +138,15 @@ REJECTED_OPEN_IDS = [
 @pytest.mark.parametrize(
     "rejected",
     REJECTED_OPEN_IDS,
-    ids=["display_name", "email", "union_id", "too_long", "inner_space", "non_ascii"],
+    ids=[
+        "display_name",
+        "email",
+        "union_id",
+        "too_short",
+        "too_long",
+        "inner_space",
+        "non_ascii",
+    ],
 )
 def test_anything_that_is_not_an_open_id_is_refused(authenticated_client, rejected):
     response = authenticated_client.put(
@@ -131,6 +156,50 @@ def test_anything_that_is_not_an_open_id_is_refused(authenticated_client, reject
 
     assert response.status_code == 422, response.text
     assert "ou_" in response.json()["detail"]
+
+
+def test_an_open_id_at_the_upper_bound_is_accepted(authenticated_client, db_session):
+    boundary = "ou_" + "a" * 64
+
+    response = authenticated_client.put(
+        "/api/lark/people", json={"reporter_open_id": boundary, "owner_open_id": ""}
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["reporter_open_id"] == boundary
+
+
+def test_the_pattern_refuses_a_trailing_newline_a_dollar_anchor_would_allow():
+    r"""``\Z``, not ``$``: ``$`` also matches just before a trailing newline.
+
+    The HTTP layer cannot see this difference — ``_checked`` strips before it
+    validates, so the newline is gone by the time the pattern runs (next test).
+    This one therefore pins the pattern itself, which is exactly the hole Task 4
+    closed when it turned ``$`` into ``\Z``; with ``$`` the first assertion fails.
+    """
+
+    assert people.OPEN_ID.match("ou_abc\n") is None
+    assert people.OPEN_ID.match("ou_abc") is not None
+
+
+def test_a_valid_id_padded_with_whitespace_is_stripped_not_refused(
+    authenticated_client,
+):
+    r"""A padded open id is cleaned, not refused: ``_checked`` strips first.
+
+    Stripping is what 约束 2 (纯空白 = 清空) is built on, so by the time the
+    pattern sees ``"ou_abc\n"`` it is already ``"ou_abc"``. That is why that
+    shape is pinned here and in the pattern test above, and **not** in
+    ``REJECTED_OPEN_IDS`` — over HTTP it is a 200, by design.
+    """
+
+    response = authenticated_client.put(
+        "/api/lark/people",
+        json={"reporter_open_id": "ou_abc\n", "owner_open_id": "\t"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["reporter_open_id"] == "ou_abc"
 
 
 def test_a_refused_id_leaves_the_saved_ones_untouched(authenticated_client):
@@ -152,7 +221,9 @@ def test_a_refused_id_leaves_the_saved_ones_untouched(authenticated_client):
     assert kept["owner_open_id"] == "ou_owner"
 
 
-def test_an_empty_box_clears_the_saved_id(authenticated_client, db_session):
+def test_an_empty_box_clears_the_saved_id(
+    authenticated_client, db_session, no_env_reporter
+):
     authenticated_client.put(
         "/api/lark/people",
         json={"reporter_open_id": "ou_reporter", "owner_open_id": ""},
@@ -191,3 +262,7 @@ def test_whitespace_only_clears_the_saved_id(authenticated_client, db_session):
 
 def test_the_page_needs_an_admin_session(client):
     assert client.get("/api/lark/people").status_code == 401
+
+
+def test_saving_the_people_needs_an_admin_session(client):
+    assert client.put("/api/lark/people", json={"reporter_open_id": "", "owner_open_id": ""}).status_code == 401
