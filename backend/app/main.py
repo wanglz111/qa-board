@@ -7,6 +7,7 @@ from app.db import database_is_ready
 from app.execution import router as execution_router
 from app.groups import router as groups_router
 from app.lark.history import router as lark_router
+from app.lark.people import router as lark_people_router
 from app.lark.outbox import router as lark_outbox_router
 from app.lark.provision import router as lark_provision_router
 from app.lark.reconcile import router as lark_reconcile_router
@@ -28,6 +29,7 @@ app.include_router(lark_outbox_router)
 app.include_router(lark_target_router)
 app.include_router(lark_provision_router)
 app.include_router(lark_reconcile_router)
+app.include_router(lark_people_router)
 app.include_router(prompts_router)
 
 
