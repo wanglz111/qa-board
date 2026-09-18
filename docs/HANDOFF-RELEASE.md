@@ -694,6 +694,53 @@ live base `LIhnb0ok7a1TMksi3t1jrVoLpke` 现有 5 张表，其中这两张是本�
 
 回滚：`cd /home/ubuntu/testdeck && ./deploy.sh v0.1.14`。本次是纯前端改动、无 schema 变更，回滚不需要恢复数据库；`sha-82a6005…` 那两个镜像是同一提交的锚点，用来重放这次部署，不是回滚目标。
 
-### 顺手记一笔：`import_tickets` 占 92 MB
+### 顺手记一笔：`import_tickets` 占 92 MB（**这里的判断是错的，见 §24**）
 
-备份体积从两小时前的 137 KB 涨到 501 KB，顺手查了一遍：`import_tickets` 15 行占 **92 MB**，是库里最大的对象（`group_cases` 617 行只有 1.4 MB）——每次导入都把整包 payload（含原型图）留在了这张表里。目前不影响发版，但导入次数一多，库与备份都会线性上涨。要处理有两条路：导入成功提交后就清掉 payload（只留摘要），或给这张表加一个按时间的清理任务。这里只记录现象与选项，**没有动它**。
+查备份时看到 `import_tickets` 15 行占 92 MB，当时写在这里的推断是"每次导入都把整包 payload 留在了表里，库与备份都会线性涨"。**两句都不准**：代码在确认导入（或票据过期）时就把 `original_file` 清成了空字节，`test_ticket_is_one_use_and_expired_ticket_is_rejected` 一直锁着这个行为；`pg_dump` 也只导出存活数据、不含死元组，所以备份变大是真实数据变多（14 组 / 617 条用例），与这 92 MB 无关。真因、修正与处理过程见 §24。
+
+## 24. `import_tickets` 的 92 MB：诊断、存量处理、防复发（**迁移待发布**）
+
+§23 里对这个现象的判断是错的，这一节是查清之后的结论。
+
+### 真因：是 TOAST 里的死元组，不是"payload 没清"
+
+```
+             堆         合计      存活   死元组   original_file 存活   parsed 存活
+处理前     16 kB       92 MB      15     11       15 字节             1.4 MB
+处理后   8192 bytes    416 kB     15      0       15 字节             1.4 MB
+```
+
+- 上传的整包是一个 `bytea`，PostgreSQL 把它放进这张表的 **TOAST** 关系；导入确认（或票据过期）时代码会把它清成空字节——**这一步一直是对的**，留着的那一行是墓碑，好让过期的页面拿到一个明确答复而不是 404。
+- 清空留下的是 **TOAST 死元组**。判据是 `pg_relation_size`（堆）只有 16 kB、而 `pg_total_relation_size` 是 92 MB——**空间全在 TOAST 里**；存活数据 `original_file` 合计只有 15 字节。
+- 为什么一直没人回收：这张表永远只有十几行，而 autovacuum 的默认触发线是 `50 + 0.2 × 存活行` ≈ 53 个死元组，**这张表永远到不了**（生产上 `last_autovacuum` 是 NULL）。于是死 TOAST 一路堆着。
+- 顺带修正 §23 的第二处：**备份体积与死元组无关**（`pg_dump` 只导出存活数据），137 KB → 501 KB 是真实数据增长。
+
+### 存量处理（已做：线上 2026-09-18 16:29）
+
+动手前已有一份完整备份（`backups/backup-20260918-160454.sql.gz`，501 KB，`gzip -t` 通过），然后执行：
+
+```bash
+sudo docker compose --env-file .env -f docker-compose.yml exec -T db \
+  psql -U testdeck -d testdeck -c "VACUUM (FULL, ANALYZE) import_tickets"
+```
+
+`VACUUM FULL` 会重写这张表与它的 TOAST，把空间还给操作系统（普通 `VACUUM` 只把空间标成可复用，文件不会缩小）。这条语句拿表级排他锁，而这张表只在导入时被写——执行时线上没有导入在跑。结果：**92 MB → 416 kB**、`n_dead_tup` 11 → 0，存活数据 15 行 / `parsed` 1.4 MB 一字未动。
+
+### 防复发（迁移 `0015_import_ticket_autovacuum`，待发布）
+
+把这张表自己的触发线降下来，让 autovacuum 在少数几次导入之后就来处理它（连同它的 TOAST）：
+
+```sql
+ALTER TABLE import_tickets SET (
+  autovacuum_vacuum_threshold = 5,
+  autovacuum_vacuum_scale_factor = 0);
+```
+
+- 表存储参数**不在 ORM 里**：SQLAlchemy 不接受这类 dialect kwarg（试过，直接 `ArgumentError`），所以它写在迁移里，模型上的 docstring 指回这个迁移，避免两处各说一套。
+- 测试：`tests/test_migrations.py` 断言 `pg_class.reloptions` 里带着这两个值，**并按 `current_schema()` 限定**——`relname = 'import_tickets'` 在测试库里会同时命中别的 schema 遗留的同名表（第一次就是这么读出 `None` 假阴性的）。
+- 这条断言验证过有牙齿：把迁移正文临时改成 `pass`，它当场红；恢复后 5 passed。
+- **迁移尚未发布，防复发目前还没生效**。存量那 92 MB 已经当场回收，所以不依赖发版；发版只是让"下一次积累到自己被回收"这件事在线上成立。
+
+### 另一条路（没走，留个记录）
+
+如果以后单次导入的包变得很大（几百兆），更彻底的做法是把 `original_file` 落到磁盘的临时目录、票据只存路径，确认/过期时删文件——那样根本不进 TOAST。现在没走：收益只是"更省数据库空间"，代价是给导入链路引入一套临时文件生命周期（漏删就是磁盘泄漏），当前规模不值当。
