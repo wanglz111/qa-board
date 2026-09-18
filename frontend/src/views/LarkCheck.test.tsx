@@ -1016,3 +1016,25 @@ it("follows the group onto a rebuilt table and drops the one it replaced", async
     bug_table_id: "tbl-fresh"
   });
 });
+
+// 门 1 的证伪线：这条用例在重写前必须是红的。
+const RESOLVED_MISSING_SCREENSHOT: LarkResolved = {
+  ...RESOLVED,
+  selected: { table_id: "tbl-runs", table_name: "执行记录", view_id: "vew-main" },
+  schema_errors: ["缺少必填字段「截图」"]
+};
+
+it("drops a stale header error when another table is selected", async () => {
+  const resolve = vi.fn().mockResolvedValue(RESOLVED_MISSING_SCREENSHOT);
+  renderCheck({ resolve, loadTarget: vi.fn().mockResolvedValue(TARGET_STATE) });
+
+  // 链接框在重写后会被 draftFromTarget 预填 → 先清空再输入：新旧两版页面都能跑，且重写后
+  // 不会因为「框里那段链接 ≠ 读出来的那段」被 baseIsCurrent 判成未读取。
+  const link = screen.getAllByLabelText("Lark 文档链接")[0];
+  await userEvent.clear(link);
+  await userEvent.type(link, RESOLVED.source_url);
+  await userEvent.click(screen.getByRole("button", { name: "读取表格" }));
+  await userEvent.selectOptions(await screen.findByLabelText("执行记录表"), "tbl-bugs");
+
+  expect(screen.queryByText(/缺少必填字段「截图」/)).toBeNull();
+});
