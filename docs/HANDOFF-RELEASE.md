@@ -32,8 +32,18 @@
 | `deploy/server/env.template` | `/home/ubuntu/testdeck/.env` | 唯一的配置与密钥文件，权限 0600，不进 Git |
 | `deploy/server/deploy.sh` | 可选，`scp` 到 `/home/ubuntu/testdeck/deploy.sh` | 改 tag → 拉镜像 → 重启 → 健康检查一条命令完成 |
 
-`.env` 里真正被读取的变量只有：`WEB_IMAGE`、`API_IMAGE`、`DATABASE_PASSWORD`、`ADMIN_EMAIL`、`ADMIN_PASSWORD`、`SESSION_SECRET`、`CSRF_SECRET`、`LARK_BASE_URL`、`LARK_APP_ID`、`LARK_APP_SECRET`。
+`.env` 里真正被读取的变量只有：`WEB_IMAGE`、`API_IMAGE`、`DATABASE_PASSWORD`、`ADMIN_EMAIL`、`ADMIN_PASSWORD`、`SESSION_SECRET`、`CSRF_SECRET`、`LARK_BASE_URL`、`LARK_APP_ID`、`LARK_APP_SECRET`、`DEFAULT_OWNER`、`DEFAULT_REPORTER`、`DEFAULT_REPORTER_ID`。
 执行表与缺陷表已经**不在环境变量里**：管理员在每个测试组的「Lark 检查」页面选择并确认（v0.1.2 起）。旧变量（`LARK_APP_TOKEN`、`LARK_BUG_APP_TOKEN`、`LARK_TABLE_RUNS`、`LARK_TABLE_DEFECTS`）可以留着，代码不读。
+
+三个 `DEFAULT_*` 的分工（v0.1.16 起）：
+
+| 变量 | 作用 | 什么时候生效 |
+| --- | --- | --- |
+| `DEFAULT_OWNER` | 执行表 `负责人` 是**文本列**时写进去的名字 | 只对遗留的文本列 |
+| `DEFAULT_REPORTER` | 执行表 `报告人` 是**文本列**时写进去的名字 | 只对遗留的文本列 |
+| `DEFAULT_REPORTER_ID` | 人员列 `报告人` / `反馈人` 的 open_id | **页面「设置」还没配过时的兜底** |
+
+写端按**该测试组目标表已存的 schema 指纹**逐表决定发显示名还是发 open_id：人员列只接受 `ou_` 开头的 open_id，拿不到就整列省略（不发名字，避免 Lark 拒掉整行）。页面「设置」里配的值存在 `lark_people` 表里，**优先于** `DEFAULT_REPORTER_ID`。`DEFAULT_REPORTER_ID` 若不是合法的 `ou_` 开头值会被忽略（当作没配）。
 
 ## 3. 账号
 
@@ -70,9 +80,9 @@ cd /home/lucascool/qa-board
 # 1) 和 CI 一致的验证（后端需要一个本地 PostgreSQL 测试库）
 cd backend
 TEST_DATABASE_URL=postgresql+psycopg://testdeck:testdeck@127.0.0.1:5433/testdeck_test \
-  .venv/bin/python -m pytest -q          # 期望 472 passed
+  .venv/bin/python -m pytest -q          # 期望 504 passed（v0.1.16）
 cd ../frontend
-npx vitest run                            # 期望 251 passed（20 文件）
+npx vitest run                            # 期望 256 passed（21 文件）
 npm run build                             # tsc -b + vite build；产物文件名是内容 hash，部署后拿来比对
 npx playwright test                       # 期望 31 passed
 cd ..
@@ -81,15 +91,15 @@ cd ..
 #    本机 origin 是 https 且没有存凭据，所以显式用 SSH 地址推送，
 #    或者先执行一次 git remote set-url origin git@github.com:wanglz111/qa-board.git
 git push git@github.com:wanglz111/qa-board.git main
-git tag -a v0.1.15 -m "v0.1.15"
-git push git@github.com:wanglz111/qa-board.git v0.1.15
+git tag -a v0.1.16 -m "v0.1.16"
+git push git@github.com:wanglz111/qa-board.git v0.1.16
 ```
 
 测试库不是常驻的：容器 `testdeck-task2-postgres`（`127.0.0.1:5433`，`testdeck/testdeck/testdeck_test`）可能处于 Exited，`docker start testdeck-task2-postgres` 几秒后 `pg_isready` 就绪即可。后端套件跑不起来时先看这里，别当成"环境没准备好"跳过。
 
 推送必须走 SSH：本机 `origin` 是 https 且没有存凭据，`git push origin …` 会直接报 `could not read Username for 'https://github.com'`。用上面的 `git@github.com:wanglz111/qa-board.git` 地址推，或先把 origin 换成 SSH 地址。SSH 走 `~/.ssh/config` 里 github.com 的 443 端口配置，开箱即用。
 
-远端现在是 `main` = `82a6005`，标签 `v0.1.15`。已合并的 `feature/cloud-testdeck` 本地分支已删除；**远端同名分支还在**，因为 GitHub 上这个仓库的默认分支仍指向它，`git push --delete` 会报 `refusing to delete the current branch`。要清掉它：先把默认分支改成 `main`（仓库 Settings → General → Default branch），再执行
+远端现在是 `main` = `4381bbe`，标签 `v0.1.16`。已合并的 `feature/cloud-testdeck` 本地分支已删除；**远端同名分支还在**，因为 GitHub 上这个仓库的默认分支仍指向它，`git push --delete` 会报 `refusing to delete the current branch`。要清掉它：先把默认分支改成 `main`（仓库 Settings → General → Default branch），再执行
 
 ```bash
 git push git@github.com:wanglz111/qa-board.git --delete feature/cloud-testdeck
@@ -744,3 +754,62 @@ ALTER TABLE import_tickets SET (
 ### 另一条路（没走，留个记录）
 
 如果以后单次导入的包变得很大（几百兆），更彻底的做法是把 `original_file` 落到磁盘的临时目录、票据只存路径，确认/过期时删文件——那样根本不进 TOAST。现在没走：收益只是"更省数据库空间"，代价是给导入链路引入一套临时文件生命周期（漏删就是磁盘泄漏），当前规模不值当。
+
+## 25. v0.1.16：缺陷表按模板列序 + 人员列可用页面配 open_id（已上线）
+
+计划与需求：`docs/superpowers/plans/2026-09-18-lark-header-alignment.md`、`docs/superpowers/specs/2026-09-18-lark-header-alignment-requirements.md`。16 个提交 / 23 个文件。
+
+### 这次改了什么
+
+1. **缺陷表默认列序**对齐团队交接用的模板多维表格（`问题描述 / 优先级 / 进展状态 / 反馈时间 / 反馈人 / 跟进人 / 备注 / 截图`）。**选项词表不动。**
+   - 为什么：之前把模板库整块粘贴进我们的表时列序不一致，值逐列串位，单选列把错位值当新选项自动创建——`优先级` 里混进了 10 个日期串、`进展状态` 里混进了 `P0/P1/P2`，全程不报错。
+   - 列序**不在 API 里可改**：Lark 建表时按你给的字段顺序落列、第一个字段即主列，之后只能重建或人工拖动。`schema_fingerprint()` 按**名字**排序，所以改列序**不会**让已确认的目标失效。
+2. **执行记录的 `负责人` / `报告人` 建表即人员列**（`FieldSpec(11, PERSON_PROPERTY)`）。
+3. **迁移 `0016_lark_people`**：单行表，`CHECK (id = 1)` 钉死；未配置落 `NULL` 而不是空串。
+4. **`GET` / `PUT /api/lark/people`** + 页面新增「设置」：两个输入框（报告人 / 负责人 open_id），报告人一处配置、两侧共用（执行表 `报告人` 与缺陷表 `反馈人`）。
+   - 只接受本应用名下的 `ou_` 开头 open_id（`^ou_[A-Za-z0-9_-]{1,64}\Z`）；姓名/邮箱/union_id 一律 422。
+   - 页面配的值存在 `lark_people` 里，**优先于** `DEFAULT_REPORTER_ID`；后者退化为兜底，且非法值会被忽略。
+5. **写入链路**：`write.execution_fields(owner_id=)` → `outbox.run_job(owner_id=)` → `worker` 从数据库解析。人员列拿不到 id 就**整列省略**（不发显示名，否则 Lark 拒掉整行）；文本列行为不变。
+6. **页面加载失败时禁止保存**：加载失败会让按钮 disabled、显示「（未知）」而不是「（空）」，避免一次点击把两个已存的 id 静默清空（后端把空串解释为"清空"）。
+7. **一次性清理脚本** `backend/scripts/lark_cleanup.py`（默认 dry-run）。
+
+### ⚠️ 一次真实数据事故（已恢复，记在这里）
+
+清理脚本 `--apply` 时，`PUT .../tables/{tbl}/fields/{fld}` 带 `property.options` **重建了整份选项表并重发 option id**，把 **13 行已有单元格的值清空**（执行记录 8 行的 `结果`/`优先级`、缺陷记录 5 行的 `进展状态`/`优先级`）——**连保留下来的那些选项所引用的值也一起没了**。
+
+- 原先的防护（"先删错位行再洗选项"）只覆盖**被删掉的**选项，没有覆盖"整表重建"。
+- 当初验证「PUT 是替换不是合并」用的探针表**一行数据都没有**，所以那个行为根本观察不到——**空表上验出来的"安全"是假安全**。
+- 发现方式：没有采信脚本自己的"复查 OK"，而是独立重读了一遍线上原始 `fields`。
+- 恢复：用清理前的 dump 按 `record_id` 逐行 `batch_update` 写回，再按 `record_id` 独立重读比对，**13/13 与清理前一致**。
+- 脚本随后经三轮修复：**快照 → 洗 → 写回 → 独立重读核对**；快照在第一个 PUT 之前落盘（含真实单元格值，跑完应手动删）；逐表写回异常隔离；选项复查进返回值；失败时打印**逐字可粘**的恢复命令（用 `compile` + `bash -n` + 真跑+哨兵三条证据验过）。
+
+### 需要人工做的事（**已做**，记下来备查）
+
+- 缺陷记录表列序：人工拖到模板顺序。
+- 执行记录 `负责人`/`报告人`：在 Lark 里改成人员列 —— **改完必须立刻在「Lark 检查」页重新读取并确认**。不重新确认的话，存的 schema 指纹还说"文本"，写端会继续发 `待指派`/`Max` 进人员列 → 每一行都被 Lark 拒、整组卡死。（2026-09-18 已确认线上两列都是 `person multiple=True`。）
+- 页面「设置」里配两个 open_id（负责人可留空）。
+
+### 上线记录（2026-09-18）
+
+| 项目 | 结果 |
+| --- | --- |
+| 合并 | `feat/lark-header-alignment` fast-forward 进 `main`（`02ccc72` → `4381bbe`），线性历史与仓库既有习惯一致 |
+| 本地验证（**合并后**重跑） | 后端 `504 passed`；前端 `256 passed (21 files)`；`npm run build` exit 0；`npx playwright test` **31 passed** |
+| 构建产物 | `dist/assets/index-li5seUpy.js`（旧版本是 `index-BUYWTlKF.js`） |
+| CI | run [#17](https://github.com/wanglz111/qa-board/actions/runs/35337372558) **success**：`verify`、`publish (api)`、`publish (web)` 三个 job 全绿 |
+| 镜像 | `ghcr.io/wanglz111/qa-board-{api,web}` 的 `v0.1.16` 与 `sha-4381bbe05f3ed9c26e2f3cca9f474ec5284e8e2b` 两个 tag 都存在（匿名 `docker manifest inspect` 确认） |
+| 服务器 | 部署前 `.env` 备份 + 数据库备份（`gzip -t` 通过）；`./deploy.sh v0.1.16`；`migrate` 退出码 **0**，`alembic_version` = **`0016_lark_people`**，`lark_people` 表存在 |
+| 容器 | 四个全部 `ghcr.io/wanglz111/qa-board-*:v0.1.16`，api healthy |
+| 验收 | `https://testdeck.gleaftex.com/health/ready` → `{"ok":true}`；`/api/groups` 未登录 → **401**；`/api/lark/people` 未登录 → **401** |
+| 产物比对 | 线上首页 bundle = **`assets/index-li5seUpy.js`**，与本地构建产物逐字一致 |
+| 新接口生产实调 | 管理员登录后 `GET /api/lark/people` 返回 `env_reporter_open_id` / `effective_reporter_open_id` = 服务器 `.env` 的合法 open_id（**说明新加的校验没有改变线上行为**），`owner_*` 为空 |
+| 回滚 | `cd /home/ubuntu/testdeck && ./deploy.sh v0.1.15`。`0016` 只新增一张单行表，旧镜像无视它，**回滚不需要恢复数据库** |
+
+### 已知未做（有意记录）
+
+- **清理脚本 `snapshot()` → `record_ids()` 之间的亚窗口**：这段时间新出现的行仍在基线里、不在快照里，既不报警也不恢复。静默窗口从"数秒"缩到"一次 records 列举"，**未完全闭合**。当前脚本已被数量闸锁死（库里 0 条错位行 ≠ 12，dry-run 直接退出 1），不可达；**若将来再用它，这是首要补项**。
+- **`batch_update` 未分片**（快照只有 8/5 行，远低于上限；数百行时需要按 500 一批切）。
+- **cleanup 脚本新增的两条分支没有仓库内测试**（`tests/` 从不驱动该脚本，验证用的假对象探针只存在于 /tmp 且已删）。
+- **`downgrade()` 在整个测试套件里零覆盖**（仓库既有全局缺口，非本次引入）。
+- 设置页标题缺兄弟视图都有的 `<p className="eyebrow">`；加载失败后视图内没有"重试"入口（切走再回来会重新挂载）。
+
