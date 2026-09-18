@@ -614,3 +614,42 @@ live base `LIhnb0ok7a1TMksi3t1jrVoLpke` 现有 5 张表，其中这两张是本�
 回滚：`cd /home/ubuntu/testdeck && ./deploy.sh v0.1.12`（纯前端改动，本次无 schema 变更，可直接回滚）。
 
 **线上没有做的一件事**：这次是纯前端改动，线上只验到"served bundle 与本地验证过的那份同名（内容 hash）+ 新标记确实在生产 bundle 里"，没有在浏览器里登录再走一遍执行页——避免把生产管理员口令写进终端与会话记录。需要视觉确认时，本地 mock 端口（见上节）与线上是同一份构建产物。
+
+## 22. v0.1.14：对账能删掉被删记录的本地行 + 测试组归档（已上线）
+
+两件事一起发：对账侧"表里删了、本地删不掉"的死结，和需求变更时把整组测试组退场的口子。
+
+### 这次改了什么
+
+- **对账（`e21cdcd`）**：管理员提错结果、又在 Lark 里把记录删掉后，本地那一行在对账里只能读成「仅本地」——点「采用表内记录」得到一句「表里没有这条记录」，点「保留本地记录」只是记了个决定，那条记录（以及它喂的进度与报告）永远清不掉：这套工具此前根本没有删除 attempt 的路径。
+  - 读：只有当这条 attempt 的上传留下了 record_id、而这个 id 不在**原始**读回的 id 集合里、且上传时的表格指纹等于当前表指纹（仅「当场读表」）时，才标 `remote_deleted`，页面显示「表里已删除」。用原始 id 而不是解析后的行，是因为「用例」字段被改坏的记录仍然是记录，把「看不懂」当「被删了」会诱人去删一条还在表里的本地副本。
+  - 写：新的 `delete_local` 会**绕开那 60 秒快照**当场重读一次表复核，再删 attempt（截图与上传记录走外键级联），提交后删磁盘文件，并且**不写 ReconcileMark**——label 会被重新分配，留一条旧 mark 会让下一条同名记录一出生就显示「已核对」、再也勾不动。`remote_deleted` 的行同时忽略此前记下的决定，否则它会一直停在「已核对」而无法操作。
+  - 页面把状态叫「表里已删除」（原来混在「仅本地」里），删除按钮只对真会消失的行点亮，并在动手前说清代价。
+- **测试组归档（`2bf6b85`）**：需求变更要重排用例时，把一个测试组退场。归档 = `groups.archived_at`（迁移 `0014_group_archive`）留时间戳；默认从 `GET /api/groups` 过滤掉（`include_archived=true` 才带出），而执行/报告/对账/Lark 检查四个页都读这一个接口，所以一处过滤全板干净。读仍然放行——「藏起来」不等于「删掉」。
+  - 写：6 个 router 声明同一个 dependency，非 GET 一律 409「该测试组已归档，请先恢复再操作」，`group_id` 或（attempt 级路由）经 attempt 反查；以后新增写路由自动被覆盖。`archive`/`restore` 两条路由本身不在守卫范围，否则恢复永远跑不起来。
+  - worker：归档组的待发任务 park 回 `pending`（`error_kind=group_archived`，租约释放），一个字节都不出网；恢复后队列自己接着跑，不用人工重试。
+  - **归档不动 Lark**：这个组以前写进表里的记录仍在原表。重新编排后重新导入会得到一个新的测试组（新 short_code、新 label），上一轮的记录会以「仅表里」出现在新组的对账里——要表也干净得在 Lark 侧处理或换一张执行表。这句话写在确认弹窗里。
+
+### 上线记录
+
+- `main` 从 `b14f658` 推进到 `2bf6b85`（两个提交：`e21cdcd`、`2bf6b85`），打 tag **`v0.1.14`**。
+- 镜像：`ghcr.io/wanglz111/qa-board-{api,web}` 的 **`v0.1.14`** 与 **`sha-2bf6b85e71deb573bbc53dba3c96ddc0c777c5a3`** 两个 tag 都已存在（tag 推送后约 2 分半，匿名 `docker manifest inspect` 确认；`sha-` 那组是回滚锚点）。**本次 CI 的 run 链接没有记**：匿名 GitHub API 配额当时已用尽（`core.remaining = 0`），而镜像存在即证明 `verify` 与两个 `publish` 都过了——查 CI 别轮询 API，直接看 GHCR。
+- 本地验证（`2bf6b85`）：后端 **472 passed**、前端 **215 passed / 18 files**、`npm run build` 干净（产物 `index-1ZWoocE3.js` / `index-7aFSDEjz.css`）、Playwright **30 passed**、`git diff --check` 干净。
+- 服务器：部署前数据库备份 `backups/backup-20260918-140025.sql.gz`（140 KB，`gzip -t` 通过），`.env` 备份为 `.env.bak-20260918-140417`，`./deploy.sh v0.1.14`，`migrate` 退出码 0（**本次有新迁移**：`0013_screenshot_content_hash` → `0014_group_archive`）。
+
+升级后的实测结果：
+
+| 检查 | 结果 |
+| --- | --- |
+| `docker compose ps` | api（healthy）、worker、web 全部 `ghcr.io/wanglz111/qa-board-*:v0.1.14`，db healthy |
+| `GET /health/ready` | 200 `{"ok":true}`（容器刚起来的瞬间 502，`deploy.sh` 的重试循环随后通过） |
+| 一次性 `migrate` | 退出码 0；`alembic_version` = `0014_group_archive` |
+| 新列 | `groups.archived_at`：`timestamp with time zone`、nullable |
+| 数据完好 | `groups` 8 行、其中 `archived_at is not null` **0 行**；`group_cases` 141 行（迁移没有误标任何组） |
+| 匿名 `GET /api/groups` | 401 |
+| 部署的 SPA 资源 | `index-1ZWoocE3.js` / `index-7aFSDEjz.css` —— 内容 hash 与本地验证过的构建产物同名，即同一份产物 |
+| 本次改动的证据 | 生产 JS 里 grep 到 `group-archive-dialog`、`表里已删除`、`删除本地记录`，CSS 里 grep 到 `group-archive-dialog` |
+| api / worker / migrate 日志 | 部署后 200 行内无 error / traceback |
+| 管理员登录 | **没有在生产上登录**（沿用 v0.1.13 的口径：不把生产口令写进终端与会话记录）。登录态下的行为由本地 472/215/30 与本地 mock 浏览器实测覆盖 |
+
+回滚：`cd /home/ubuntu/testdeck && ./deploy.sh v0.1.13`。`0014` 只新增一个可空列、不改任何既有列，旧版本镜像会直接无视它，所以**回滚不需要恢复数据库**；`sha-2bf6b85e71deb573bbc53dba3c96ddc0c777c5a3` 那两个镜像是同一提交的锚点，用来重放这次部署，不是回滚目标。
