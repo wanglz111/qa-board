@@ -676,4 +676,28 @@ describe("useLarkDraft", () => {
     // 迟到的那份响应属于旧链接：base 判为不当前，判决诚实地停在 unread
     expect(verdictFor(harness.result.current.draft, "execution")).toBe("unread");
   });
+
+  // A4 的边界：同名表 id 落在另一个 base 里时，它不是这次重建的对象，不许被拖走。
+  it("leaves the other role alone when the same table id lives in another base", async () => {
+    const harness = setup({
+      resolve: async (url) => (url === SWAP_URL ? SWAP_RESOLVED : RESOLVED)
+    });
+    const { result } = harness;
+    await readLink(harness, "execution", URL);
+    await readLink(harness, "bug", SWAP_URL);
+    expect(result.current.draft.bug.tableId).toBe("tbl-runs");
+
+    await act(async () => {
+      result.current.acceptRebuiltTable(
+        "execution",
+        { table_id: "tbl-new", name: "执行记录（新）" },
+        { table_id: "tbl-runs", name: "执行记录" }
+      );
+    });
+
+    expect(result.current.draft.execution.tableId).toBe("tbl-new");
+    // 缺陷库那个 base 里的 tbl-runs 没被重建，缺陷 role 留在它自己的表上
+    expect(result.current.draft.bug.tableId).toBe("tbl-runs");
+    expect(result.current.draft.bug.base?.base_token).toBe("app-swap");
+  });
 });

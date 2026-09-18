@@ -427,8 +427,14 @@ export function useLarkDraft(opts: Options): LarkDraftActions {
         viewId: null
       });
       // 另一个 role 若也指着被替换的这张表，必须一起跟随（复审 A4）：重建换掉的是表本身。
+      // 但只有同一个 base 里的同名表才算「同一张表」—— 另一个 base 里恰好同名的表不在
+      // 这次重建的范围内，把它拖到一张不属于它的新表上更糟。
       const other = otherRole(role);
-      const otherFollows = current[other].tableId === replaced.table_id;
+      const otherBase = effectiveBase(current, other);
+      const otherFollows =
+        current[other].tableId === replaced.table_id &&
+        otherBase !== null &&
+        otherBase.base_token === base.base_token;
       if (otherFollows) {
         next = withRole(next, other, {
           ...next[other],
@@ -439,12 +445,8 @@ export function useLarkDraft(opts: Options): LarkDraftActions {
       const applied = withBase(next, base, nextBase);
       setDraft(applied);
       void runCheck(role, base.base_token, table.table_id);
-      if (otherFollows) {
-        // 另一个 role 可能挂在别的 base 上：用改完之后对它真正生效的那个 base 去校验，
-        // 否则请求会发进一个不属于它的库（withSlot 会把结果丢掉）。
-        const otherBase = effectiveBase(applied, other);
-        if (otherBase) void runCheck(other, otherBase.base_token, table.table_id);
-      }
+      // otherFollows 已经保证另一个 role 用的是同一个 base，写回时不会串到别的库。
+      if (otherFollows) void runCheck(other, base.base_token, table.table_id);
     },
     [runCheck, onError]
   );
