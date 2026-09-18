@@ -72,24 +72,24 @@ cd backend
 TEST_DATABASE_URL=postgresql+psycopg://testdeck:testdeck@127.0.0.1:5433/testdeck_test \
   .venv/bin/python -m pytest -q          # 期望 472 passed
 cd ../frontend
-npx vitest run                            # 期望 215 passed（18 文件）
+npx vitest run                            # 期望 251 passed（20 文件）
 npm run build                             # tsc -b + vite build；产物文件名是内容 hash，部署后拿来比对
-npx playwright test                       # 期望 30 passed
+npx playwright test                       # 期望 31 passed
 cd ..
 
 # 2) 推送 main 和版本 tag（推送 tag 才会触发镜像发布）
 #    本机 origin 是 https 且没有存凭据，所以显式用 SSH 地址推送，
 #    或者先执行一次 git remote set-url origin git@github.com:wanglz111/qa-board.git
 git push git@github.com:wanglz111/qa-board.git main
-git tag -a v0.1.13 -m "v0.1.13"
-git push git@github.com:wanglz111/qa-board.git v0.1.13
+git tag -a v0.1.15 -m "v0.1.15"
+git push git@github.com:wanglz111/qa-board.git v0.1.15
 ```
 
 测试库不是常驻的：容器 `testdeck-task2-postgres`（`127.0.0.1:5433`，`testdeck/testdeck/testdeck_test`）可能处于 Exited，`docker start testdeck-task2-postgres` 几秒后 `pg_isready` 就绪即可。后端套件跑不起来时先看这里，别当成"环境没准备好"跳过。
 
 推送必须走 SSH：本机 `origin` 是 https 且没有存凭据，`git push origin …` 会直接报 `could not read Username for 'https://github.com'`。用上面的 `git@github.com:wanglz111/qa-board.git` 地址推，或先把 origin 换成 SSH 地址。SSH 走 `~/.ssh/config` 里 github.com 的 443 端口配置，开箱即用。
 
-远端现在是 `main` = `d88ab0d`，标签 `v0.1.13`。已合并的 `feature/cloud-testdeck` 本地分支已删除；**远端同名分支还在**，因为 GitHub 上这个仓库的默认分支仍指向它，`git push --delete` 会报 `refusing to delete the current branch`。要清掉它：先把默认分支改成 `main`（仓库 Settings → General → Default branch），再执行
+远端现在是 `main` = `82a6005`，标签 `v0.1.15`。已合并的 `feature/cloud-testdeck` 本地分支已删除；**远端同名分支还在**，因为 GitHub 上这个仓库的默认分支仍指向它，`git push --delete` 会报 `refusing to delete the current branch`。要清掉它：先把默认分支改成 `main`（仓库 Settings → General → Default branch），再执行
 
 ```bash
 git push git@github.com:wanglz111/qa-board.git --delete feature/cloud-testdeck
@@ -111,14 +111,14 @@ cd /home/ubuntu/testdeck
 
 # 备份当前 .env，再改两个镜像 tag
 cp .env .env.bak-$(date +%F-%H%M%S)
-sed -i -E 's|^(WEB_IMAGE=ghcr\.io/[^:]+):.*|\1:v0.1.13|; s|^(API_IMAGE=ghcr\.io/[^:]+):.*|\1:v0.1.13|' .env
+sed -i -E 's|^(WEB_IMAGE=ghcr\.io/[^:]+):.*|\1:v0.1.15|; s|^(API_IMAGE=ghcr\.io/[^:]+):.*|\1:v0.1.15|' .env
 
 # 拉取并重启；migrate 服务会在 db 健康后自动跑 alembic upgrade head + bootstrap
 sudo docker compose --env-file .env -f docker-compose.yml up -d --pull always
 sudo docker compose --env-file .env -f docker-compose.yml ps
 ```
 
-服务器上已经放好了 `deploy.sh`，上面三步可以合成一条：`./deploy.sh v0.1.13`。
+服务器上已经放好了 `deploy.sh`，上面三步可以合成一条：`./deploy.sh v0.1.15`。
 
 ### 4.4 验收（每次发版都做）
 
@@ -655,3 +655,45 @@ live base `LIhnb0ok7a1TMksi3t1jrVoLpke` 现有 5 张表，其中这两张是本�
 | 管理员登录 | **没有在生产上登录**（沿用 v0.1.13 的口径：不把生产口令写进终端与会话记录）。登录态下的行为由本地 472/215/30 与本地 mock 浏览器实测覆盖 |
 
 回滚：`cd /home/ubuntu/testdeck && ./deploy.sh v0.1.13`。`0014` 只新增一个可空列、不改任何既有列，旧版本镜像会直接无视它，所以**回滚不需要恢复数据库**；`sha-2bf6b85e71deb573bbc53dba3c96ddc0c777c5a3` 那两个镜像是同一提交的锚点，用来重放这次部署，不是回滚目标。
+
+## 23. v0.1.15：原型长图能缩放了（主窗口与画中画）（已上线）
+
+用例的「原型参考图」通常是一张长截图，而查看器此前用 `object-fit: contain` 适配：图片被压到"整张高度可见"为止，一张 480×1600 的移动端页面在 900px 高的视口里只剩约 185px 宽，字根本读不出来。这次换掉的是**适配模型**，不是加一个放大按钮。
+
+### 这次改了什么
+
+- 图片改为在滚动舞台里按「原始尺寸 × 比例」布局（`frontend/src/imageZoom.ts` 纯函数 + `ImageZoomDialog` 组件）：打开即**适应宽度**，长图直接可读；1:1 保持像素精确；滚动、触控板惯性、翻页交给浏览器，不再手写平移。
+- 捏合在浏览器里到达页面时是 ctrl+wheel，而 React 的 wheel 监听是 passive、拦不住它（不拦的话浏览器会缩放整页），所以监听是手工挂的非被动监听；delta 按像素/行/页归一（行模式按像素读会让一格手势小 16 倍）。
+- 手势只累积目标比例，画面由 `requestAnimationFrame` 每帧缓动逼近、并逐帧重钉锚点：触控板交来的是粗事件（Windows 精密触控板约 25px/次，原来正好是看得见的 5% 一跳），缓动才让它读成连续运动。浏览器实测：24 次事件渲染 **81 个中间尺寸**、帧时间中位=最大 **17ms**、**无长任务**。适应宽度 / 1:1 / 步进按钮 / 关注点跳转仍是瞬时落地，工具条读数就等于你点的那一档。
+- 比舞台窄的图片会被 auto margin 居中，而这个位移随缩放增长会消失——它被算进了锚点数学，否则视图会漂掉半个差值。
+- 滚动目标只在舞台真的装得下当前比例时才写：写早了浏览器会拿旧的、更矮的布局把它夹掉（StrictMode 会把副作用跑两遍，"只写一次"从来不是安全的假设）。这是本次实测抓出来的两个真 bug 之一：点关注点后 `scrollTop` 停在 910 而不是 3577。
+- 关注点框按归一化坐标叠在图上（无需像素换算即跟随任意缩放）；列表项与查看器里的胶囊都能跳过去、脉冲高亮，并把查看器切成手动模式，之后窗口尺寸变化不会把视图抢回适应宽度。
+- 缺陷截图预览复用同一个查看器——失败截图常常和原型一样长。画中画里是同一个组件，会按 PiP 窗口宽度重新适应。
+
+### 上线记录
+
+- `main` 从 `e354202` 推进到 `82a6005`（两个提交：`c13d614` dev mock 换长图、`82a6005` 查看器），打 tag **`v0.1.15`**。这次推送顺带把此前只在本地、且已随 v0.1.14 发布的 3 个提交（`2bf6b85` 测试组归档 + 两个 v0.1.14 文档提交）送上了远端。
+- CI：run [#35322143479](https://github.com/wanglz111/qa-board/actions/runs/35322143479) **success**（08:00:04 → 08:03:18，`head_sha` = `82a6005`）：`verify` 115s、`publish (api)` 33s、`publish (web)` 71s。
+- 镜像：`ghcr.io/wanglz111/qa-board-{api,web}` 的 **`v0.1.15`** 与 **`sha-82a60052445ac9abcc59d2124238075cd1391ec8`** 四个 tag 都已存在（匿名 `docker manifest inspect` 确认）。
+- 本地验证（`82a6005`）：后端 **472 passed**、前端 **251 passed / 20 files**、`npm run build` 干净（产物 `index-BUYWTlKF.js` / `index-BpehFnVH.css`）、Playwright **31 passed**、`git diff --check` 干净。
+- 服务器：部署前数据库备份 `backups/backup-20260918-160454.sql.gz`（501 KB，`gzip -t` 通过），`.env` 备份为 `.env.bak-20260918-160513`，`./deploy.sh v0.1.15`，`migrate` 退出码 0（**本次无迁移**）。
+
+升级后的实测结果：
+
+| 检查 | 结果 |
+| --- | --- |
+| `docker compose ps` | api（healthy）、worker、web 全部 `ghcr.io/wanglz111/qa-board-*:v0.1.15`，db healthy |
+| `GET /health/ready` | 200 `{"ok":true}`（容器刚起来的瞬间 502，`deploy.sh` 的重试循环随后通过） |
+| 一次性 `migrate` | 退出码 0；`alembic_version` = `0014_group_archive`（与 v0.1.14 相同，本次没有迁移） |
+| 匿名 `GET /api/groups` | 401 |
+| 部署的 SPA 资源 | `index-BUYWTlKF.js` / `index-BpehFnVH.css` —— 内容 hash 与本地验证过的构建产物同名，即同一份产物 |
+| 本次改动的证据 | 生产 JS 里 grep 到 `image-zoom-dialog`（1 次）与 `适应宽度`（1 次），CSS 里 grep 到 `image-zoom-stage`（1 次） |
+| 数据完好 | `groups` 14、`group_cases` 617、`attempts` 15、`screenshots` 8（部署前后一致） |
+| api / worker / migrate 日志 | 部署后 200 行内 error / traceback 计数 **0 / 0 / 0** |
+| 管理员登录 | **没有在生产上登录**（沿用 v0.1.13 / v0.1.14 的口径：不把生产口令写进终端与会话记录）。交互本身在本地 mock（同一份构建产物）用浏览器实测过 |
+
+回滚：`cd /home/ubuntu/testdeck && ./deploy.sh v0.1.14`。本次是纯前端改动、无 schema 变更，回滚不需要恢复数据库；`sha-82a6005…` 那两个镜像是同一提交的锚点，用来重放这次部署，不是回滚目标。
+
+### 顺手记一笔：`import_tickets` 占 92 MB
+
+备份体积从两小时前的 137 KB 涨到 501 KB，顺手查了一遍：`import_tickets` 15 行占 **92 MB**，是库里最大的对象（`group_cases` 617 行只有 1.4 MB）——每次导入都把整包 payload（含原型图）留在了这张表里。目前不影响发版，但导入次数一多，库与备份都会线性上涨。要处理有两条路：导入成功提交后就清掉 payload（只留摘要），或给这张表加一个按时间的清理任务。这里只记录现象与选项，**没有动它**。
