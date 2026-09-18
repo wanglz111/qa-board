@@ -700,4 +700,84 @@ describe("useLarkDraft", () => {
     expect(result.current.draft.bug.tableId).toBe("tbl-runs");
     expect(result.current.draft.bug.base?.base_token).toBe("app-swap");
   });
+
+  // 复审 Important 1：resolve 可能跨过复位才落地，那份响应属于上一份 draft。
+  // 链接刻意用 target 里逐字相同的那段：baseIsCurrent 会重新成立，光靠它挡不住。
+  it("drops a read that was still in flight when the draft was reset to a target", async () => {
+    let release: (value: LarkResolved) => void = () => undefined;
+    const resolve = vi.fn(
+      () =>
+        new Promise<LarkResolved>((settle) => {
+          release = settle;
+        })
+    );
+    const harness = setup({ resolve });
+    const { result, readTableSchema } = harness;
+
+    await act(async () => {
+      result.current.setLink("execution", URL);
+    });
+    let pending: Promise<TableRole | null> = Promise.resolve(null);
+    await act(async () => {
+      pending = result.current.readLink("execution");
+    });
+
+    // 读取还在飞的时候，页面重新预填了一份已保存的目标
+    await act(async () => {
+      result.current.resetDraft(TARGET);
+    });
+
+    let returned: TableRole | null = "bug";
+    await act(async () => {
+      release({
+        ...RESOLVED,
+        selected: { table_id: "tbl-bugs", table_name: "缺陷记录", view_id: null }
+      });
+      returned = await pending;
+    });
+
+    // 被复位作废：这次读取不算数
+    expect(result.current.draft.execution.tableId).toBe("tbl-runs");
+    expect(effectiveBase(result.current.draft, "execution")).toBeNull();
+    expect(verdictFor(result.current.draft, "execution")).toBe("unread");
+    expect(verdictFor(result.current.draft, "bug")).toBe("unread");
+    // 也不顺手校验缺陷表，读到的链接返回 null
+    expect(readTableSchema).not.toHaveBeenCalled();
+    expect(returned).toBeNull();
+  });
+
+  it("drops a read that was still in flight when the group changed", async () => {
+    let release: (value: LarkResolved) => void = () => undefined;
+    const resolve = vi.fn(
+      () =>
+        new Promise<LarkResolved>((settle) => {
+          release = settle;
+        })
+    );
+    const harness = setup({ resolve });
+    const { result, rerender, readTableSchema } = harness;
+
+    await act(async () => {
+      result.current.setLink("execution", URL);
+    });
+    let pending: Promise<TableRole | null> = Promise.resolve(null);
+    await act(async () => {
+      pending = result.current.readLink("execution");
+    });
+
+    await act(async () => {
+      rerender({ groupId: "group-2" });
+    });
+
+    let returned: TableRole | null = "bug";
+    await act(async () => {
+      release(RESOLVED);
+      returned = await pending;
+    });
+
+    // 上一组的响应不许落进新组的 draft
+    expect(result.current.draft).toEqual(emptyDraft());
+    expect(readTableSchema).not.toHaveBeenCalled();
+    expect(returned).toBeNull();
+  });
 });

@@ -173,6 +173,11 @@ export function useLarkDraft(opts: Options): LarkDraftActions {
 
   // 双击「读取表格」不该发两次 resolve（复审 E1）。
   const readInFlight = useRef<Set<TableRole>>(new Set());
+  // 复位（换组 / resetDraft）会让上一份 draft 作废。await 是没法取消的：resolve 可能跨过
+  // 复位才落地，那份响应属于旧 draft，不许写进来 —— 读之前记下自己那一代，落地时对不上
+  // 就整个作废（复审 Important 1）。新 target 用同一段链接时 baseIsCurrent 会重新成立，
+  // 光靠它挡不住这种「陈旧的 base 又变回当前」的情形。
+  const generation = useRef(0);
 
   const syncFlightKeys = useCallback(() => {
     setFlightKeys([...inFlight.current.keys()]);
@@ -185,6 +190,8 @@ export function useLarkDraft(opts: Options): LarkDraftActions {
 
   useEffect(() => {
     // 换了测试组：draft 复位（行为契约）。上一组的链接、base、判决都不属于这一组。
+    // 在飞的那次读取也随之作废（generation）。
+    generation.current += 1;
     setDraft(emptyDraft());
     setReading(null);
     inFlight.current.clear();
@@ -270,11 +277,15 @@ export function useLarkDraft(opts: Options): LarkDraftActions {
       // 双击「读取表格」不该发两次 resolve（复审 E1）。
       if (readInFlight.current.has(role)) return null;
       readInFlight.current.add(role);
+      const startedGeneration = generation.current;
       setReading(role);
       let result: TableRole | null = null;
       let pending: { role: TableRole; baseToken: string; tableId: string } | null = null;
       try {
         const resolved = await resolve(url);
+        // 这份响应属于哪一份 draft？复位过就作废：不写 base、不改选中、也不顺手校验
+        // 缺陷表（复审 Important 1）。返回 null = 这次读取没有生效。
+        if (generation.current !== startedGeneration) return null;
         const selected = resolved.selected.table_id ?? resolved.tables[0]?.table_id ?? "";
         const current = draftRef.current;
         const probes: Record<string, ProbeSlot> = {};
@@ -452,6 +463,8 @@ export function useLarkDraft(opts: Options): LarkDraftActions {
   );
 
   const resetDraft = useCallback((target: LarkTarget | null) => {
+    // 复位 = 之前读到的东西都不算数（含还在飞的那次读取）：draft 本身只由 target 预填。
+    generation.current += 1;
     setDraft(draftFromTarget(target));
   }, []);
 
