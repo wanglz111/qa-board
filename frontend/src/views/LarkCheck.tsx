@@ -23,7 +23,7 @@ import {
   type Table,
   type TableRole
 } from "../api";
-import { HeaderSetup } from "../components/HeaderSetup";
+import { StepHeaders } from "../components/lark/StepHeaders";
 import { TargetChangeDialog, type TargetSide } from "../components/TargetChangeDialog";
 
 type Props = {
@@ -701,23 +701,30 @@ export function LarkCheckView({
         </button>
 
         {target && loadPlan && provision ? (
-          <HeaderSetup
+          <StepHeaders
             groupId={groupId}
-            loadPlan={loadPlan}
+            target={target}
+            busy={busy}
             provision={provision}
             retype={retype}
-            onChanged={reloadAfterProvision}
-            targetFingerprint={target.target_fingerprint}
-            schemaFingerprint={target.schema_fingerprint}
             createTable={createTable}
             rebuild={rebuild}
-            onTableRebuilt={acceptRebuiltTable}
+            loadPlan={loadPlan}
+            resetKey={`${groupId}|${target.target_fingerprint}`}
+            targetFingerprint={target.target_fingerprint}
+            schemaFingerprint={target.schema_fingerprint}
             bases={{ execution: executionBaseToken, bug: bugBaseToken }}
             tableNames={{
               execution: target.execution_table_name,
               bug: target.bug_table_name
             }}
+            onChanged={reloadAfterProvision}
+            // Task 6 把它接给 `useLarkDraft` 的「作废该 role 的 probe + 重校验」。
+            // 本 task 只做最小替换，页面还没有 draft，所以这里是空实现：回调的
+            // 契约由 StepHeaders.test.tsx 的三条用例钉住，接线归 Task 6。
+            onRoleFixed={() => {}}
             onTableCreated={acceptCreatedTable}
+            onTableRebuilt={acceptRebuiltTable}
           />
         ) : null}
       </div>
