@@ -323,6 +323,10 @@ export function useLarkDraft(opts: Options): LarkDraftActions {
         }
         result = role;
       } catch (reason) {
+        // 失败路径必须过与成功路径同一道代际闸门（复审 I2）：这份 rejection 可能跨过换组/复位
+        // 才落地，它属于上一份 draft —— 报出去就是在新组的页面上凭空印一行旧组的错误
+        // （新组什么都没读，却顶着一条「读取 Lark 表格失败」）。作废即可，一个字都不出口。
+        if (generation.current !== startedGeneration) return null;
         onError(messageOf(reason, role === "bug" ? "读取缺陷表失败" : "读取 Lark 表格失败"));
         result = null;
       } finally {

@@ -780,4 +780,42 @@ describe("useLarkDraft", () => {
     expect(readTableSchema).not.toHaveBeenCalled();
     expect(returned).toBeNull();
   });
+
+  // 复审 I2：失败路径必须过与成功路径同一道代际闸门。成功路径有 generation 检查，catch 里
+  // 却没有 —— 读取还在飞时换组，随后 reject，旧组的错误会被印进新组的页面（新组什么都没读，
+  // 却在标题下多出一行「读取 Lark 表格失败」）。这份失败属于上一份 draft，一个字都不许出口。
+  it("does not report a rejection that landed after the group changed", async () => {
+    let reject: (reason: unknown) => void = () => undefined;
+    const resolve = vi.fn(
+      () =>
+        new Promise<LarkResolved>((_settle, rejectWith) => {
+          reject = rejectWith;
+        })
+    );
+    const harness = setup({ resolve });
+    const { result, rerender } = harness;
+
+    await act(async () => {
+      result.current.setLink("execution", URL);
+    });
+    let pending: Promise<TableRole | null> = Promise.resolve(null);
+    await act(async () => {
+      pending = result.current.readLink("execution");
+    });
+
+    await act(async () => {
+      rerender({ groupId: "group-2" });
+    });
+
+    let returned: TableRole | null = "bug";
+    await act(async () => {
+      reject(new Error("读取 Lark 表格失败"));
+      returned = await pending;
+    });
+
+    // 陈旧的失败不许落进新组：不报错、draft 是干净的、这次读取也不算数
+    expect(harness.onError).not.toHaveBeenCalled();
+    expect(result.current.draft).toEqual(emptyDraft());
+    expect(returned).toBeNull();
+  });
 });
