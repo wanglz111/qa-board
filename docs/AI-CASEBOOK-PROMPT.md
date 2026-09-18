@@ -31,7 +31,7 @@
 12. 只有图上确实能指出具体位置时才写 `focus`：`{ "label": "确认按钮", "note": "文案应为「确认购买」", "box": [x, y, w, h] }`，坐标 0–1 归一化；写不出坐标就只留 `label`（`note` 可选）。
 13. 三处集合必须完全一致：`assets/` 文件、`assets` 对象 key、被 `references` 引用到的 key。不要导出没有被任何用例引用的图片。
 14. 不要输出 Base64，不要输出图片二进制，不要联网抓图。
-15. 每条用例都必须带 `priority` 和 `layer`：沿用「已有用例」里该条的「优先级」和「执行分层」，分别写进 `priority`（只能 `P0` / `P1` / `P2`）和 `layer`（只能 `Smoke` / `Core` / `Regression`），写法与枚举完全一致，不要改名、不要换大小写。已有用例没写这两个值、或某条确实判断不出来时，**先停下来问我**（一次把缺的条目列清楚），不要自己猜、也不允许省略：漏写不会报错，但优先级和执行分层会整批丢失，属于缺陷。
+15. 每条用例都必须带 `priority` 和 `layer`：沿用「已有用例」里该条的「优先级」和「执行分层」，分别写进 `priority`（只能 `P0` / `P1` / `P2`）和 `layer`（只能 `Smoke` / `Core` / `Regression`），写法与枚举完全一致，不要改名、不要换大小写。已有用例写的是中文分层时按 冒烟层→`Smoke`、核心层→`Core`、完整层 / 回归层→`Regression` 映射后再输出，不要照抄中文——`layer` 是严格枚举，写中文会被校验器整包拒绝。已有用例没写这两个值、或某条确实判断不出来时，**先停下来问我**（一次把缺的条目列清楚），不要自己猜、也不允许省略：漏写不会报错，但优先级和执行分层会整批丢失，属于缺陷。
 
 **JSON Schema（必须逐条满足）**
 
@@ -198,7 +198,7 @@
 5. 所有 `not_verifiable` 都带了 `visual.note`，其它 check 都至少有一条 `references`？
 6. `box` 是否都是 0–1 之间的 4 个数字？
 7. `expect_absent` 只放了明确要求「不应出现」的内容？
-8. 逐条核对（不是抽查）每条用例的 `priority` 和 `layer` 都写了，且取值分别在 `P0`/`P1`/`P2` 与 `Smoke`/`Core`/`Regression` 之内？
+8. 逐条核对（不是抽查）每条用例的 `priority` 和 `layer` 都写了，且取值分别在 `P0`/`P1`/`P2` 与 `Smoke`/`Core`/`Regression` 之内（`layer` 必须是英文枚举，「冒烟层 / 核心层 / 完整层」不算）？
 
 【需求】
 （在这里粘贴 PRD / 页面说明）
@@ -230,6 +230,7 @@
 | --- | --- |
 | 用例里漏写 `priority` / `layer` | 导入不报错，但优先级和执行分层整批丢失，Lark 里全部显示 P2（见第一部分硬性要求第 15 条） |
 | `"priority": "p0"` / `"layer": "smoke"` | `cases[0].priority: expected one of P0\|P1\|P2`（枚举大小写严格） |
+| `"layer": "冒烟层"` | `cases[0].layer: expected one of Smoke\|Core\|Regression`（中文分层是硬失败，整包 422） |
 | 顶层多写 `"slices": [...]` | `casebook.json: unknown field(s) slices` |
 | 用例里写 `"steps": "1. 打开页面"` | `cases[0].steps: must be an array of strings` |
 | `"role": "Expected"` | `references[0].role: expected one of expected\|locator` |

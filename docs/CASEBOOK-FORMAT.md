@@ -273,7 +273,7 @@ odyssey-casebook.zip
 - 不做类型转换：`steps`/`expected` 必须是字符串数组，写成字符串失败；`position` 必须是 1–2147483647 的整数；`box` 必须是 4 个 0–1 的有限数字（`NaN`/`Infinity` 拒绝）。
 - 可省字段只有两种写法：按类型写对，或整个不写，显式写 `null` 会被拒绝（`position`、`focus`、`box` 等出现即按类型校验）。
 - `priority` / `layer` 不在 `cases[]` 的 `required` 里，漏写不会 422 作废——所以提示词把这两个字段定成 AI 的**必填纪律**（`AI-CASEBOOK-PROMPT.md` 第一部分硬性要求第 15 条、输出前自检第 8 条）。漏写不会当场失败，只会静默落成缺陷：库里 `group_cases.priority` / `layer` 为 NULL，Lark 执行表的「优先级」整批落成默认 P2。改提示词可以，但不要靠放松校验来「让空值通过」。
-- 枚举精确匹配（大小写不宽容）：`role`、`type`、`check`、`priority`、`layer`。
+- 枚举精确匹配（大小写不宽容）：`role`、`type`、`check`、`priority`、`layer`。`layer` 只有 `Smoke` / `Core` / `Regression` 三个英文值，源用例写「冒烟层 / 核心层 / 完整层」时要在提示词侧映射成英文枚举——中文分层在这里是硬失败；CSV / Markdown 导入端不校验分层，同一批用例走两条导入路径会落成两种写法。
 - 三处集合必须完全一致：`assets/` 下的文件名（去扩展名）、`assets` 对象的 key、被 `references[].asset` 引用到的 key。多一张没被引用、少一张被引用、引用不存在的 key，全部拒绝。
 - 用例 `code` 必须匹配 `<字母/数字>-<数字>` 且包内唯一；给了 `position` 就必须包内唯一；用例数 1–5000。
 - ZIP 内 `casebook.json` 恰好一份；图片只允许 PNG / JPEG / WebP 且必须能完整解码；ZIP ≤ 100 MB，解压后 ≤ 250 MB，单张图 ≤ 20 MB、≤ 5000 万像素。
