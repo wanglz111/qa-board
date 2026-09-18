@@ -526,3 +526,39 @@ live base `LIhnb0ok7a1TMksi3t1jrVoLpke` 现有 5 张表，其中这两张是本�
 - 复现与验证用的临时页面已删除。
 
 **部署后要做的一件事**：升级后随便点一次「把已保存的本地结果排入同步」，面板会写出每条卡住行的真实原因。若是权限类（`Forbidden` / `permission`），按提示在 Lark 开放平台开通「查看、评论、编辑和管理多维表格」并把应用加为该多维表格的可编辑协作者；若提示字段类型，用「修正表头类型」或「重建数据表」。线上未验证（本轮没有真实 Lark 凭证），首次部署后请按上面这行确认。
+
+## 20. v0.1.12：执行台续做 + 四条保存路径修复 + 附件幂等（已上线）
+
+「执行台续做」这一整条分支（保存后自动前进 / 表单复位 / 缺陷备注带用例 / 进度方格）连同四条保存路径缺陷一起上线。四条缺陷的清单、复现证据与仍开放项在 `docs/superpowers/specs/2026-09-17-execution-flow-and-grid-design.md` 的**附录 G**；本节只记发版与实测。
+
+### 这次改了什么
+
+- **O1** 幂等键带上 group：两个组里的同编号用例不再共用一把 key。此前第二次保存会收到 `409 Idempotency key conflict`，而重试铸出的 key 不变（签名没变）——是卡死的报错循环，不是静默丢结果（附录 G 原先的措辞本轮已更正）。
+- **O10** 保存的 `catch` 按错误来源分措辞：行已入库后的读取失败不再喊「保存失败…可重试」；预留路径的**原样**重试保持幂等（预留退租挪到读取链完成之后），**改载荷**重试则明确告知「已经提交过，这次修改没有保存：刷新页面后可重新提交」。
+- **O3 / O2** 保存飞行期间禁用 LegacyHistory 的「复测（新标签）」按钮（顺带关掉了「保存落地后自动前进丢掉刚预留的重测」那条入口）；在飞状态由布尔改成计数器，预留的 `finally` 不再释放保存的 spinner。
+- **O11** 附件上传按 attempt + 字节 hash 幂等（迁移 `0013_screenshot_content_hash`）：同一张图重传只留**一行一个文件**；两个上传竞争时输家回滚、删掉自己刚写的文件、答赢家那行。**前端未改**——重传从「制造重复」变成「无害重放」。
+- **O4** 复核后确认现场代码本来就是「可证新才采纳」（同一用例文本 + 结果 + 控制台 + **同一毫秒的 `日期`**，缺陷表那条超时路径干脆不采纳），findings 里的旧条目用的是旧 API 形状；本轮补了一条「现场有旧行时必须不采纳」的回归测试把它钉住（去掉 `and same_date` 即复现成 `synced`）。
+- 新增 `backend/scripts/integration_probe.py`：起真 uvicorn + 真 Postgres（一次性 schema，用完即 drop，不发 Lark 请求），把此前只靠读码得出的 409 分支变成实测。
+
+### 上线记录
+
+- `main` 先推进到 `f9b1bc7`（快进 30 个提交）并打 tag **`v0.1.11`**：GitHub Actions [#35294165817](https://github.com/wanglz111/qa-board/actions/runs/35294165817) success，镜像已进 GHCR；**该版本未部署**。
+- O4 / O11 收口后 `main` 推进到 `a882951` 并打 tag **`v0.1.12`**；镜像 `ghcr.io/wanglz111/qa-board-{api,web}:v0.1.12` 已在 GHCR（匿名 `docker manifest inspect` 可见 → `verify` 与两个 `publish` 均通过；同一 commit 另有 `sha-<完整 sha>` 标签）。
+- 服务器执行 `./deploy.sh v0.1.12`：`.env` 备份为 `.env.bak-20260918-092916`，部署前数据库备份 `backups/backup-20260918-092915.sql.gz`（137 KB，`gzip -t` 通过）；`migrate` 退出码 0，日志 `0011_case_reference_assets -> 0012_sync_job_last_error -> 0013_screenshot_content_hash`。
+- 本地验证（`a882951`）：后端 **446 passed**、前端 **206 passed / 18 files**、`npm run build` 干净、Playwright **25 passed / 0 failed**、集成探针 **9/9**、`git diff --check` 干净。
+
+升级后的实测结果：
+
+| 检查 | 结果 |
+| --- | --- |
+| `docker compose ps` | api（healthy）、worker、web 全部 `ghcr.io/wanglz111/qa-board-*:v0.1.12`，db healthy |
+| `GET /health/ready` | 200 `{"ok":true}`（容器刚起来的瞬间 502，`deploy.sh` 的重试循环随后通过） |
+| `alembic_version` | `0013_screenshot_content_hash` |
+| `screenshots` 列 / 索引 | 含 `content_hash`；`pg_indexes` 含 `uq_screenshot_attempt_hash` |
+| 匿名 `GET /api/groups` | 401 |
+| 管理员登录 + `/api/auth/me` | 200 / 200（账号未被重置） |
+| 无 CSRF 的 mutation | 403 |
+
+回滚：`cd /home/ubuntu/testdeck && ./deploy.sh v0.1.11`（或 `v0.1.10`）。本次只有一个**加列**迁移，回滚镜像后多出的 `content_hash` 列与唯一索引不影响旧版本读写；要彻底回退 schema 可 `alembic downgrade 0012_sync_job_last_error`。
+
+**线上未验证的一件事**：附件去重的真实效果（同一张图重传只落一行）是在本地真服务端探针里验的；线上只验到迁移与索引存在，没有为验证而往生产库写一条测试记录。
