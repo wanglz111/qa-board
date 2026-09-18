@@ -10,7 +10,7 @@
   O10 已提交的预留 + 改载荷重试      -> 409 `Attempt is already committed`（UI 不该邀请这种重试）
   O10 该用例的 committed 行数        -> 仍为 1，没有多写一行
   O8  没人提交的预留                -> 停在 `started` 且列表里看不到（没有清理路径）
-  O11 同一张图上传两次              -> 两行 + 磁盘两个文件（重复机制）
+  O11 同一张图上传两次              -> 只留一行一个文件（重传是重放，不是重复）
 
 用法（本地测试库必须先起来）：
 
@@ -239,7 +239,7 @@ try:
             f"committed rows for B-002 = {len(listed)}",
         )
 
-        # --- O11: the same image twice
+        # --- O11: the same image twice (a replay now, not a duplicate)
         image = png_bytes()
         upload_one = client.post(
             f"/api/attempts/{attempt_id}/screenshots",
@@ -251,13 +251,13 @@ try:
         )
         files_on_disk = sorted(p.name for p in UPLOADS.iterdir()) if UPLOADS.exists() else []
         check(
-            "O11 / the same bytes uploaded twice store two rows and two files",
+            "O11 / the same bytes uploaded twice for one attempt are stored once",
             upload_one.status_code == 201
             and upload_two.status_code == 201
-            and upload_one.json()["id"] != upload_two.json()["id"]
-            and len(files_on_disk) == 2,
+            and upload_one.json()["id"] == upload_two.json()["id"]
+            and len(files_on_disk) == 1,
             f"first={upload_one.status_code} second={upload_two.status_code} "
-            f"distinct_rows={upload_one.json().get('id') != upload_two.json().get('id')} "
+            f"same_row={upload_one.json().get('id') == upload_two.json().get('id')} "
             f"files={len(files_on_disk)}",
         )
 
