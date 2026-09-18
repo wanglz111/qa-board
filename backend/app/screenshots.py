@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from io import BytesIO
 from pathlib import Path
 from typing import Annotated, Any
@@ -8,6 +9,8 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse
 from PIL import Image, UnidentifiedImageError
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.auth import require_admin
@@ -71,6 +74,19 @@ def screenshot_payload(screenshot: Screenshot) -> dict[str, Any]:
     }
 
 
+def _already_stored(
+    db: Session, attempt_id: UUID, content_hash: str
+) -> Screenshot | None:
+    """The row this attempt already holds for these bytes, if any."""
+
+    return db.scalar(
+        select(Screenshot).where(
+            Screenshot.attempt_id == attempt_id,
+            Screenshot.content_hash == content_hash,
+        )
+    )
+
+
 @router.post(
     "/attempts/{attempt_id}/screenshots",
     status_code=status.HTTP_201_CREATED,
@@ -86,6 +102,16 @@ async def upload_screenshot(
 
     content = await image.read(MAX_UPLOAD_BYTES + 1)
     mime = _detected_mime(content)
+    content_hash = hashlib.sha256(content).hexdigest()
+    # The same bytes for the same attempt are the same evidence: the retry after
+    # a partial upload (or a second tab) answers with the row that is already
+    # there rather than filing the picture twice and leaving a file nobody
+    # references. The unique index behind this lookup is what holds when two
+    # uploads of one picture race.
+    existing = _already_stored(db, attempt.id, content_hash)
+    if existing is not None:
+        return screenshot_payload(existing)
+
     storage_key = f"{uuid4().hex}{FORMAT_SUFFIX[mime]}"
     storage_path = _storage_path(storage_key)
     storage_path.parent.mkdir(parents=True, exist_ok=True)
@@ -100,6 +126,7 @@ async def upload_screenshot(
     screenshot = Screenshot(
         attempt_id=attempt.id,
         storage_key=storage_key,
+        content_hash=content_hash,
         mime=mime,
         size_bytes=len(content),
     )
@@ -110,6 +137,16 @@ async def upload_screenshot(
         # before this upload landed could never carry the picture.
         hold_job_for_evidence(db, attempt)
         db.commit()
+    except IntegrityError:
+        # Two uploads of the same bytes raced past the lookup. The loser keeps
+        # nothing of its own — not the row, not the file — and answers with the
+        # winner's, which is what the retry was asking for in the first place.
+        db.rollback()
+        storage_path.unlink(missing_ok=True)
+        winner = _already_stored(db, attempt.id, content_hash)
+        if winner is None:
+            raise
+        return screenshot_payload(winner)
     except Exception:
         db.rollback()
         storage_path.unlink(missing_ok=True)

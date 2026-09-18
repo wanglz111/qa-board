@@ -170,12 +170,26 @@ class Attempt(Base):
 
 class Screenshot(Base):
     __tablename__ = "screenshots"
+    __table_args__ = (
+        # One attempt holds a given picture once. The same bytes uploaded again —
+        # the retry a partial failure invites — answer with the row that is
+        # already there instead of filing the image twice in Lark and leaving a
+        # second file behind. Rows written before the column existed keep a NULL
+        # hash, and Postgres treats NULLs as distinct, so they are never
+        # deduplicated against.
+        UniqueConstraint(
+            "attempt_id", "content_hash", name="uq_screenshot_attempt_hash"
+        ),
+    )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     attempt_id: Mapped[UUID] = mapped_column(
         ForeignKey("attempts.id", ondelete="CASCADE"), nullable=False
     )
     storage_key: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    # SHA-256 of the stored bytes: what makes uploading the same picture twice a
+    # no-op rather than a duplicate.
+    content_hash: Mapped[str | None] = mapped_column(String(64))
     mime: Mapped[str] = mapped_column(String, nullable=False)
     size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
     created_at: Mapped[datetime] = mapped_column(

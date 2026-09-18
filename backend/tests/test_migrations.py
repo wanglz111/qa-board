@@ -35,7 +35,7 @@ def test_empty_test_schema_upgrades_to_head_twice(migrated_database):
     with migrated_database.connect() as connection:
         assert set(inspect(connection).get_table_names()) == EXPECTED_TABLES
         assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-            "0012_sync_job_last_error"
+            "0013_screenshot_content_hash"
         )
         assert "target_fingerprint" in {
             column["name"] for column in inspect(connection).get_columns("sync_jobs")
@@ -44,6 +44,14 @@ def test_empty_test_schema_upgrades_to_head_twice(migrated_database):
         # the row and not a log line.
         assert "last_error" in {
             column["name"] for column in inspect(connection).get_columns("sync_jobs")
+        }
+        # Uploading one picture twice for one attempt is a no-op, and the index is
+        # what makes that hold when two uploads race.
+        assert "content_hash" in {
+            column["name"] for column in inspect(connection).get_columns("screenshots")
+        }
+        assert "uq_screenshot_attempt_hash" in {
+            index["name"] for index in inspect(connection).get_indexes("screenshots")
         }
         assert "source" in {
             column["name"] for column in inspect(connection).get_columns("attempts")
@@ -166,7 +174,7 @@ def test_short_code_backfill_keeps_existing_groups_addressable(database_at_0004)
 
     with database_at_0004.connect() as connection:
         assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-            "0012_sync_job_last_error"
+            "0013_screenshot_content_hash"
         )
         assert connection.scalar(
             text("SELECT short_code FROM groups WHERE id = :id"), {"id": group_id}

@@ -1,9 +1,11 @@
 from io import BytesIO
 from uuid import uuid4
 
+import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from app import screenshots
 from app.main import app
@@ -163,3 +165,129 @@ def test_an_attempt_payload_lists_its_screenshots(
             "created_at": shot["created_at"],
         }
     ]
+
+
+def test_the_same_picture_for_one_attempt_is_stored_once(
+    authenticated_client, attempt_id, valid_png, upload_dir, db_session
+):
+    first = authenticated_client.post(
+        f"/api/attempts/{attempt_id}/screenshots",
+        files={"image": ("first.png", valid_png, "image/png")},
+    )
+    # The retry a partial upload invites: the same picture, another file name.
+    second = authenticated_client.post(
+        f"/api/attempts/{attempt_id}/screenshots",
+        files={"image": ("second.png", valid_png, "image/png")},
+    )
+
+    assert first.status_code == 201
+    assert second.status_code == 201
+    assert second.json()["id"] == first.json()["id"]
+    assert second.json()["storage_key"] == first.json()["storage_key"]
+    rows = db_session.scalars(
+        select(Screenshot).where(Screenshot.attempt_id == attempt_id)
+    ).all()
+    assert len(rows) == 1
+    # One row means one file: the retry wrote nothing to clean up, and Lark's
+    # attachment list carries the picture once.
+    assert [path.name for path in upload_dir.iterdir()] == [first.json()["storage_key"]]
+
+
+def test_two_different_pictures_for_one_attempt_are_both_kept(
+    authenticated_client, attempt_id, valid_png, upload_dir, db_session
+):
+    other = BytesIO()
+    Image.new("RGB", (3, 3), (9, 9, 9)).save(other, format="PNG")
+    first = authenticated_client.post(
+        f"/api/attempts/{attempt_id}/screenshots",
+        files={"image": ("first.png", valid_png, "image/png")},
+    )
+    second = authenticated_client.post(
+        f"/api/attempts/{attempt_id}/screenshots",
+        files={"image": ("second.png", other.getvalue(), "image/png")},
+    )
+
+    assert first.status_code == 201
+    assert second.status_code == 201
+    assert first.json()["id"] != second.json()["id"]
+    rows = db_session.scalars(
+        select(Screenshot).where(Screenshot.attempt_id == attempt_id)
+    ).all()
+    assert len(rows) == 2
+    assert len(list(upload_dir.iterdir())) == 2
+
+
+def test_the_database_refuses_a_second_row_for_the_same_bytes(
+    authenticated_client, attempt_id, valid_png, upload_dir, db_session
+):
+    created = authenticated_client.post(
+        f"/api/attempts/{attempt_id}/screenshots",
+        files={"image": ("shot.png", valid_png, "image/png")},
+    )
+    row = db_session.scalar(
+        select(Screenshot).where(Screenshot.id == created.json()["id"])
+    )
+
+    # The lookup in the route is the fast path; the unique index is the guarantee
+    # behind it, so a writer that skips the lookup — or two uploads that race past
+    # it — still cannot file the same bytes for one attempt twice.
+    with pytest.raises(IntegrityError):
+        with db_session.begin_nested():
+            db_session.add(
+                Screenshot(
+                    attempt_id=attempt_id,
+                    storage_key="a-second-file.png",
+                    content_hash=row.content_hash,
+                    mime="image/png",
+                    size_bytes=row.size_bytes,
+                )
+            )
+            db_session.flush()
+
+    assert (
+        len(
+            db_session.scalars(
+                select(Screenshot).where(Screenshot.attempt_id == attempt_id)
+            ).all()
+        )
+        == 1
+    )
+
+
+def test_a_racing_duplicate_answers_with_the_row_that_won(
+    monkeypatch, authenticated_client, attempt_id, valid_png, upload_dir, db_session
+):
+    first = authenticated_client.post(
+        f"/api/attempts/{attempt_id}/screenshots",
+        files={"image": ("first.png", valid_png, "image/png")},
+    )
+
+    # Blind the fast lookup on its first call so the route takes the insert path,
+    # exactly as a second upload that raced past that lookup would. The insert
+    # then loses on the unique index, and the route has to answer with the row
+    # that won instead of a 500 — and clean up the file it had already written.
+    real_lookup = screenshots._already_stored
+    calls = {"n": 0}
+
+    def blind_once(db, attempt_id, content_hash):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return None
+        return real_lookup(db, attempt_id, content_hash)
+
+    monkeypatch.setattr(screenshots, "_already_stored", blind_once)
+
+    second = authenticated_client.post(
+        f"/api/attempts/{attempt_id}/screenshots",
+        files={"image": ("second.png", valid_png, "image/png")},
+    )
+
+    assert second.status_code == 201
+    assert second.json()["id"] == first.json()["id"]
+    assert calls["n"] == 2
+    rows = db_session.scalars(
+        select(Screenshot).where(Screenshot.attempt_id == attempt_id)
+    ).all()
+    assert len(rows) == 1
+    # The loser's file is gone: the winner's is the only one left on disk.
+    assert [path.name for path in upload_dir.iterdir()] == [first.json()["storage_key"]]
