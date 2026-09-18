@@ -371,4 +371,40 @@ describe("useLarkDraft", () => {
     expect(verdictFor(result.current.draft, "execution")).toBe("bad");
     expect(verdictFor(result.current.draft, "bug")).toBe("ok");
   });
+
+  // 表头缺列 → bad；修好表头后（第二次校验）→ ok。这是 provision / retype 之后的主路径。
+  it("recheckRole recomputes the verdict after the headers are repaired", async () => {
+    const state = { repaired: false };
+    const readTableSchema = vi.fn(async (_base: string, tableId: string) => ({
+      table_id: tableId,
+      fields: { 用例: "text" },
+      required: ["用例", "截图"],
+      schema_errors: state.repaired ? [] : ["缺少必填字段「截图」"]
+    }));
+    const badResolved: LarkResolved = {
+      ...RESOLVED,
+      schema_errors: ["缺少必填字段「截图」"]
+    };
+    const harness = setup({ resolve: async () => badResolved, readTableSchema });
+
+    await readLink(harness, "execution", URL);
+    expect(verdictFor(harness.result.current.draft, "execution")).toBe("bad");
+
+    state.repaired = true;
+    await act(async () => {
+      await harness.result.current.recheckRole("execution");
+    });
+    expect(verdictFor(harness.result.current.draft, "execution")).toBe("ok");
+  });
+
+  it("invalidateRole drops the verdict back to unread", async () => {
+    const harness = setup();
+    await readLink(harness, "execution", URL);
+    expect(verdictFor(harness.result.current.draft, "execution")).toBe("ok");
+
+    await act(async () => {
+      harness.result.current.invalidateRole("execution");
+    });
+    expect(verdictFor(harness.result.current.draft, "execution")).toBe("unread");
+  });
 });

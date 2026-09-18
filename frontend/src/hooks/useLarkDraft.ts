@@ -24,6 +24,8 @@ export type LarkDraftActions = {
   readLink: (role: TableRole) => Promise<TableRole | null>;
   setTable: (role: TableRole, tableId: string) => void;
   checkTable: (role: TableRole) => Promise<void>;
+  invalidateRole: (role: TableRole) => void;          // 作废该 role 当前表的 probe
+  recheckRole: (role: TableRole) => Promise<void>;    // = invalidateRole + checkTable
   acceptCreatedTable: (role: TableRole, table: Table) => void;
   acceptRebuiltTable: (role: TableRole, table: Table, replaced: Table) => void;
   resetDraft: (target: LarkTarget | null) => void;
@@ -275,6 +277,35 @@ export function useLarkDraft(opts: Options): LarkDraftActions {
     [runCheck]
   );
 
+  const invalidateRole = useCallback((role: TableRole) => {
+    setDraft((current) => {
+      const base = effectiveBase(current, role);
+      const tableId = current[role].tableId;
+      if (!base || !tableId) return current;
+      // 表头变了，对这张表的结论就不再成立：这张表的 probe 一律作废（同库时另一个
+      // role 的 probe 挂的是同一张表的表头，跟着一起作废），别的表不动。
+      const next: LarkBase = {
+        ...base,
+        probes: withoutTableProbes(base.probes, tableId)
+      };
+      return withBase(current, base, next);
+    });
+  }, []);
+
+  const recheckRole = useCallback(
+    async (role: TableRole): Promise<void> => {
+      // 先取 base/tableId，再作废：作废只清 probe，不动这两个值。
+      const current = draftRef.current;
+      const base = effectiveBase(current, role);
+      const tableId = current[role].tableId;
+      if (!base || !tableId) return;
+      invalidateRole(role);
+      // 不带 base 复用：runCheck 自己会按 baseToken 写回，切了 base 就写不进去（那是正确行为）。
+      await runCheck(role, base.base_token, tableId);
+    },
+    [invalidateRole, runCheck]
+  );
+
   const acceptCreatedTable = useCallback(
     (role: TableRole, table: Table) => {
       const current = draftRef.current;
@@ -349,6 +380,8 @@ export function useLarkDraft(opts: Options): LarkDraftActions {
     readLink,
     setTable,
     checkTable,
+    invalidateRole,
+    recheckRole,
     acceptCreatedTable,
     acceptRebuiltTable,
     resetDraft
