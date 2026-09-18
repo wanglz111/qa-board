@@ -80,6 +80,7 @@ export default function App() {
           <LarkCheckView
             loadGroups={api.groups}
             resolve={api.resolveLark}
+            readTableSchema={api.larkTableSchema}
             loadTarget={api.larkTarget}
             saveTarget={api.saveLarkTarget}
             confirmTarget={api.confirmLarkTarget}

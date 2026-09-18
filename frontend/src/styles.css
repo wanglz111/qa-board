@@ -138,11 +138,11 @@ table { width: 100%; border-collapse: collapse; font-size: .8rem; } th { color: 
 .lark-step-todo .lark-step-title { color: #5b6469; }.lark-step-todo .lark-step-index { color: #7c858a; background: #f2f4f4; }
 .lark-step-attention .lark-step-title { color: #a23b36; }.lark-step-attention .lark-step-index { color: #a23b36; background: #fbeceb; }
 /* Task 5：状态条 —— 一行，颜色只沿用在用的色板 */
-.lark-health-strip { display: flex; align-items: center; gap: 7px; margin: 0 0 14px; }
+.lark-health-strip { display: flex; align-items: center; gap: 7px; margin: 0 0 14px; min-width: 0; overflow-wrap: anywhere; }
 .lark-health-strip.ok { color: #1c6b45; }
 .lark-health-strip.warn { color: #8b620e; }
 .lark-health-strip.bad { color: #a23b36; }
-.lark-health-jump { padding: 0; color: inherit; background: none; border: 0; font: inherit; font-weight: 700; text-align: left; text-decoration: underline; }
+.lark-health-jump { padding: 0; color: inherit; background: none; border: 0; font: inherit; font-weight: 700; text-align: left; text-decoration: underline; min-width: 0; overflow-wrap: anywhere; }
 /* Task 5：第 ① 步 */
 .lark-step-tables { display: block; }
 .lark-role { margin-bottom: 14px; }.lark-role:last-of-type { margin-bottom: 6px; }
