@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 import type { ReferenceAsset, ReferenceFocus } from "../api";
@@ -124,4 +124,35 @@ it("opens a zoom dialog and closes it with Escape", async () => {
   await userEvent.keyboard("{Escape}");
 
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+});
+
+it("opens the viewer landed on the focus box the operator picked", async () => {
+  // jsdom has no layout, so the stage is told how big it is: landing on a box
+  // is arithmetic against a container width.
+  Object.defineProperty(HTMLElement.prototype, "clientWidth", {
+    configurable: true,
+    get: () => 1000
+  });
+  Object.defineProperty(HTMLElement.prototype, "clientHeight", {
+    configurable: true,
+    get: () => 800
+  });
+  try {
+    render(
+      <ReferenceGallery
+        assets={[asset({ id: "a1", name: "节点发售", focus: [focus] })]}
+        assetUrl={url}
+      />
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "放大查看关注点 确认按钮" }));
+
+    const dialog = screen.getByRole("dialog", { name: "节点发售" });
+    expect(within(dialog).getByRole("button", { name: "确认按钮" })).toHaveClass("active");
+    // 0.3 * 340px wide box, 60% of a 1000px stage -> capped at 3x.
+    expect(within(dialog).getByRole("button", { name: /当前缩放 300%/ })).toBeVisible();
+  } finally {
+    delete (HTMLElement.prototype as unknown as { clientWidth?: number }).clientWidth;
+    delete (HTMLElement.prototype as unknown as { clientHeight?: number }).clientHeight;
+  }
 });

@@ -1,28 +1,49 @@
-import { useEffect, useRef, useState } from "react";
-import { ChevronLeft, ChevronRight, X } from "lucide-react";
+import { useEffect, useState } from "react";
+import { ChevronLeft, ChevronRight } from "lucide-react";
 
 import type { ReferenceAsset, ReferenceFocus } from "../api";
+import { ImageZoomDialog } from "./ImageZoomDialog";
 
 type Props = {
   assets: ReferenceAsset[];
   assetUrl: (assetId: string) => string;
 };
 
-function FocusList({ focus }: { focus: ReferenceFocus[] }) {
+// A focus box is only useful once the operator can see where it is, so an item
+// that carries one opens the viewer on that box instead of just naming a
+// percentage nobody can locate by eye.
+function FocusList({ focus, onJump }: { focus: ReferenceFocus[]; onJump?: (index: number) => void }) {
   if (focus.length === 0) return null;
   return (
     <ul className="reference-gallery-focus">
-      {focus.map((item) => (
-        <li key={item.label}>
-          <strong>{item.label}</strong>
-          {item.note ? <span>{item.note}</span> : null}
-          {item.box ? (
-            <span className="reference-gallery-box">
-              {item.box.map((value) => `${Math.round(value * 100)}%`).join(" / ")}
-            </span>
-          ) : null}
-        </li>
-      ))}
+      {focus.map((item, index) => {
+        const body = (
+          <>
+            <strong>{item.label}</strong>
+            {item.note ? <span>{item.note}</span> : null}
+            {item.box ? (
+              <span className="reference-gallery-box">
+                {item.box.map((value) => `${Math.round(value * 100)}%`).join(" / ")}
+              </span>
+            ) : null}
+          </>
+        );
+        return (
+          <li key={item.label}>
+            {onJump && item.box ? (
+              <button
+                type="button"
+                aria-label={`放大查看关注点 ${item.label}`}
+                onClick={() => onJump(index)}
+              >
+                {body}
+              </button>
+            ) : (
+              body
+            )}
+          </li>
+        );
+      })}
     </ul>
   );
 }
@@ -34,23 +55,26 @@ export function ReferenceGallery({ assets, assetUrl }: Props) {
   const locators = assets.filter((asset) => asset.role === "locator");
   const [index, setIndex] = useState(0);
   const [zoomed, setZoomed] = useState(false);
-  const dialog = useRef<HTMLDivElement>(null);
+  // The box to land on when the viewer opens; null opens fitted to the width.
+  const [focusTarget, setFocusTarget] = useState<number | null>(null);
 
   useEffect(() => {
     setIndex(0);
     setZoomed(false);
+    setFocusTarget(null);
   }, [assets]);
-
-  // Focus the overlay so its own keys win over the execution shortcuts.
-  useEffect(() => {
-    if (zoomed) dialog.current?.focus();
-  }, [zoomed]);
 
   if (primary.length === 0) return null;
   const current = primary[Math.min(index, primary.length - 1)];
 
   function step(delta: number) {
+    setFocusTarget(null);
     setIndex((value) => Math.min(Math.max(value + delta, 0), primary.length - 1));
+  }
+
+  function open(box: number | null) {
+    setFocusTarget(box);
+    setZoomed(true);
   }
 
   return (
@@ -66,7 +90,7 @@ export function ReferenceGallery({ assets, assetUrl }: Props) {
         type="button"
         className="reference-gallery-main"
         aria-label={`放大查看 ${current.name}`}
-        onClick={() => setZoomed(true)}
+        onClick={() => open(null)}
       >
         <img src={assetUrl(current.id)} alt={current.name} />
       </button>
@@ -74,7 +98,7 @@ export function ReferenceGallery({ assets, assetUrl }: Props) {
         <span>{current.caption ?? current.name}</span>
         {current.prototype_version ? <em>原型 {current.prototype_version}</em> : null}
       </p>
-      <FocusList focus={current.focus} />
+      <FocusList focus={current.focus} onJump={open} />
       {primary.length > 1 ? (
         <div className="reference-gallery-stepper">
           <button
@@ -115,39 +139,17 @@ export function ReferenceGallery({ assets, assetUrl }: Props) {
         </div>
       ) : null}
       {zoomed ? (
-        <div
-          className="reference-gallery-dialog"
-          role="dialog"
-          aria-modal="true"
-          aria-label={current.name}
-          tabIndex={-1}
-          ref={dialog}
-          onKeyDown={(event) => {
-            if (event.key === "Escape") {
-              event.stopPropagation();
-              setZoomed(false);
-            } else if (event.key === "ArrowLeft") {
-              event.stopPropagation();
-              step(-1);
-            } else if (event.key === "ArrowRight") {
-              event.stopPropagation();
-              step(1);
-            }
-          }}
-        >
-          <div className="reference-gallery-dialog-bar">
-            <span>{current.name}</span>
-            <button
-              type="button"
-              className="icon-button"
-              aria-label="关闭原型图"
-              onClick={() => setZoomed(false)}
-            >
-              <X size={17} />
-            </button>
-          </div>
-          <img src={assetUrl(current.id)} alt={current.name} />
-        </div>
+        <ImageZoomDialog
+          src={assetUrl(current.id)}
+          alt={current.name}
+          title={current.name}
+          closeLabel="关闭原型图"
+          onClose={() => setZoomed(false)}
+          natural={{ width: current.width, height: current.height }}
+          focus={current.focus}
+          initialFocus={focusTarget}
+          onStep={primary.length > 1 ? step : undefined}
+        />
       ) : null}
     </section>
   );

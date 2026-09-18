@@ -2,6 +2,7 @@ import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "re
 import { ImagePlus, LoaderCircle, RotateCcw, Save, X } from "lucide-react";
 
 import type { AttemptResult } from "../api";
+import { ImageZoomDialog } from "./ImageZoomDialog";
 
 export type SaveInput = {
   result: AttemptResult;
@@ -49,7 +50,6 @@ function ImagePreview({
 }) {
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [zoomed, setZoomed] = useState(false);
-  const dialog = useRef<HTMLDivElement>(null);
   const displayName = file.name || "粘贴的截图";
 
   useEffect(() => {
@@ -57,10 +57,6 @@ function ImagePreview({
     setPreviewUrl(objectUrl);
     return () => URL.revokeObjectURL(objectUrl);
   }, [file]);
-
-  useEffect(() => {
-    if (zoomed) dialog.current?.focus();
-  }, [zoomed]);
 
   return (
     <li className="attachment-preview">
@@ -87,33 +83,13 @@ function ImagePreview({
       </div>
       <span className="attachment-name" title={displayName}>{displayName}</span>
       {zoomed && previewUrl ? (
-        <div
-          className="reference-gallery-dialog"
-          role="dialog"
-          aria-modal="true"
-          aria-label={displayName}
-          tabIndex={-1}
-          ref={dialog}
-          onKeyDown={(event) => {
-            if (event.key === "Escape") {
-              event.stopPropagation();
-              setZoomed(false);
-            }
-          }}
-        >
-          <div className="reference-gallery-dialog-bar">
-            <span>{displayName}</span>
-            <button
-              type="button"
-              className="icon-button"
-              aria-label="关闭图片预览"
-              onClick={() => setZoomed(false)}
-            >
-              <X size={17} />
-            </button>
-          </div>
-          <img src={previewUrl} alt={displayName} />
-        </div>
+        <ImageZoomDialog
+          src={previewUrl}
+          alt={displayName}
+          title={displayName}
+          closeLabel="关闭图片预览"
+          onClose={() => setZoomed(false)}
+        />
       ) : null}
     </li>
   );

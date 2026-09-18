@@ -1,6 +1,36 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
 
+import type { ReferenceAsset } from "../src/api";
 import { toneOf } from "../src/caseTone";
+
+// A 480x1600 移动端 prototype: the long-screenshot shape the viewer exists for.
+// Typed on purpose — a fixture missing a field should fail here, not as a blank
+// page in the browser.
+//
+// The id deliberately climbs out of /api with `..`, which the browser resolves
+// before sending, so the picture is served from the dev server's own static tree
+// instead of the proxied backend. That matters for the PiP assertions: a
+// picture-in-picture window is an `about:blank` document whose requests
+// Playwright neither routes nor reports, so anything under /api would simply
+// fail to load there.
+const PROTOTYPE: ReferenceAsset[] = [
+  {
+    id: "../../e2e/fixtures/prototype-480x1600.svg",
+    link_id: "link-b001",
+    asset_key: "asset-b001",
+    name: "登录页原型.png",
+    mime: "image/svg+xml",
+    width: 480,
+    height: 1600,
+    asset_type: "page",
+    screen: "账户",
+    state: "默认态",
+    prototype_version: "v2.0",
+    role: "expected",
+    caption: "登录页 — 期望界面",
+    focus: [{ label: "底部主按钮", note: "文案须与原型一致", box: [0.08, 0.9, 0.84, 0.06] }]
+  }
+];
 
 const CASE = {
   id: "case-1",
@@ -20,7 +50,7 @@ const CASE = {
   // Left unrun on purpose: the desk must open on the first case nobody has run,
   // which is the branch a group of only-finished cases never reaches.
   latest_result: null,
-  reference_assets: []
+  reference_assets: PROTOTYPE
 };
 
 // The PiP window carries the desk's progress line, so its expected text is
@@ -34,8 +64,11 @@ const PIP_PROGRESS =
   ` · 通过${PIP_COUNTS.passed} 不通过${PIP_COUNTS.failed}` +
   ` 跳过${PIP_COUNTS.skipped} 未测${PIP_COUNTS.untested}`;
 
-async function mockApi(page: Page) {
-  await page.route("**/api/**", async (route: Route) => {
+// A PiP window is its own page, so the routes have to be installed on whatever
+// scope owns the pages under test — a Page for one window, the BrowserContext
+// when a picture-in-picture window will open its own subresource requests.
+async function mockApi(scope: Pick<Page, "route">) {
+  await scope.route("**/api/**", async (route: Route) => {
     const { pathname } = new URL(route.request().url());
     if (pathname === "/api/auth/me") return route.fulfill({ json: { email: "admin@example.test" } });
     if (pathname === "/api/auth/csrf") return route.fulfill({ json: { csrf_token: "test-csrf" } });
@@ -113,6 +146,29 @@ async function pasteDefectImage(page: Page) {
     transfer.items.add(new File([bytes], "checkout-error.png", { type: "image/png" }));
     form.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, clipboardData: transfer }));
   });
+}
+
+// A long screenshot the tester pastes. Drawn in the page so the blob carries
+// real pixel dimensions — and a blob is the one kind of picture a PiP window can
+// load in this harness, because it never leaves the origin.
+async function pasteLongScreenshot(page: Page, name: string) {
+  await page.locator(".outcome-form").evaluate(async (form, filename) => {
+    const canvas = document.createElement("canvas");
+    canvas.width = 480;
+    canvas.height = 1600;
+    const context = canvas.getContext("2d");
+    if (context) {
+      context.fillStyle = "#f4f6f7";
+      context.fillRect(0, 0, 480, 1600);
+      context.fillStyle = "#176b57";
+      context.fillRect(29, 1440, 422, 96);
+    }
+    const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
+    if (!blob) return;
+    const transfer = new DataTransfer();
+    transfer.items.add(new File([blob], filename, { type: "image/png" }));
+    form.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, clipboardData: transfer }));
+  }, name);
 }
 
 test("desktop keyboard flow keeps shortcuts away from the failure note", async ({ page }) => {
@@ -256,4 +312,169 @@ test("picture-in-picture opens when supported and degrades visibly when not", as
 
   await pipPage.getByRole("button", { name: "关闭画中画" }).click();
   await expect(page.getByRole("button", { name: "画中画" })).toBeVisible();
+});
+
+async function zoomPercent(page: Page) {
+  const label = await page.getByRole("button", { name: /当前缩放/ }).getAttribute("aria-label");
+  return Number.parseInt(label?.match(/当前缩放 (\d+)%/)?.[1] ?? "0", 10);
+}
+
+// What the viewer actually did to the picture: the rendered frame against the
+// scrolling stage, plus where the stage is scrolled to.
+async function viewer(page: Page) {
+  return page.evaluate(() => {
+    const stage = document.querySelector(".image-zoom-stage");
+    const frame = document.querySelector(".image-zoom-frame");
+    return {
+      stage: stage ? stage.clientWidth : 0,
+      frame: frame ? frame.getBoundingClientRect().width : 0,
+      scrollTop: stage ? stage.scrollTop : 0
+    };
+  });
+}
+
+// The reason the viewer exists: a long prototype used to arrive as a strip. It
+// now has to open readable, scroll with a plain wheel, zoom under the pointer,
+// land 1:1 exactly, and walk to a focus box — in the desk and in the
+// picture-in-picture window, whose width is its own.
+test("a long prototype is readable and zoomable, in the desk and in PiP", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const problems: string[] = [];
+  page.on("console", (message) => {
+    if (message.type() === "error") problems.push(message.text());
+  });
+  page.on("pageerror", (error) => problems.push(error.message));
+  // The context, not just this page: the PiP window fetches the prototype for
+  // itself, and an unrouted request would go to the real backend from there.
+  await mockApi(page.context());
+  await page.goto("/");
+  await expect(page.getByText("管理员登录后绑定钱包")).toBeVisible();
+
+  await page.getByRole("button", { name: "放大查看 登录页原型.png" }).click();
+  const dialog = page.getByRole("dialog", { name: "登录页原型.png" });
+  await expect(dialog).toBeVisible();
+
+  // 适应宽度: the 480px wide prototype spans the stage. The tall content brings a
+  // scrollbar with it and the refit follows, so the two settle into each other.
+  await expect.poll(async () => {
+    const now = await viewer(page);
+    return Math.abs(now.frame - now.stage);
+  }).toBeLessThan(2);
+  expect(await zoomPercent(page)).toBeGreaterThan(100);
+
+  // A plain wheel scrolls the picture and is left alone.
+  const box = await page.locator(".image-zoom-stage").boundingBox();
+  if (!box) throw new Error("the stage has no box");
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.wheel(0, 400);
+  await expect.poll(async () => (await viewer(page)).scrollTop).toBeGreaterThan(100);
+
+  // 1:1 is the real pixel size, which is the whole point of opening the viewer.
+  await dialog.getByRole("button", { name: "原始尺寸 1:1" }).click();
+  expect(await zoomPercent(page)).toBe(100);
+  expect((await viewer(page)).frame).toBeCloseTo(480, 0);
+
+  // A pinch arrives as ctrl+wheel; it must zoom the picture, not the page.
+  // `exact` on purpose: Playwright matches accessible names by substring, and
+  // the readout's label mentions 适应宽度 too.
+  await dialog.getByRole("button", { name: "适应宽度", exact: true }).click();
+  await page.evaluate(() => {
+    const scope = window as unknown as { wheelPrevented: boolean | null };
+    scope.wheelPrevented = null;
+    document.querySelector(".image-zoom-stage")?.addEventListener("wheel", (event) => {
+      scope.wheelPrevented = event.defaultPrevented;
+    });
+  });
+  const before = (await viewer(page)).frame;
+  const spot = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+  await page.mouse.move(spot.x, spot.y);
+  // Playwright's own mouse.wheel carries no modifier state, so the gesture goes
+  // in over CDP — the same path a real trackpad pinch takes.
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("Input.dispatchMouseEvent", {
+    type: "mouseWheel",
+    x: spot.x,
+    y: spot.y,
+    deltaX: 0,
+    deltaY: -120,
+    modifiers: 2
+  });
+  await cdp.detach();
+  await expect.poll(async () => (await viewer(page)).frame).toBeGreaterThan(before);
+  expect(await page.evaluate(() => (window as unknown as { wheelPrevented: boolean | null }).wheelPrevented)).toBe(true);
+
+  // A focus box takes the operator to the spot instead of naming a percentage.
+  await page.getByRole("button", { name: "底部主按钮", exact: true }).click();
+  await expect.poll(async () => (await viewer(page)).scrollTop).toBeGreaterThan(1000);
+  await expect(page.locator(".image-focus-box.active")).toBeVisible();
+  await page.screenshot({ path: "test-results/prototype-zoom-desk.png" });
+
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+
+  const supported = await page.evaluate(() => "documentPictureInPicture" in window);
+  if (!supported) return;
+
+  const pipPagePromise = page.context().waitForEvent("page");
+  await page.getByRole("button", { name: "画中画" }).click();
+  const pipPage = await pipPagePromise;
+  await pipPage.setViewportSize({ width: 420, height: 760 });
+
+  await pipPage.getByRole("button", { name: "放大查看 登录页原型.png" }).click();
+  const pipDialog = pipPage.getByRole("dialog", { name: "登录页原型.png" });
+  await expect(pipDialog).toBeVisible();
+
+  // The picture refits against the PiP window it now lives in, not against the
+  // 1440px desk it came from. It is measured against the size the API declares:
+  // a PiP window is an about:blank document whose network subresources are not
+  // serviced in this harness, so these bytes never arrive there (a blob: one
+  // does — the second half of this test uses exactly that).
+  await expect.poll(async () => {
+    const now = await viewer(pipPage);
+    return Math.abs(now.frame - now.stage);
+  }).toBeLessThan(2);
+  const inner = await viewer(pipPage);
+  expect(inner.stage).toBeLessThan(500);
+  expect(inner.frame).toBeLessThan(500);
+
+  const pipBefore = await zoomPercent(pipPage);
+  await pipDialog.getByRole("button", { name: "放大" }).click();
+  expect(await zoomPercent(pipPage)).toBeGreaterThan(pipBefore);
+  await pipPage.keyboard.press("Escape");
+  await expect(pipDialog).toHaveCount(0);
+
+  // The same viewer, in the same window, with a long picture that really does
+  // load there: a screenshot the tester pastes, drawn at 480x1600 so it has the
+  // shape of a prototype rather than a thumbnail.
+  await pasteLongScreenshot(pipPage, "long-failure.png");
+  await expect(pipPage.getByRole("img", { name: "缺陷截图：long-failure.png" })).toBeVisible();
+  await pipPage.getByRole("button", { name: "预览 long-failure.png" }).click();
+  const shot = pipPage.getByRole("dialog", { name: "long-failure.png" });
+  await expect(shot).toBeVisible();
+
+  // 适应宽度 on a real 480x1600 picture inside a 420px window.
+  await expect.poll(async () => {
+    const now = await viewer(pipPage);
+    return Math.abs(now.frame - now.stage);
+  }).toBeLessThan(2);
+  expect(await zoomPercent(pipPage)).toBeGreaterThan(50);
+
+  // 1:1 is the screenshot's own pixel size, and it scrolls in this window too.
+  await shot.getByRole("button", { name: "原始尺寸 1:1" }).click();
+  expect(await zoomPercent(pipPage)).toBe(100);
+  expect((await viewer(pipPage)).frame).toBeCloseTo(480, 0);
+  const pipStage = await pipPage.locator(".image-zoom-stage").boundingBox();
+  if (!pipStage) throw new Error("the PiP stage has no box");
+  await pipPage.mouse.move(pipStage.x + pipStage.width / 2, pipStage.y + pipStage.height / 2);
+  await pipPage.mouse.wheel(0, 400);
+  await expect.poll(async () => (await viewer(pipPage)).scrollTop).toBeGreaterThan(100);
+  await pipPage.screenshot({ path: "test-results/prototype-zoom-pip.png" });
+
+  await pipPage.keyboard.press("Escape");
+  await expect(shot).toHaveCount(0);
+  await pipPage.getByRole("button", { name: "关闭画中画" }).click();
+  await expect(page.getByRole("button", { name: "画中画" })).toBeVisible();
+
+  // A viewer that works but shouts into the console is not done.
+  expect(problems).toEqual([]);
 });

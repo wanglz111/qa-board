@@ -126,6 +126,22 @@ describe("OutcomeForm", () => {
     unmount();
   });
 
+  it("opens a defect screenshot in the shared zoom viewer", async () => {
+    const file = new File(["binary"], "long-failure.png", { type: "image/png" });
+    renderForm({ images: [file] });
+
+    await userEvent.click(screen.getByRole("button", { name: "预览 long-failure.png" }));
+    const dialog = screen.getByRole("dialog", { name: "long-failure.png" });
+
+    // A failure screenshot is often tall too, so it gets the same toolbar the
+    // prototype viewer has instead of a fixed copy that cannot be zoomed.
+    await userEvent.click(within(dialog).getByRole("button", { name: "放大" }));
+    expect(within(dialog).getByRole("button", { name: /当前缩放 125%/ })).toBeVisible();
+
+    await userEvent.click(within(dialog).getByRole("button", { name: "关闭图片预览" }));
+    expect(screen.queryByRole("dialog", { name: "long-failure.png" })).not.toBeInTheDocument();
+  });
+
   it("ignores pasted content that is not an image", () => {
     const { onImagesChange } = renderForm();
     const pasted = new File(["text"], "notes.txt", { type: "text/plain" });
