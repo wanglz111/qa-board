@@ -32,6 +32,13 @@
 
 同理：任何洗结构的操作之后都不要采信脚本自己的复查，必须另起一次独立读
 （下面核对阶段会重新 GET records，而不是复用写回时的响应）。
+
+**这四个阶段不是事务。** 任何中途失败（API 被拒、httpx 超时、进程被杀）都会在线上留下
+半清理状态：可能行只删了一半，也可能选项洗掉了但值没写回。此时**不要重跑本脚本** ——
+数量闸会因为错位行已经变少而直接中止，重跑救不回来；恢复要靠落盘的快照。
+
+因此脚本会在**发第一个洗选项的 PUT 之前**，把要保留的值落盘成一个带时间戳的 JSON
+（放在临时目录，路径会醒目打印，并附上可直接照抄的恢复命令）。任何中途失败都以非 0 退出。
 """
 
 from __future__ import annotations
@@ -41,6 +48,8 @@ import json
 import os
 import re
 import sys
+import tempfile
+from datetime import datetime
 from typing import Any
 
 import httpx
@@ -212,6 +221,77 @@ def check_restored(lark: Lark, table: str, saved: dict[str, dict[str, Any]]) -> 
     return bad
 
 
+def write_snapshot_file(saved: dict[str, dict[str, dict[str, Any]]]) -> str:
+    """把快照落盘到仓库外的临时目录，返回文件路径。
+
+    这是唯一的兜底：洗选项之后进程内的 saved 会随进程消失，而重跑会被 EXPECTED_MISPLACED
+    数量闸挡住。所以文件必须在发第一个洗选项的 PUT **之前**就存在，路径也必须打印出来 ——
+    否则洗到一半失败时，终端里没有任何能据以恢复的东西。
+    """
+    payload = {
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "base_url": BASE_URL,
+        "base_token": BASE_TOKEN,
+        "tables": {
+            table: {"label": label, "values": saved[table]} for label, table in ROLE_TABLES
+        },
+    }
+    path = os.path.join(
+        tempfile.gettempdir(),
+        f"lark_cleanup_snapshot_{datetime.now().strftime('%Y%m%dT%H%M%S%f')}.json",
+    )
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+    return path
+
+
+# 恢复指引：快照落盘后立刻打印一次，失败路径上再打印一次。
+# 里面的 {} 都是给控制者照抄的文本，不是本脚本的格式化占位符（所以用 replace 而不是 format）。
+RECOVERY_TEMPLATE = """\
+恢复方法（把 <APP_ID>/<APP_SECRET> 换成部署里的值，照抄即可；快照路径就在上面那段和下面这段里）：
+
+  cd backend && LARK_APP_ID=<APP_ID> LARK_APP_SECRET=<APP_SECRET> .venv/bin/python - <<'PY'
+  import json, os, httpx
+  snap = json.load(open("<SNAPSHOT>", encoding="utf-8"))
+  cli = httpx.Client(base_url=snap["base_url"], timeout=30.0)
+  tok = cli.post("/open-apis/auth/v3/tenant_access_token/internal",
+                 json={"app_id": os.environ["LARK_APP_ID"],
+                       "app_secret": os.environ["LARK_APP_SECRET"]}).json()["tenant_access_token"]
+  for tbl, entry in snap["tables"].items():
+      recs = [{"record_id": rid, "fields": f} for rid, f in entry["values"].items()]
+      if not recs:
+          continue
+      rsp = cli.post(f"/open-apis/bitable/v1/apps/{snap['base_token']}/tables/{tbl}/records/batch_update",
+                     headers={"Authorization": f"Bearer {tok}"}, json={"records": recs})
+      print(tbl, entry["label"], len(recs), rsp.json().get("code"))
+  PY
+
+它对应的 batch_update 调用形态：
+  POST /open-apis/bitable/v1/apps/<BASE_TOKEN>/tables/<TABLE_ID>/records/batch_update
+  body {"records": [{"record_id": "<record_id>", "fields": {"<列名>": "<原值>"}}, ...]}
+"""
+
+
+def print_recovery(snapshot_path: str) -> None:
+    print(RECOVERY_TEMPLATE.replace("<SNAPSHOT>", snapshot_path))
+
+
+def print_snapshot_banner(snapshot_path: str) -> None:
+    print("\n" + "=" * 72)
+    print(f"快照已落盘（失败时的唯一恢复依据）：{snapshot_path}")
+    print("=" * 72)
+    print_recovery(snapshot_path)
+
+
+def print_half_cleaned_no_snapshot() -> None:
+    """在「已经动过线上、但还没洗过任何选项」的失败路径上给指引：没有值需要恢复。"""
+    print("\n" + "!" * 72)
+    print("已进入半清理状态，但**还没有动过任何选项**：单元格的值都还在，没有值需要恢复。")
+    print("不要重跑本脚本：数量闸会因为错位行变少而直接中止，重跑救不回来。")
+    print("请人工核对这两张表里特征是日期的行（执行记录.负责人 / 缺陷记录.优先级）后再决定下一步。")
+    print("!" * 72)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--apply", action="store_true", help="真的执行删除；默认只打印")
@@ -267,67 +347,144 @@ def main() -> int:
 
     for label, table in ROLE_TABLES:
         ids = [row["record_id"] for row in plan[label]]
-        lark.request(
-            "POST",
-            f"/open-apis/bitable/v1/apps/{BASE_TOKEN}/tables/{table}/records/batch_delete",
-            json={"records": ids},
-        )
+        try:
+            lark.request(
+                "POST",
+                f"/open-apis/bitable/v1/apps/{BASE_TOKEN}/tables/{table}/records/batch_delete",
+                json={"records": ids},
+            )
+        except (SystemExit, Exception) as exc:
+            print(f"  !! 删 {label} 的 {len(ids)} 行失败：{exc}")
+            print_half_cleaned_no_snapshot()
+            return 1
         print(f"已删 {label} {len(ids)} 行")
 
     # 洗选项会重建整份选项表，连保留下来的选项所引用的值也一起清空（见文件头）。
     # 所以删完错位行、动选项之前，先把要保留的值按 record_id 快照下来。
     print("\n=== 洗选项前快照要保留的值 ===")
     saved: dict[str, dict[str, dict[str, Any]]] = {}
-    for label, table in ROLE_TABLES:
-        saved[table] = snapshot(lark, table, wash_columns(table), doomed)
-        print(f"  {label}（{table}）：快照 {len(saved[table])} 行")
+    try:
+        for label, table in ROLE_TABLES:
+            saved[table] = snapshot(lark, table, wash_columns(table), doomed)
+            print(f"  {label}（{table}）：快照 {len(saved[table])} 行")
+    except (SystemExit, Exception) as exc:
+        print(f"  !! 快照阶段失败：{exc}")
+        print_half_cleaned_no_snapshot()
+        return 1
 
+    # 兜底必须在下第一个 PUT 之前落盘：洗到一半失败时进程内的 saved 随进程消失，
+    # 而重跑会被 EXPECTED_MISPLACED 挡住 —— 终端里必须留下能据以恢复的东西。
+    try:
+        snapshot_path = os.path.abspath(write_snapshot_file(saved))
+    except (OSError, TypeError, ValueError) as exc:
+        print(f"  !! 快照落盘失败：{exc}")
+        print("  !! 没有兜底文件就不动线上数据：本次不洗任何选项。")
+        print_half_cleaned_no_snapshot()
+        return 1
+    print_snapshot_banner(snapshot_path)
+
+    wash_failure: str | None = None
     for table, name, wanted in WASHES:
-        live = next(f for f in lark.fields(table) if f.get("field_name") == name)
-        lark.request(
-            "PUT",
-            f"/open-apis/bitable/v1/apps/{BASE_TOKEN}/tables/{table}/fields/{live['field_id']}",
-            json={
-                "field_name": name,
-                "type": 3,
-                "property": {"options": [{"name": option} for option in wanted]},
-            },
-        )
+        try:
+            live = next(f for f in lark.fields(table) if f.get("field_name") == name)
+            lark.request(
+                "PUT",
+                f"/open-apis/bitable/v1/apps/{BASE_TOKEN}/tables/{table}/fields/{live['field_id']}",
+                json={
+                    "field_name": name,
+                    "type": 3,
+                    "property": {"options": [{"name": option} for option in wanted]},
+                },
+            )
+        except (SystemExit, Exception) as exc:
+            wash_failure = f"{table}.{name}：{exc}"
+            print(f"  !! 洗 {table}.{name} 失败：{exc}")
+            print("  !! 停止继续洗，立刻走写回，把快照里的值补回去。")
+            break
         print(f"已洗 {table}.{name}")
 
+    # 一张表写回失败不许取消另一张：两张表各自隔离，成败最后一起汇报。
     print("\n=== 按 record_id 写回快照 ===")
+    writeback_failed: list[str] = []
     for label, table in ROLE_TABLES:
         if not saved[table]:
             print(f"  {label}（{table}）：无值需要写回")
             continue
-        restore(lark, table, saved[table])
+        try:
+            restore(lark, table, saved[table])
+        except (SystemExit, Exception) as exc:
+            writeback_failed.append(f"{label}（{table}）")
+            print(f"  {label}（{table}）：!! 写回失败：{exc}")
+            continue
         print(f"  {label}（{table}）：已写回 {len(saved[table])} 行")
 
     print("\n=== 独立重读核对写回结果 ===")
     mismatched = 0
     for label, table in ROLE_TABLES:
         print(f"  {label}（{table}）：")
-        mismatched += check_restored(lark, table, saved[table])
+        try:
+            mismatched += check_restored(lark, table, saved[table])
+        except (SystemExit, Exception) as exc:
+            mismatched += len(saved[table])
+            print(f"    !! 核对本身失败，这 {len(saved[table])} 行无法确认：{exc}")
 
+    junk_failed: list[str] = []
     for table in junk_tables:
-        lark.request(
-            "DELETE", f"/open-apis/bitable/v1/apps/{BASE_TOKEN}/tables/{table['table_id']}"
-        )
+        try:
+            lark.request(
+                "DELETE", f"/open-apis/bitable/v1/apps/{BASE_TOKEN}/tables/{table['table_id']}"
+            )
+        except (SystemExit, Exception) as exc:
+            junk_failed.append(table["name"])
+            print(f"  !! 删废表 {table['name']} 失败：{exc}")
+            continue
         print(f"已删废表 {table['name']}")
 
+    # 选项复查的不一致也进判据：自查的输出必须真的影响出厂码（这与本次事故是同族错误）。
     print("\n=== 复查 ===")
+    option_diffs: list[str] = []
     for table, name, wanted in WASHES:
-        live = next(f for f in lark.fields(table) if f.get("field_name") == name)
-        current = [o.get("name") for o in (live.get("property") or {}).get("options", [])]
-        ok = current == list(wanted)
+        try:
+            live = next((f for f in lark.fields(table) if f.get("field_name") == name), None)
+            current = [
+                o.get("name") for o in ((live or {}).get("property") or {}).get("options", [])
+            ]
+            ok = live is not None and current == list(wanted)
+        except (SystemExit, Exception) as exc:
+            current, ok = [f"读取失败：{exc}"], False
+        if not ok:
+            option_diffs.append(f"{table}.{name}")
         print(f"  {table}.{name}: {'OK' if ok else '!! 仍有差异'} {current}")
     for label, table in ROLE_TABLES:
-        print(f"  {label} 剩余行数：{len(lark.records(table))}")
-    print(f"  剩余表：{[t['name'] for t in lark.tables()]}")
+        try:
+            count: Any = len(lark.records(table))
+        except (SystemExit, Exception) as exc:
+            count = f"读取失败：{exc}"
+        print(f"  {label} 剩余行数：{count}")
+    try:
+        remaining: Any = [t["name"] for t in lark.tables()]
+    except (SystemExit, Exception) as exc:
+        remaining = f"读取失败：{exc}"
+    print(f"  剩余表：{remaining}")
+
+    print("\n=== 结论 ===")
+    if not (wash_failure or writeback_failed or mismatched or option_diffs or junk_failed):
+        print("  洗选项 / 写回 / 核对 / 删废表 全部 OK。")
+        return 0
+    if wash_failure:
+        print(f"  !! 洗选项失败：{wash_failure}")
+    if writeback_failed:
+        print(f"  !! 写回失败的表：{writeback_failed}")
     if mismatched:
-        print(f"\n!! 写回后有 {mismatched} 行与快照不一致（见上面的 !! 行）：值没救回来。")
-        return 1
-    return 0
+        print(f"  !! 写回后有 {mismatched} 行与快照不一致（见上面的 !! 行）")
+    if option_diffs:
+        print(f"  !! 选项复查仍有差异：{option_diffs}")
+    if junk_failed:
+        print(f"  !! 删废表失败：{junk_failed}")
+    print("  !! 本次没有全绿，以非 0 退出。不要重跑本脚本。")
+    print(f"  快照文件：{snapshot_path}")
+    print_recovery(snapshot_path)
+    return 1
 
 
 if __name__ == "__main__":
