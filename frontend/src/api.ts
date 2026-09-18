@@ -137,6 +137,13 @@ export type LarkResolved = {
   read_errors: string[];
 };
 
+export type TableSchema = {
+  table_id: string;
+  fields: Record<string, string>;   // 字段名 → 类型名（describe_fields 的输出）
+  required: string[];
+  schema_errors: string[];
+};
+
 export type LarkTarget = {
   group_id: string;
   source_url: string;
@@ -531,6 +538,13 @@ export const api = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ url })
+    }),
+  // 表级校验：按 table_id 现读字段并算缺失表头（后端 POST /lark/table-schema）。
+  larkTableSchema: (baseToken: string, tableId: string, role: TableRole) =>
+    mutation<TableSchema>("/api/lark/table-schema", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ base_token: baseToken, table_id: tableId, role })
     }),
   larkTarget: (groupId: string) =>
     request<LarkTargetState>(`/api/groups/${groupId}/lark/target`),
