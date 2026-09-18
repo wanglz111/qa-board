@@ -420,6 +420,62 @@ it("says a stored save was stored when only reading it back fails", async () => 
   expect(submit).toHaveBeenCalledTimes(1);
 });
 
+it("keeps a reserved save retryable when a read after it fails", async () => {
+  const reserved: Attempt = {
+    id: "attempt-retest",
+    label: "B-001-R0918-a1b2c3-01",
+    sequence: 2,
+    state: "started",
+    result: null,
+    note: null,
+    console_text: null,
+    source: "execution",
+    created_at: "2026-09-16T10:00:00Z",
+    screenshots: []
+  };
+  const reserveRetest = vi.fn().mockResolvedValue(reserved);
+  const commitReserved = vi
+    .fn()
+    .mockResolvedValue({ ...reserved, state: "committed", result: "通过" });
+  const submit = vi.fn<(groupId: string, code: string, payload: SubmitPayload) => Promise<Attempt>>();
+  let reads = 0;
+  const loadAttempts = vi.fn<(groupId: string, code: string) => Promise<Attempt[]>>(async () => {
+    reads += 1;
+    // The first read is the history the case opens with; every later one is a
+    // read-back after the commit, and those are the ones that fail.
+    if (reads > 1) throw new Error("网络中断");
+    return [committed("attempt-1", "B-001", "不通过", "首次失败")];
+  });
+  renderExecution({
+    initialGroupId: "0918-id",
+    submit,
+    reserveRetest,
+    commitReserved,
+    loadAttempts,
+    loadLegacyHistory: async () => EMPTY_LEGACY
+  });
+
+  await screen.findByText(/首次失败/);
+  await userEvent.click(await screen.findByRole("button", { name: /开始重测/ }));
+  await screen.findByText(/已预留重测/);
+  await userEvent.click(screen.getByRole("button", { name: "通过" }));
+  await userEvent.click(screen.getByRole("button", { name: /保存结果/ }));
+
+  expect(await screen.findByText(/结果已保存到本地，但执行记录读取失败/)).toBeVisible();
+  expect(commitReserved).toHaveBeenCalledTimes(1);
+
+  // The retest is stored. Pressing save again must not append a second row for
+  // it: the reservation is still in hand, so the retry commits *it* again with
+  // the same key — which is what makes the server answer with the row it already
+  // stored instead of creating another one.
+  await userEvent.click(screen.getByRole("button", { name: /保存结果/ }));
+  await waitFor(() => expect(commitReserved).toHaveBeenCalledTimes(2));
+  expect(submit).not.toHaveBeenCalled();
+  expect(commitReserved.mock.calls[1][1].idempotency_key).toBe(
+    commitReserved.mock.calls[0][1].idempotency_key
+  );
+});
+
 it("drops a retest reservation that lands after the desk moved", async () => {
   const pendingReserve = deferred<Attempt>();
   const reserved: Attempt = {

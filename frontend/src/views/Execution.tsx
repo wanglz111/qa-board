@@ -360,15 +360,6 @@ export function ExecutionView({
       if (loadedGroup.current === savedGroupId && caseRequest.current === savedVisit) {
         setLastAttemptId(attempt.id);
       }
-      // Retire only the reservation this save consumed. The narrowing is
-      // unreachable through the UI now — the legacy 复测 button is `disabled`
-      // while this save is in flight, so no reservation can appear behind it, and
-      // the test that used to reach it had to click a button that is disabled
-      // today — but it stays as the statement of ownership: a reservation the
-      // operator made is theirs, and clearing it would orphan the reserved label
-      // and make the next save submit an original attempt instead of committing
-      // the retest.
-      setReserved((current) => (current?.id === reserved?.id ? null : current));
       const history = await loadAttempts(savedGroupId, saved.code);
       // The panel under the case on screen must show *that* case's history: a
       // save that landed while the operator pressed ←/→ would otherwise paint the
@@ -440,6 +431,19 @@ export function ExecutionView({
       // what the guard is about.
       if (loadedGroup.current === savedGroupId && caseRequest.current === savedVisit) {
         formRef.current?.reset();
+        // Retire the reservation this save consumed — and only here, once every
+        // read this save owns has finished. Retiring it right after the commit
+        // meant a read that then failed left the operator holding a stored row and
+        // no reservation: pressing save again minted a *different* key (the
+        // signature carries the reservation id) and appended a second row for a
+        // result that was already stored. Holding it keeps that retry idempotent —
+        // same reservation, same key, so the server answers with the row it has.
+        // The narrowing only clears the reservation this save consumed: one the
+        // operator made is theirs, and a reservation made while this save was in
+        // flight is unreachable through the UI now (`LegacyHistory`'s 复测 button
+        // is `disabled`), but the identity check stays as the statement of
+        // ownership rather than as a behaviour some test pins.
+        setReserved((current) => (current?.id === reserved?.id ? null : current));
         // The text is stored, but the evidence is not: staying on this case is
         // what keeps the screenshot attached to the attempt it belongs to and
         // the retry button pointed at the right record. Advancing here would
