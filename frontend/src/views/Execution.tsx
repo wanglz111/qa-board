@@ -99,7 +99,7 @@ export function ExecutionView({
   const [attempts, setAttempts] = useState<Attempt[]>([]);
   const [loadingGroups, setLoadingGroups] = useState(true);
   const [loadingCase, setLoadingCase] = useState(false);
-  const [submitting, setSubmitting] = useState(false);
+  const [inFlight, setInFlight] = useState(0);
   const [images, setImages] = useState<File[]>([]);
   const [status, setStatus] = useState<SaveStatus | null>(null);
   const [reserved, setReserved] = useState<Attempt | null>(null);
@@ -107,6 +107,17 @@ export function ExecutionView({
   const [lastAttemptId, setLastAttemptId] = useState<string | null>(null);
   const [sync, setSync] = useState<SyncStatus | null>(null);
   const [legacyVersion, setLegacyVersion] = useState(0);
+  // "A request is in flight" is a count, not a flag: a save and a retest
+  // reservation are two different requests, and with one boolean the
+  // reservation's `finally` released the save's spinner while that save was still
+  // on the wire — which re-armed the keyboard shortcuts and the save button
+  // mid-save. No test can tell the count apart from the boolean any more (the one
+  // entry that made the overlap reachable, `LegacyHistory`'s 复测 button, is
+  // `disabled` now), so the count is the invariant written into the structure
+  // rather than a behaviour a test pins.
+  const submitting = inFlight > 0;
+  const beginRequest = () => setInFlight((count) => count + 1);
+  const endRequest = () => setInFlight((count) => count - 1);
   // The visit identity: it increments on exactly the two events that move the
   // desk (`selectGroup`, `showCase`), so a save that outlives several awaits
   // compares it to tell whether the operator is still on the case it belongs to.
@@ -307,20 +318,41 @@ export function ExecutionView({
     const savedVisit = caseRequest.current;
     const saved = cases[savedIndex];
     if (!saved || !savedGroupId) return;
-    const signature = JSON.stringify([saved.code, input.result, input.note, input.consoleText, reserved?.id ?? null]);
+    // The group is part of the key. `Attempt.idempotency_key` is unique across the
+    // whole table and the server dedupes on it, so two groups holding the same
+    // code and given an identical payload would otherwise share one key: the
+    // second save reads as a replay of the first and answers 409 「Idempotency key
+    // conflict」, and every retry mints the same key again (the signature behind it
+    // has not changed), so the result is never stored until the operator edits
+    // something or reloads.
+    const signature = JSON.stringify([
+      savedGroupId,
+      saved.code,
+      input.result,
+      input.note,
+      input.consoleText,
+      reserved?.id ?? null
+    ]);
     const payload: SubmitPayload = {
       result: input.result,
       note: input.note,
       console_text: input.consoleText,
       idempotency_key: keyFor(signature)
     };
-    setSubmitting(true);
+    beginRequest();
     setStatus(null);
     let advanceTo: number | null = null;
+    // Whether the row is stored is the one thing the catch below has to know:
+    // everything after the submit is *reading back* a save that already landed,
+    // and calling that 「保存失败…可重试」 invites the operator to edit the note and
+    // save again — which appends a second row for a result that was stored the
+    // first time. The flag is set the moment the await answers, before any read.
+    let stored = false;
     try {
       const attempt = reserved && commitReserved
         ? await commitReserved(reserved.id, payload)
         : await submit(savedGroupId, saved.code, payload);
+      stored = true;
       // The retry id is a case-scoped thing: it is the id 重试上传截图 would
       // upload the files on screen into. `showCase` retires it on the way out, so
       // a save that lands after the operator moved must not hand it back —
@@ -328,9 +360,12 @@ export function ExecutionView({
       if (loadedGroup.current === savedGroupId && caseRequest.current === savedVisit) {
         setLastAttemptId(attempt.id);
       }
-      // Retire only the reservation this save consumed. A reservation the
-      // operator made while this save was in flight (the legacy 复测 button has
-      // no `disabled`) is theirs: clearing it would orphan the reserved label
+      // Retire only the reservation this save consumed. The narrowing is
+      // unreachable through the UI now — the legacy 复测 button is `disabled`
+      // while this save is in flight, so no reservation can appear behind it, and
+      // the test that used to reach it had to click a button that is disabled
+      // today — but it stays as the statement of ownership: a reservation the
+      // operator made is theirs, and clearing it would orphan the reserved label
       // and make the next save submit an original attempt instead of committing
       // the retest.
       setReserved((current) => (current?.id === reserved?.id ? null : current));
@@ -412,11 +447,24 @@ export function ExecutionView({
         advanceTo = uploaded ? nextUntestedIndex(updated, savedIndex) : null;
       }
     } catch (reason) {
-      // The submit request itself was rejected: nothing was stored, so the form
-      // must keep the note for the retry.
-      setStatus({ tone: "error", text: `保存失败：${message(reason)}，可重试` });
+      setStatus(
+        stored
+          ? {
+              // The row is stored; only a read that follows it failed. Same shape
+              // as the failed-upload line above: say what landed, name what did
+              // not, and offer no retry that would store the result twice.
+              tone: "error",
+              text: `${saved.code} 结果已保存到本地，但执行记录读取失败（${message(reason)}）`
+            }
+          : {
+              // The submit request itself was rejected: nothing was stored, so the
+              // form must keep the note for the retry.
+              tone: "error",
+              text: `保存失败：${message(reason)}，可重试`
+            }
+      );
     } finally {
-      setSubmitting(false);
+      endRequest();
     }
     // The advance sits outside the `try`, so nothing it does can be reported as
     // 「保存失败」.
@@ -425,9 +473,9 @@ export function ExecutionView({
 
   async function retryUpload() {
     if (!lastAttemptId) return;
-    setSubmitting(true);
+    beginRequest();
     const uploaded = await uploadAll(lastAttemptId, images);
-    setSubmitting(false);
+    endRequest();
     setStatus(
       uploaded
         ? { tone: "saved", text: "截图已全部上传" }
@@ -441,7 +489,7 @@ export function ExecutionView({
     if (!current || !selectedGroupId || !reserveRetest) return;
     const requestedGroupId = selectedGroupId;
     const requestedVisit = caseRequest.current;
-    setSubmitting(true);
+    beginRequest();
     try {
       const attempt = await reserveRetest(requestedGroupId, current.code);
       // A reservation that arrives after the desk moved is dropped: `save()`
@@ -455,7 +503,7 @@ export function ExecutionView({
     } catch (reason) {
       setStatus({ tone: "error", text: `无法开始重测：${message(reason)}` });
     } finally {
-      setSubmitting(false);
+      endRequest();
     }
   }
 
@@ -607,6 +655,7 @@ export function ExecutionView({
                 attempts={attempts}
                 screenshotUrl={screenshotUrl}
                 onStartRetest={reserveRetest ? () => void startRetest() : undefined}
+                retestDisabled={submitting}
                 reservedLabel={reserved?.label ?? null}
                 reloadKey={legacyVersion}
               />

@@ -12,6 +12,10 @@ type Props = {
   screenshotUrl?: (screenshotId: string) => string;
   attempts?: Attempt[];
   onStartRetest?: () => void;
+  // A save in flight owns the attempt a retest would later be committed into, so
+  // the reservation is refused then: an auto-advance that follows the save would
+  // drop it, and the `started` row it created is never cleaned up.
+  retestDisabled?: boolean;
   reservedLabel?: string | null;
   // The executor bumps this when its own write should be visible here, so the
   // panel stops showing the snapshot it took before that write.
@@ -70,6 +74,7 @@ export function LegacyHistory({
   screenshotUrl,
   attempts = [],
   onStartRetest,
+  retestDisabled = false,
   reservedLabel,
   reloadKey = 0
 }: Props) {
@@ -240,7 +245,12 @@ export function LegacyHistory({
 
           {onStartRetest ? (
             <div className="legacy-actions">
-              <button type="button" className="ghost-button" onClick={onStartRetest}>
+              <button
+                type="button"
+                className="ghost-button"
+                disabled={retestDisabled}
+                onClick={onStartRetest}
+              >
                 <RotateCcw size={16} />复测（新标签，不覆盖旧结果）
               </button>
               {reservedLabel ? (

@@ -117,6 +117,23 @@ it("offers a retest that starts a new label and never claims to close the old bu
   expect(screen.queryByRole("button", { name: /关闭|修复旧缺陷/ })).not.toBeInTheDocument();
 });
 
+it("refuses the retest while the caller says a save is in flight", async () => {
+  const onStartRetest = vi.fn();
+  render(
+    <LegacyHistory
+      code="B-001"
+      loadHistory={async () => VERIFIED}
+      onStartRetest={onStartRetest}
+      retestDisabled
+    />
+  );
+
+  const retest = await screen.findByRole("button", { name: /复测（新标签/ });
+  expect(retest).toBeDisabled();
+  await userEvent.click(retest);
+  expect(onStartRetest).not.toHaveBeenCalled();
+});
+
 it("switches between legacy and current views", async () => {
   render(
     <LegacyHistory code="B-001" loadHistory={async () => VERIFIED} attempts={ATTEMPTS} />

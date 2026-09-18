@@ -312,7 +312,7 @@ it("reserves a retest label before committing it", async () => {
   expect(commitReserved).toHaveBeenCalledWith("attempt-retest", expect.objectContaining({ result: "通过" }));
 });
 
-it("keeps a reservation made while a save was in flight", async () => {
+it("refuses a retest while a save is in flight and offers it again once the save lands", async () => {
   const reserved: Attempt = {
     id: "attempt-retest",
     label: "B-001-R0918-a1b2c3-01",
@@ -344,11 +344,19 @@ it("keeps a reservation made while a save was in flight", async () => {
   await userEvent.click(screen.getByRole("button", { name: "通过" }));
   await userEvent.click(screen.getByRole("button", { name: /保存结果/ }));
 
-  // The save is on the wire and the legacy panel's 复测（新标签…）button carries
-  // no `disabled`, so the operator reserves a retest right now — the save they
-  // are waiting on knows nothing about this reservation.
-  await userEvent.click(await screen.findByRole("button", { name: /复测/ }));
-  expect(await screen.findByText(/已预留重测 B-001-R0918-a1b2c3-01/)).toBeVisible();
+  // The save is on the wire and the legacy panel's 复测（新标签…）button is the one
+  // entry that used to stay clickable. A reservation made now is not the
+  // operator's to keep: the save that lands next advances the desk, and leaving
+  // the case drops the reservation while its `started` row stays behind forever.
+  // Refusing the click is the fix — the button comes back with the save.
+  const retest = await screen.findByRole("button", { name: /复测（新标签/ });
+  expect(retest).toBeDisabled();
+  await userEvent.click(retest);
+  expect(reserveRetest).not.toHaveBeenCalled();
+  expect(screen.queryByText(/已预留/)).not.toBeInTheDocument();
+  // And the save keeps the form: releasing the spinner here is what let a second
+  // save start on top of the first one.
+  expect(screen.getByRole("button", { name: /保存中/ })).toBeDisabled();
 
   await act(async () => {
     pendingSave.resolve(committed("attempt-1", "B-001", "通过", null));
@@ -356,21 +364,59 @@ it("keeps a reservation made while a save was in flight", async () => {
   });
   await waitFor(() => expect(screen.getByText(/已保存到本地/)).toBeVisible());
 
-  // The reservation made during the flight belongs to the operator, not to the
-  // save: a save that retires "whichever reservation is current" wipes it here,
-  // orphaning the reserved label. Asserted on the panel's own 已预留 line — the
-  // save's confirmation has meanwhile replaced the status text.
-  expect(screen.getByText("已预留 B-001-R0918-a1b2c3-01")).toBeVisible();
+  expect(screen.getByRole("button", { name: /复测（新标签/ })).toBeEnabled();
+});
 
-  // And the next save must commit that reservation rather than submit an
-  // original attempt under it.
+it("scopes the idempotency key to the group so the same code in two groups both land", async () => {
+  const submit = vi.fn<(groupId: string, code: string, payload: SubmitPayload) => Promise<Attempt>>();
+  submit.mockResolvedValue(committed("attempt-1", "B-001", "通过", null));
+  renderExecution({ initialGroupId: "0918-id", submit });
+
+  await screen.findByText("管理员登录");
+  await userEvent.click(screen.getByRole("button", { name: "通过" }));
+  await userEvent.click(screen.getByRole("button", { name: /保存结果/ }));
+  await waitFor(() => expect(submit).toHaveBeenCalledTimes(1));
+
+  // Both groups hold B-001 (the shared fixture gives every group the same code),
+  // and this save is the same result with no note and no console: the payloads are
+  // identical, so the key is the only thing standing between the second save and
+  // the server reading it as a replay of the first — which answers 409
+  // 「Idempotency key conflict」 on every retry, because the signature that mints
+  // the key has not changed either.
+  await userEvent.click(screen.getByText("Sprint 0922"));
+  await screen.findByText("钱包绑定");
+  await userEvent.click(screen.getByRole("button", { name: "通过" }));
+  await userEvent.click(screen.getByRole("button", { name: /保存结果/ }));
+  await waitFor(() => expect(submit).toHaveBeenCalledTimes(2));
+
+  expect(submit.mock.calls[1][0]).toBe("0922-id");
+  expect(submit.mock.calls[1][2].idempotency_key).not.toBe(
+    submit.mock.calls[0][2].idempotency_key
+  );
+});
+
+it("says a stored save was stored when only reading it back fails", async () => {
+  const submit = vi.fn<(groupId: string, code: string, payload: SubmitPayload) => Promise<Attempt>>();
+  submit.mockResolvedValue(committed("attempt-1", "B-001", "通过", null));
+  let reads = 0;
+  const loadAttempts = vi.fn<(groupId: string, code: string) => Promise<Attempt[]>>(async () => {
+    reads += 1;
+    // The first read is the history the page loads with the case; the second is
+    // this save's own read-back, and it is the one that fails *after* the row is
+    // stored.
+    if (reads > 1) throw new Error("网络中断");
+    return [];
+  });
+  renderExecution({ initialGroupId: "0918-id", submit, loadAttempts });
+
+  await screen.findByText("管理员登录");
   await userEvent.click(screen.getByRole("button", { name: "通过" }));
   await userEvent.click(screen.getByRole("button", { name: /保存结果/ }));
 
-  expect(commitReserved).toHaveBeenCalledWith(
-    "attempt-retest",
-    expect.objectContaining({ result: "通过" })
-  );
+  // 「保存失败…可重试」 here would be a lie: editing the note and pressing save
+  // again appends a second row for a result that was already stored.
+  expect(await screen.findByText(/结果已保存到本地，但执行记录读取失败/)).toBeVisible();
+  expect(screen.queryByText(/保存失败/)).not.toBeInTheDocument();
   expect(submit).toHaveBeenCalledTimes(1);
 });
 
