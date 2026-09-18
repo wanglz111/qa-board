@@ -70,23 +70,26 @@ cd /home/lucascool/qa-board
 # 1) 和 CI 一致的验证（后端需要一个本地 PostgreSQL 测试库）
 cd backend
 TEST_DATABASE_URL=postgresql+psycopg://testdeck:testdeck@127.0.0.1:5433/testdeck_test \
-  .venv/bin/python -m pytest -q          # 期望 316 passed
+  .venv/bin/python -m pytest -q          # 期望 446 passed
 cd ../frontend
-npx vitest run                            # 期望 116 passed（16 文件）
-npm run build
+npx vitest run                            # 期望 208 passed（18 文件）
+npm run build                             # tsc -b + vite build；产物文件名是内容 hash，部署后拿来比对
+npx playwright test                       # 期望 26 passed
 cd ..
 
 # 2) 推送 main 和版本 tag（推送 tag 才会触发镜像发布）
 #    本机 origin 是 https 且没有存凭据，所以显式用 SSH 地址推送，
 #    或者先执行一次 git remote set-url origin git@github.com:wanglz111/qa-board.git
 git push git@github.com:wanglz111/qa-board.git main
-git tag -a v0.1.5 -m "v0.1.5"
-git push git@github.com:wanglz111/qa-board.git v0.1.5
+git tag -a v0.1.13 -m "v0.1.13"
+git push git@github.com:wanglz111/qa-board.git v0.1.13
 ```
+
+测试库不是常驻的：容器 `testdeck-task2-postgres`（`127.0.0.1:5433`，`testdeck/testdeck/testdeck_test`）可能处于 Exited，`docker start testdeck-task2-postgres` 几秒后 `pg_isready` 就绪即可。后端套件跑不起来时先看这里，别当成"环境没准备好"跳过。
 
 推送必须走 SSH：本机 `origin` 是 https 且没有存凭据，`git push origin …` 会直接报 `could not read Username for 'https://github.com'`。用上面的 `git@github.com:wanglz111/qa-board.git` 地址推，或先把 origin 换成 SSH 地址。SSH 走 `~/.ssh/config` 里 github.com 的 443 端口配置，开箱即用。
 
-远端现在是 `main` = `d64cbef`，标签 `v0.1.6`。已合并的 `feature/cloud-testdeck` 本地分支已删除；**远端同名分支还在**，因为 GitHub 上这个仓库的默认分支仍指向它，`git push --delete` 会报 `refusing to delete the current branch`。要清掉它：先把默认分支改成 `main`（仓库 Settings → General → Default branch），再执行
+远端现在是 `main` = `d88ab0d`，标签 `v0.1.13`。已合并的 `feature/cloud-testdeck` 本地分支已删除；**远端同名分支还在**，因为 GitHub 上这个仓库的默认分支仍指向它，`git push --delete` 会报 `refusing to delete the current branch`。要清掉它：先把默认分支改成 `main`（仓库 Settings → General → Default branch），再执行
 
 ```bash
 git push git@github.com:wanglz111/qa-board.git --delete feature/cloud-testdeck
@@ -108,14 +111,14 @@ cd /home/ubuntu/testdeck
 
 # 备份当前 .env，再改两个镜像 tag
 cp .env .env.bak-$(date +%F-%H%M%S)
-sed -i -E 's|^(WEB_IMAGE=ghcr\.io/[^:]+):.*|\1:v0.1.6|; s|^(API_IMAGE=ghcr\.io/[^:]+):.*|\1:v0.1.6|' .env
+sed -i -E 's|^(WEB_IMAGE=ghcr\.io/[^:]+):.*|\1:v0.1.13|; s|^(API_IMAGE=ghcr\.io/[^:]+):.*|\1:v0.1.13|' .env
 
 # 拉取并重启；migrate 服务会在 db 健康后自动跑 alembic upgrade head + bootstrap
 sudo docker compose --env-file .env -f docker-compose.yml up -d --pull always
 sudo docker compose --env-file .env -f docker-compose.yml ps
 ```
 
-服务器上已经放好了 `deploy.sh`，上面三步可以合成一条：`./deploy.sh v0.1.6`。
+服务器上已经放好了 `deploy.sh`，上面三步可以合成一条：`./deploy.sh v0.1.13`。
 
 ### 4.4 验收（每次发版都做）
 
@@ -562,3 +565,52 @@ live base `LIhnb0ok7a1TMksi3t1jrVoLpke` 现有 5 张表，其中这两张是本�
 回滚：`cd /home/ubuntu/testdeck && ./deploy.sh v0.1.11`（或 `v0.1.10`）。本次只有一个**加列**迁移，回滚镜像后多出的 `content_hash` 列与唯一索引不影响旧版本读写；要彻底回退 schema 可 `alembic downgrade 0012_sync_job_last_error`。
 
 **线上未验证的一件事**：附件去重的真实效果（同一张图重传只落一行）是在本地真服务端探针里验的；线上只验到迁移与索引存在，没有为验证而往生产库写一条测试记录。
+
+## 21. v0.1.13：进度方格挂到当前焦点那一行（已上线）
+
+执行页左侧的用例方格原来渲染在整个测试组列表**之后**，屏幕上那些方块只能靠"离谁近"来说明自己属于哪个组——组一多，读的人得往页面上方回看，才认得出这是谁的进度、还差几条。这次把它挂到**当前选中那一行的下面**。
+
+### 这次改了什么
+
+- `GroupSelector` 新增 `selectedDetail` 插槽，渲染成**选中行的下一个兄弟节点**（在列表内部，不是列表之后）。只有选中行带它，所以面板不会被误读成邻居的，也不会在换组后留在原地过期；`Fragment` 保证 `role="list"` 的直接子节点仍然只有 listitem。
+- `Execution.tsx` 把 `CaseGrid` 交给这个插槽，删掉列表末尾那一块。
+- 面板沿用选中行自己的左侧 3px 绿色 accent，并去掉独立块原有的顶部分隔线——行 + 方块读成一个块，而不是像多出来一行。
+- 测试：两条组件测试锁**位置**（默认夹具里被选中的是第一组、共两组，所以"在焦点行下"和"在列表末尾"是**两个不同的地方**；否则同一组断言在两种实现下都成立）；一条 e2e 锁**几何**（用 `boundingBox` 断言面板顶 ≥ 焦点行底、面板底 ≤ 下一行顶，并断言切组后跟着走、不残留）——同样的 markup 两种实现渲染结果相同，只有排完版的计算盒子能区分。
+- 没有 API、数据或文案改动；方格的配色与计数口径未动（网格与执行台计数仍共用 `toneOf`）。
+
+### 一个 dev mock（本次一起进仓库，不是产品代码）
+
+`node frontend/mock-api.mjs` 在 `127.0.0.1:8000` 应答各页面要读的路由——正好是 vite 代理 `/api` 的地址，所以旁边跑 `npm run dev` 不需要改配置，也不需要数据库。用法：先 `node mock-api.mjs`，再 `npm run dev`，浏览器开 dev server 的地址。
+
+- 夹具按线上看板的形状造（20 / 5 / 14 条，第一组 通过2 不通过4 跳过2 未测12），另带一条有执行历史 + 旧表记录 + 命中旧缺陷 + 附件的失败用例、前三条的原型图、以及五种对账状态。
+- 「测试用例」组的用例行是**解析** `docs/examples/ai-cases-template.csv` 得到的，不是复制一份，所以示例书改了夹具跟着改；模板只有 3 条，其余按它的列补写。
+- 截图与原型是 `node:zlib` 现场编码的真 PNG：仓库里不留二进制、不引依赖，两张图一眼可分。
+- 有意不实现的部分：提交只存内存、重启即回到初始态；`reports.xlsx` 答 501 并写明原因（不返回一个坏文件）；Lark 目标保持未确认，页面显示只读态。
+- 它不进镜像：`frontend/Dockerfile` 只 `COPY src` 与几个配置文件。
+
+### 上线记录
+
+- `main` 从 `4e8e06d` 推进到 `d88ab0d`（两个提交：`604cc4e` 功能改动、`d88ab0d` dev mock），打 tag **`v0.1.13`**。
+- GitHub Actions [#35298728647](https://github.com/wanglz111/qa-board/actions/runs/35298728647) success（`verify` + 两个 `publish`），`head_sha` = `d88ab0dc0bc4`；镜像 `ghcr.io/wanglz111/qa-board-{api,web}:v0.1.13` 与 `sha-d88ab0d…` 已在 GHCR——部署前用匿名 `docker manifest inspect` 确认两个都在（tag 推送后约 3 分钟）。
+- 本地验证（`d88ab0d`）：后端 **446 passed**、前端 **208 passed / 18 files**、`npm run build` 干净（产物 `index-CE5uFhWw.js` / `index-B4CUtYad.css`）、Playwright **26 passed**、`git diff --check` 干净。
+- 服务器：部署前数据库备份 `backups/backup-20260918-102019.sql.gz`（137 KB，`gzip -t` 通过），`.env` 备份为 `.env.bak-20260918-102034`，`./deploy.sh v0.1.13`，`migrate` 退出码 0（**无新迁移**）。
+- 顺手把本节所在的这份文档里过期的数字改对了：§4.1 的期望测试数（316/116 → 446/208，并补上 Playwright 与产物 hash 的用途）、§4.1/§4.3 里会被人直接复制粘贴的版本号、以及"远端 main = …"这一行。
+
+升级后的实测结果：
+
+| 检查 | 结果 |
+| --- | --- |
+| `docker compose ps` | api（healthy）、worker、web 全部 `ghcr.io/wanglz111/qa-board-*:v0.1.13`，db healthy |
+| `GET /health/ready` | 200 `{"ok":true}`（容器刚起来的瞬间 502，`deploy.sh` 的重试循环随后通过） |
+| 一次性 `migrate` | 退出码 0；`alembic_version` = `0013_screenshot_content_hash`（与 v0.1.12 相同，本次没有迁移） |
+| 匿名 `GET /api/groups` | 401 |
+| 部署的 SPA 资源 | `index-CE5uFhWw.js` / `index-B4CUtYad.css` —— 文件名是内容 hash，与本地这次验证过的构建产物同名，即同一份产物 |
+| 本次改动的证据 | 线上这两个 bundle 里都能 grep 到 `group-row-detail`（CSS 与 JS 各命中一次） |
+| 管理员登录 + `/api/auth/me` | 200 / 200（账号未被重置） |
+| 带会话 `GET /api/groups` | 200（8 个测试组）；其中一个组 30 条用例、`progress` 为 `passed 0 / untested 30` |
+| `GET /api/groups/<id>/lark/target` | 200（该组尚未选择 Lark 表，`target: null`） |
+| api / worker 日志 | 部署后 300 行内无 error / traceback |
+
+回滚：`cd /home/ubuntu/testdeck && ./deploy.sh v0.1.12`（纯前端改动，本次无 schema 变更，可直接回滚）。
+
+**线上没有做的一件事**：这次是纯前端改动，线上只验到"served bundle 与本地验证过的那份同名（内容 hash）+ 新标记确实在生产 bundle 里"，没有在浏览器里登录再走一遍执行页——避免把生产管理员口令写进终端与会话记录。需要视觉确认时，本地 mock 端口（见上节）与线上是同一份构建产物。
