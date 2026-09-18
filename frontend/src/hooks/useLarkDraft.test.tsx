@@ -52,6 +52,16 @@ const OTHER_EXEC_RESOLVED: LarkResolved = {
   selected: { table_id: "tbl-runs", table_name: "执行记录", view_id: null }
 };
 
+// 另一个 base，表 id 与执行库重名：切 base 后对同名表的校验必须真的再发一次（复审 A3）。
+const SWAP_URL = "https://tenant.larksuite.com/base/app-swap";
+const SWAP_RESOLVED: LarkResolved = {
+  ...RESOLVED,
+  source_url: SWAP_URL,
+  base_token: "app-swap",
+  base_name: "换库",
+  selected: { table_id: "tbl-runs", table_name: "执行记录", view_id: null }
+};
+
 const TARGET: LarkTarget = {
   group_id: "group-1",
   source_url: URL,
@@ -406,5 +416,181 @@ describe("useLarkDraft", () => {
       harness.result.current.invalidateRole("execution");
     });
     expect(verdictFor(harness.result.current.draft, "execution")).toBe("unread");
+  });
+
+  // 复审 A3 / R-F14：去重键含 base，同一张表在另一个 base 里不算重复请求。
+  it("does not let one base's in-flight check swallow the same table in another base", async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((settle) => {
+      release = settle;
+    });
+    const readTableSchema = vi.fn(async (baseToken: string, tableId: string) => {
+      if (baseToken === "app-exec" && tableId === "tbl-runs") {
+        await gate;
+        return { table_id: tableId, fields: {}, required: [], schema_errors: ["旧 base 的迟到结论"] };
+      }
+      return { table_id: tableId, fields: {}, required: [], schema_errors: [] };
+    });
+    const harness = setup({
+      resolve: async (url) => (url === SWAP_URL ? SWAP_RESOLVED : RESOLVED),
+      readTableSchema
+    });
+    const { result } = harness;
+
+    await readLink(harness, "execution", URL);
+    // 第一次校验挂在 app-exec 上不落地
+    let stuck: Promise<void> = Promise.resolve();
+    await act(async () => {
+      stuck = result.current.checkTable("execution");
+    });
+    expect(readTableSchema).toHaveBeenCalledWith("app-exec", "tbl-runs", "execution");
+
+    // 切到另一个 base（同名表 tbl-runs），再校验一次：不同的 base 不算重复
+    await readLink(harness, "execution", SWAP_URL);
+    await act(async () => {
+      await result.current.checkTable("execution");
+    });
+    expect(readTableSchema).toHaveBeenCalledWith("app-swap", "tbl-runs", "execution");
+
+    // 迟到的那份属于旧 base：不许写进现在的 base，判决停在换库之后的 ok
+    release();
+    await act(async () => {
+      await stuck;
+    });
+    expect(verdictFor(result.current.draft, "execution")).toBe("ok");
+  });
+
+  // 复审 A3：checking 只回答「这个 role 现在选中的那张表是不是在飞」。
+  it("does not report a role as busy for a table other than the one being checked", async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((settle) => {
+      release = settle;
+    });
+    const readTableSchema = vi.fn(async (_baseToken: string, tableId: string) => {
+      if (tableId === "tbl-runs") await gate;
+      return { table_id: tableId, fields: {}, required: [], schema_errors: [] };
+    });
+    const harness = setup({ readTableSchema });
+    const { result } = harness;
+    await readLink(harness, "execution", URL); // 缺陷表自动校验（tbl-bugs，不挂）
+
+    let stuck: Promise<void> = Promise.resolve();
+    await act(async () => {
+      stuck = result.current.checkTable("execution");
+    });
+    expect(result.current.checking).toBe("execution");
+
+    // 选到另一张表：正在飞的那次不是给它的，checking 不许替它说「在加载」
+    await act(async () => {
+      result.current.setTable("execution", "tbl-bugs");
+    });
+    expect(result.current.checking).toBeNull();
+
+    release();
+    await act(async () => {
+      await stuck;
+    });
+  });
+
+  // 复审 A3：失败的那次必须从登记表里释放，否则这张表的校验按钮永久失效。
+  it("releases the in-flight entry when a check fails, so the next attempt is not swallowed", async () => {
+    const harness = setup();
+    const { result, readTableSchema, onError } = harness;
+    await readLink(harness, "execution", URL);
+    readTableSchema.mockRejectedValueOnce(new Error("读取该表字段失败"));
+
+    await act(async () => {
+      await result.current.checkTable("execution");
+    });
+    expect(onError).toHaveBeenCalledWith("读取该表字段失败");
+    expect(verdictFor(result.current.draft, "execution")).toBe("unreadable");
+
+    await act(async () => {
+      await result.current.checkTable("execution");
+    });
+    expect(readTableSchema).toHaveBeenCalledTimes(3);
+    expect(verdictFor(result.current.draft, "execution")).toBe("ok");
+  });
+
+  // 复审 A3：api.ts 没有超时，永不落地的请求过了放弃窗口就必须允许重发。
+  it("re-issues a check that never settled once the abandon window has passed", async () => {
+    const clock = vi.spyOn(Date, "now").mockReturnValue(1_000);
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((settle) => {
+      release = settle;
+    });
+    let gated = false;
+    const readTableSchema = vi.fn(async (_baseToken: string, tableId: string) => {
+      if (tableId === "tbl-runs" && !gated) {
+        gated = true;
+        await gate;
+      }
+      return { table_id: tableId, fields: {}, required: [], schema_errors: [] };
+    });
+    const harness = setup({ readTableSchema });
+    const { result } = harness;
+    await readLink(harness, "execution", URL); // 缺陷表自动校验：第 1 次
+
+    let stuck: Promise<void> = Promise.resolve();
+    await act(async () => {
+      stuck = result.current.checkTable("execution"); // 第 2 次：挂住不落地
+    });
+
+    clock.mockReturnValue(1_000 + 31_000);
+    await act(async () => {
+      await result.current.checkTable("execution"); // 超过放弃窗口，必须再发一次
+    });
+    clock.mockRestore();
+
+    release();
+    await act(async () => {
+      await stuck;
+    });
+    expect(readTableSchema).toHaveBeenCalledTimes(3);
+  });
+
+  // recheckRole 的意义是「修好之后的结论」：修好之前发出去、之后才落地的那份答案
+  // 不许把它按回去（B7 的窄窗口）。
+  it("refuses to let a pre-repair answer land after the headers were repaired", async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((settle) => {
+      release = settle;
+    });
+    let repaired = false;
+    let gated = false;
+    const readTableSchema = vi.fn(async (_baseToken: string, tableId: string) => {
+      // 答案在请求发出时就已经定了（服务端读表头的那一刻），落地时可能已经过时。
+      const answer = {
+        table_id: tableId,
+        fields: {},
+        required: [],
+        schema_errors: repaired ? [] : ["缺少必填字段「截图」"]
+      };
+      if (tableId === "tbl-runs" && !gated) {
+        gated = true;
+        await gate;
+      }
+      return answer;
+    });
+    const harness = setup({ readTableSchema });
+    const { result } = harness;
+    await readLink(harness, "execution", URL); // 缺陷表自动校验：第 1 次
+
+    let stuck: Promise<void> = Promise.resolve();
+    await act(async () => {
+      stuck = result.current.checkTable("execution"); // 第 2 次：修好之前发出，挂着
+    });
+
+    repaired = true;
+    await act(async () => {
+      await result.current.recheckRole("execution"); // 第 3 次：修好之后的结论
+    });
+    expect(verdictFor(result.current.draft, "execution")).toBe("ok");
+
+    release();
+    await act(async () => {
+      await stuck; // 旧答案这时才落地
+    });
+    expect(verdictFor(result.current.draft, "execution")).toBe("ok");
   });
 });

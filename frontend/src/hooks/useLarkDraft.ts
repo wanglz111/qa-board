@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { LarkResolved, LarkTarget, Table, TableRole, TableSchema } from "../api";
 import {
@@ -37,6 +37,35 @@ type Options = {
   readTableSchema: (baseToken: string, tableId: string, role: TableRole) => Promise<TableSchema>;
   onError: (message: string) => void;
 };
+
+const ROLES: TableRole[] = ["execution", "bug"];
+
+// 请求挂死时的兜底：api.ts 的 request() 没有超时，超过这个时长就认为那次校验已经作废，
+// 允许重新发起（复审 A3）。它只管「能不能重发」，不动 probe 槽位：槽位仍然是 loading。
+const CHECK_ABANDON_MS = 30_000;
+
+// 在途登记的值：发起时刻（放弃窗口用）+ 递增序号（身份用 —— 毫秒时钟在同一毫秒内会撞车，
+// 被顶掉的那次就会误以为自己还是最新的一次）。
+type Flight = { startedAt: number; seq: number };
+
+// 去重键与 probe 槽位键不是一个东西：槽位键永远只是 `${table_id}:${role}`（契约），
+// 去重键才带 base。切 base 后对同名表的校验不能被上一段的在途请求吞掉（复审 A3）。
+function flightKeyFor(baseToken: string, tableId: string, role: TableRole): string {
+  return `${baseToken}:${probeKey(tableId, role)}`;
+}
+
+// checking 只回答一个问题：这个 role 现在选中的那张表是不是正在校验。按
+// (base_token, table_id, role) 判等，而不是只按 role —— 同一 role 的另一张表在飞时，
+// 不许替当前这张表说「在加载」（复审 A3 / R-F14）。两个 role 都在飞时先报 execution。
+function checkingFor(draft: Draft, flights: readonly string[]): TableRole | null {
+  for (const role of ROLES) {
+    const base = effectiveBase(draft, role);
+    const tableId = draft[role].tableId;
+    if (!base || !tableId) continue;
+    if (flights.includes(flightKeyFor(base.base_token, tableId, role))) return role;
+  }
+  return null;
+}
 
 function messageOf(reason: unknown, fallback: string): string {
   return reason instanceof Error && reason.message ? reason.message : fallback;
@@ -130,60 +159,82 @@ export function useLarkDraft(opts: Options): LarkDraftActions {
   const { groupId, resolve, readTableSchema, onError } = opts;
   const [draft, setDraft] = useState<Draft>(emptyDraft);
   const [reading, setReading] = useState<TableRole | null>(null);
-  const [checking, setChecking] = useState<TableRole | null>(null);
 
   // 异步回落到地上时要读「当次渲染」的 draft（链接框可能在请求飞行中被改过），
   // 闭包里的 draft 是发起那次请求时的旧值 —— 用 ref 拿最新的。
   const draftRef = useRef(draft);
   draftRef.current = draft;
-  // 同一张表同一个 role 的校验不许并发重复发请求（验收门 7）。
-  const inFlight = useRef<Set<string>>(new Set());
+  // 同一张表、同一个 role、同一个 base 的校验不许并发重复发请求（验收门 7）；键含 base
+  // 才不会把「另一个 base 里的同名表」当成重复吞掉（复审 A3）。值在 finally 里释放。
+  const inFlight = useRef<Map<string, Flight>>(new Map());
+  const flightSeq = useRef(0);
+  // 登记表的渲染镜像：checking 由它 + 当前选中表派生，不再单独记一份状态。
+  const [flightKeys, setFlightKeys] = useState<readonly string[]>([]);
+
+  const syncFlightKeys = useCallback(() => {
+    setFlightKeys([...inFlight.current.keys()]);
+  }, []);
+
+  const checking = useMemo(
+    () => checkingFor(draft, flightKeys),
+    [draft, flightKeys]
+  );
 
   useEffect(() => {
     // 换了测试组：draft 复位（行为契约）。上一组的链接、base、判决都不属于这一组。
     setDraft(emptyDraft());
     setReading(null);
-    setChecking(null);
     inFlight.current.clear();
+    setFlightKeys([]);
   }, [groupId]);
 
   const runCheck = useCallback(
     async (role: TableRole, baseToken: string, tableId: string): Promise<void> => {
       if (!baseToken || !tableId) return;
-      const key = probeKey(tableId, role);
-      if (inFlight.current.has(key)) return;
-      inFlight.current.add(key);
-      setDraft((current) => withSlot(current, role, baseToken, key, "loading"));
-      setChecking(role);
+      const slotKey = probeKey(tableId, role);
+      const flightKey = flightKeyFor(baseToken, tableId, role);
+      const now = Date.now();
+      const started = inFlight.current.get(flightKey);
+      if (started && now - started.startedAt < CHECK_ABANDON_MS) return;
+      const seq = (flightSeq.current += 1);
+      inFlight.current.set(flightKey, { startedAt: now, seq });
+      syncFlightKeys();
+      setDraft((current) => withSlot(current, role, baseToken, slotKey, "loading"));
+      // 只有「最新的一次」能写结果：recheckRole 会顶掉在途的那次，迟到的那份旧答案
+      // 不许把修好之后的判决按回去。
+      const isNewest = () => inFlight.current.get(flightKey)?.seq === seq;
       try {
         const schema = await readTableSchema(baseToken, tableId, role);
+        if (!isNewest()) return;
         // 服务端说它答的是另一张表：这份字段不能挂到这张表的 key 上，那正是这次
         // 重构要根治的「串味」。当作一次失败的读取处理。
         if (schema.table_id !== tableId) {
           const message = `校验结果与请求的表不一致：请求 ${tableId}，返回 ${schema.table_id}`;
           setDraft((current) =>
-            withSlot(current, role, baseToken, key, unreadableProbe(message))
+            withSlot(current, role, baseToken, slotKey, unreadableProbe(message))
           );
           onError(message);
           return;
         }
         setDraft((current) =>
-          withSlot(current, role, baseToken, key, {
+          withSlot(current, role, baseToken, slotKey, {
             fields: schema.fields,
             required: schema.required,
             schema_errors: schema.schema_errors
           })
         );
       } catch (reason) {
+        if (!isNewest()) return;
         const message = messageOf(reason, "读取该表字段失败");
-        setDraft((current) => withSlot(current, role, baseToken, key, unreadableProbe(message)));
+        setDraft((current) => withSlot(current, role, baseToken, slotKey, unreadableProbe(message)));
         onError(message);
       } finally {
-        inFlight.current.delete(key);
-        setChecking((current) => (current === role ? null : current));
+        // 只释放「我这一次」的登记：被顶掉/被放弃的那次不许删掉后来者的键。
+        if (inFlight.current.get(flightKey)?.seq === seq) inFlight.current.delete(flightKey);
+        syncFlightKeys();
       }
     },
-    [readTableSchema, onError]
+    [readTableSchema, onError, syncFlightKeys]
   );
 
   const setLink = useCallback((role: TableRole, url: string) => {
@@ -300,10 +351,15 @@ export function useLarkDraft(opts: Options): LarkDraftActions {
       const tableId = current[role].tableId;
       if (!base || !tableId) return;
       invalidateRole(role);
+      // 还在飞的那次是「修好之前」发出的：把它从登记表里撤掉，否则 runCheck 会把它当成
+      // 重复请求吞掉调用，而它迟到的答案又会把判决按回去（B7 在窄窗口里复发）。撤掉之后
+      // isNewest 会让那份旧答案落地时自己作废。
+      inFlight.current.delete(flightKeyFor(base.base_token, tableId, role));
+      syncFlightKeys();
       // 不带 base 复用：runCheck 自己会按 baseToken 写回，切了 base 就写不进去（那是正确行为）。
       await runCheck(role, base.base_token, tableId);
     },
-    [invalidateRole, runCheck]
+    [invalidateRole, runCheck, syncFlightKeys]
   );
 
   const acceptCreatedTable = useCallback(
