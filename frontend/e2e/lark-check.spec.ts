@@ -18,6 +18,32 @@ const RESOLVED = {
   read_errors: []
 };
 
+const RUNS_FIELDS = { 用例: "text", 结果: "single_select" };
+const BUGS_FIELDS = { 用例: "text", 结果: "single_select", 截图: "attachment", 问题描述: "text", 进展状态: "single_select" };
+// 判决在这里现算：字段缺了就进 schema_errors —— 与后端同一条口径，也与 mock-api 的
+// schemaOf 同一条口径（两处各写一份就会出现「读取说缺、校验说不缺」的自相矛盾）。
+const schema = (table_id: string, fields: Record<string, string>, required: string[]) => ({
+  table_id,
+  fields,
+  required,
+  schema_errors: required.filter((name) => !(name in fields)).map((name) => `缺少必填字段「${name}」`)
+});
+
+const SCHEMAS: Record<string, ReturnType<typeof schema>> = {
+  "tbl-runs:execution": schema("tbl-runs", RUNS_FIELDS, ["用例", "结果", "截图"]),
+  "tbl-runs:bug": schema("tbl-runs", RUNS_FIELDS, ["问题描述", "进展状态"]),
+  "tbl-bugs:execution": schema("tbl-bugs", BUGS_FIELDS, ["用例", "结果", "截图"]),
+  "tbl-bugs:bug": schema("tbl-bugs", BUGS_FIELDS, ["问题描述", "进展状态"])
+};
+
+// 门 1 的起点：resolve 说 tbl-runs 缺「截图」。判决由 resolve 播种（零请求），
+// 所以「旧红字」在第一次切表之前就在屏幕上。
+const BAD_RESOLVE = {
+  ...RESOLVED,
+  execution_fields: { 用例: "text", 结果: "single_select" },
+  schema_errors: ["缺少必填字段「截图」"]
+};
+
 const TARGET = {
   group_id: GROUP_ID,
   source_url: RESOLVE_URL,
@@ -75,6 +101,12 @@ function tableName(tableId: string): string {
   return RESOLVED.tables.find((table) => table.table_id === tableId)?.name ?? tableId;
 }
 
+// 收起态没有 body：先点标题按钮展开。已经展开就不点（再点一次是收起）。
+async function openStep(page: Page, index: number) {
+  const toggle = page.getByRole("button", { name: new RegExp(`^第 ${index} 步`) });
+  if ((await toggle.getAttribute("aria-expanded")) === "false") await toggle.click();
+}
+
 async function mockApi(
   page: Page,
   saved: SavedTarget[] = [],
@@ -110,6 +142,15 @@ async function mockApi(
     }
     if (pathname === "/api/lark/resolve") {
       return route.fulfill({ json: RESOLVED });
+    }
+    if (pathname === "/api/lark/table-schema" && method === "POST") {
+      const payload = request.postDataJSON() as { table_id?: string; role?: string };
+      const key = `${payload.table_id}:${payload.role}`;
+      return route.fulfill({
+        json:
+          SCHEMAS[key] ??
+          { table_id: payload.table_id ?? "", fields: {}, required: [], schema_errors: [] }
+      });
     }
     if (pathname === `/api/groups/${GROUP_ID}/lark/provision`) {
       return route.fulfill({ json: plan });
@@ -195,6 +236,10 @@ for (const viewport of ["desktop", "mobile"] as const) {
     await page.goto("/");
     await page.getByRole("button", { name: "Lark 检查" }).click();
 
+    // 门 5：failed > 0 → 状态条变红 + 第 ④ 步自动展开（不需要点标题）。
+    await expect(page.locator(".lark-health-strip")).toContainText("同步失败 1 条");
+    await expect(page.locator(".lark-step").filter({ hasText: "第 4 步" })).toHaveAttribute("data-state", "open");
+    await expect(page.locator(".lark-step").filter({ hasText: "第 4 步" })).toContainText("最近错误");
     await expect(page.getByText(/最近错误 create_execution_failed/)).toBeVisible();
     // The category alone was all the panel ever said; now the reason is there.
     await expect(page.getByText(/Lark create failed HTTP 403/)).toBeVisible();
@@ -227,25 +272,76 @@ for (const viewport of ["desktop", "mobile"] as const) {
 }
 
 for (const viewport of ["desktop", "mobile"] as const) {
-  test(`${viewport} Lark check shows real names and blocks writes until consent`, async ({ page }) => {
+  test(`${viewport} a healthy page is one status line and four step titles`, async ({ page }) => {
+    await page.setViewportSize(viewport === "desktop" ? { width: 1440, height: 900 } : { width: 360, height: 800 });
+    await mockApi(page);
+    // 后注册的先命中：这一条 target 已确认，状态条走「健康」分支（骨架第 8 行）。
+    await page.route(`**/api/groups/${GROUP_ID}/lark/target`, (route) =>
+      route.fulfill({
+        json: {
+          target: { ...TARGET, confirmed: true, confirmed_at: "2026-09-17T08:35:17Z" },
+          live: { schema_errors: [], read_errors: [] },
+          read_errors: []
+        }
+      })
+    );
+    await page.goto("/");
+    await page.getByRole("button", { name: "Lark 检查" }).click();
+
+    const strip = page.locator(".lark-health-strip");
+    await expect(strip).toContainText("已确认 · 执行记录 / 缺陷记录");
+    await expect(strip).toContainText("待同步 0 · 失败 0");
+    // 验收门 4：健康态 = 1 行状态条 + 4 行步骤标题，且页面里没有 role="alert"。
+    await expect(page.locator(".lark-step")).toHaveCount(4);
+    await expect(page.locator('[role="alert"]')).toHaveCount(0);
+
+    const noOverflow = await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth);
+    expect(noOverflow).toBe(true);
+    await page.screenshot({ path: `test-results/task7-lark-healthy-${viewport}.png`, fullPage: true });
+  });
+
+  test(`${viewport} writes stay blocked until both tables are checked and consent is given`, async ({ page }) => {
     await page.setViewportSize(viewport === "desktop" ? { width: 1440, height: 900 } : { width: 360, height: 800 });
     await mockApi(page);
     await page.goto("/");
     await page.getByRole("button", { name: "Lark 检查" }).click();
 
-    await expect(page.getByText("旧版测试管理")).toBeVisible();
-    await expect(page.getByText("执行记录", { exact: true })).toBeVisible();
-    await expect(page.getByText("缺陷记录", { exact: true })).toBeVisible();
-    await expect(page.getByText(/尚未确认：本地结果不会写入 Lark/)).toBeVisible();
+    // 未确认的状态条（骨架第 7 行）。
+    await expect(page.locator(".lark-health-strip")).toContainText("未确认：本地结果不会写入 Lark");
 
+    await openStep(page, 1);
+    const stepOne = page.locator(".lark-step-tables");
+    // 门 3：链接没读之前两个 role 谁都不下结论。这一版页面里「尚未校验这张表」只在 base 读到
+    // 之后才渲染（收起态/未读态连 body 都没有），所以「不借用任何结论」在这里的等价证据是
+    // 「一行判决都不存在」；真正的「尚未校验这张表 × 2」在下面切表那条用例里（两 role 各自
+    // 指向没人校验过的表），那里它是可达且非空测的。
+    await expect(stepOne.locator(".lark-verdict")).toHaveCount(0);
+    // 两表都还没有 verdict → 第 ③ 步「两表都 ok 才可进」的前置条件不成立，标题按钮是禁用的，
+    // 它 body 里的确认按钮此刻根本进不去（门 6：确认必须排在两表校验之后）。
+    await expect(page.getByRole("button", { name: /^第 3 步/ })).toBeDisabled();
+
+    // 读链接：执行表判决由 resolve 播种（零请求），同库缺陷表顺手校验一次。
+    const link = page.getByLabel("Lark 文档链接");
+    // 链接框由 draftFromTarget 异步预填：等它落地再读，否则这次读取会被 resetDraft 作废。
+    await expect(link).toHaveValue(RESOLVE_URL);
+    await link.fill(RESOLVE_URL);
+    await page.getByRole("button", { name: "读取表格" }).click();
+    // 两表各自 ok（门 2：判决不串味），第 ③ 步这时才进得去。
+    await expect(stepOne.locator('.lark-verdict[data-verdict="ok"]')).toHaveCount(2);
+
+    // 勾选框与确认按钮都渲染在第 ③ 步的 body 里，收起态不渲染 children —— 先展开它。
+    // 顺序是契约的一部分：必须排在两表都校验完之后，否则这一步的标题按钮还是禁用的。
+    await openStep(page, 3);
+    const consent = page.getByLabel("允许向上述旧表新增本组记录");
     const confirmButton = page.getByRole("button", { name: /确认本组写入目标/ });
+    await expect(consent).toBeEnabled();
     await expect(confirmButton).toBeDisabled();
-    await page.getByLabel("允许向上述旧表新增本组记录").check();
+    await consent.check();
     await expect(confirmButton).toBeEnabled();
 
     const noOverflow = await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth);
     expect(noOverflow).toBe(true);
-    await page.screenshot({ path: `test-results/task2-lark-check-${viewport}.png`, fullPage: true });
+    await page.screenshot({ path: `test-results/task7-lark-consent-${viewport}.png`, fullPage: true });
   });
 
   test(`${viewport} switching the execution table waits for the change dialog`, async ({ page }) => {
@@ -284,6 +380,8 @@ for (const viewport of ["desktop", "mobile"] as const) {
     await page.goto("/");
     await page.getByRole("button", { name: "Lark 检查" }).click();
 
+    // plan 行与「设置表头」都在第 ② 步的 body 里：收起态不渲染 children（StepSection），先展开。
+    await openStep(page, 2);
     await expect(page.getByText(/缺少 2 个表头/)).toBeVisible();
     await page.getByRole("button", { name: "设置表头" }).click();
 
@@ -325,5 +423,98 @@ for (const viewport of ["desktop", "mobile"] as const) {
 
     const noOverflow = await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth);
     expect(noOverflow).toBe(true);
+  });
+
+  test(`${viewport} switching the execution table clears the old table's red banner`, async ({ page }) => {
+    await page.setViewportSize(viewport === "desktop" ? { width: 1440, height: 900 } : { width: 360, height: 800 });
+    await mockApi(page);
+    const schemaCalls: string[] = [];
+    await page.route("**/api/lark/resolve", (route) => route.fulfill({ json: BAD_RESOLVE }));
+    await page.route("**/api/lark/table-schema", (route) => {
+      const body = route.request().postDataJSON() as { table_id?: string; role?: string };
+      const key = `${body.table_id}:${body.role}`;
+      schemaCalls.push(key);
+      return route.fulfill({
+        json:
+          SCHEMAS[key] ??
+          { table_id: body.table_id ?? "", fields: {}, required: [], schema_errors: [] }
+      });
+    });
+    await page.route(`**/api/groups/${GROUP_ID}/lark/target`, (route) =>
+      route.fulfill({
+        json: {
+          target: { ...TARGET, confirmed: true, confirmed_at: "2026-09-17T08:35:17Z" },
+          live: { schema_errors: [], read_errors: [] },
+          read_errors: []
+        }
+      })
+    );
+    await page.goto("/");
+    await page.getByRole("button", { name: "Lark 检查" }).click();
+    await openStep(page, 1);
+
+    const link = page.getByLabel("Lark 文档链接");
+    // 同前：等 draftFromTarget 的异步预填落地，再读。
+    await expect(link).toHaveValue(RESOLVE_URL);
+    await link.fill(RESOLVE_URL);
+    await page.getByRole("button", { name: "读取表格" }).click();
+
+    // 红字属于 tbl-runs，来自 resolve 的播种 —— 一次请求都没发。
+    const execution = page.locator('.lark-role[data-role="execution"]');
+    await expect(execution.getByText("缺少必填字段「截图」")).toBeVisible();
+    expect(schemaCalls).not.toContain("tbl-runs:execution");
+    // 同库缺陷表被顺手校验了一次（规格 §8），那是另一张表的判决。
+    expect(schemaCalls).toContain("tbl-bugs:bug");
+
+    // 本次 bug 的回归：切到另一张表，旧表的判决不许跟过来（验收门 1）。
+    await page.getByLabel("执行记录表").selectOption("tbl-bugs");
+    await expect(page.getByText("缺少必填字段「截图」")).toHaveCount(0);
+    // 未校验就是未校验，也不借用 tbl-bugs:bug 的结论（验收门 3）。
+    await expect(execution.getByText("尚未校验这张表")).toBeVisible();
+
+    // 门 3 的另一半：两个 role 同时指向「没人校验过的表」时，各自都只说尚未校验 ——
+    // 缺陷表这次指着 tbl-runs，也绝不借用 resolve 播种给 tbl-runs:execution 的那条 bad。
+    await page.getByLabel("缺陷记录表").selectOption("tbl-runs");
+    await expect(page.locator(".lark-step-tables").getByText("尚未校验这张表")).toHaveCount(2);
+    await page.getByLabel("缺陷记录表").selectOption("tbl-bugs");
+
+    // 校验当前选中的表：这张表自己 ok，红字不回来；同表不重复发请求（门 7）。
+    await execution.getByRole("button", { name: "校验", exact: true }).click();
+    await expect(execution.getByText("尚未校验这张表")).toHaveCount(0);
+    await expect(page.getByText("缺少必填字段「截图」")).toHaveCount(0);
+    expect(schemaCalls.filter((key) => key === "tbl-bugs:execution")).toHaveLength(1);
+
+    const noOverflow = await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth);
+    expect(noOverflow).toBe(true);
+    await page.screenshot({ path: `test-results/task7-switch-table-${viewport}.png`, fullPage: true });
+  });
+
+  test(`${viewport} a stale header wakes the status line and opens the header step`, async ({ page }) => {
+    await page.setViewportSize(viewport === "desktop" ? { width: 1440, height: 900 } : { width: 360, height: 800 });
+    await mockApi(page);
+    // 门 5 的第一条：服务端对**已保存目标**的重读报表头失效（`live.schema_errors`）。
+    // target 已确认 → 骨架 §describeHealth 第 3 行（task-02-03-draft.md:773 的实现用词）。
+    await page.route(`**/api/groups/${GROUP_ID}/lark/target`, (route) =>
+      route.fulfill({
+        json: {
+          target: { ...TARGET, confirmed: true, confirmed_at: "2026-09-17T08:35:17Z" },
+          live: { schema_errors: ["缺少必填字段「截图」"], read_errors: [] },
+          read_errors: []
+        }
+      })
+    );
+    await page.goto("/");
+    await page.getByRole("button", { name: "Lark 检查" }).click();
+
+    // 状态条变红，并且说清是哪一步的事。
+    const strip = page.locator(".lark-health-strip");
+    await expect(strip).toHaveAttribute("data-tone", "bad");
+    await expect(strip).toContainText("已确认，但表头已失效（需重新校验）");
+    // 第 ② 步自动展开，不需要点标题 —— 与 Step 8 里第 ④ 步那条断言对称。
+    await expect(page.locator(".lark-step").filter({ hasText: "第 2 步" })).toHaveAttribute("data-state", "open");
+
+    const noOverflow = await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth);
+    expect(noOverflow).toBe(true);
+    await page.screenshot({ path: `test-results/task7-lark-stale-header-${viewport}.png`, fullPage: true });
   });
 }

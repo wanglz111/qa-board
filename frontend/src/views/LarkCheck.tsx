@@ -4,7 +4,7 @@ import {
   ApiError, type CreateTablePayload, type CreateTableResult, type Group, type LarkResolved, type LarkTarget,
   type LarkTargetChangeDetail, type LarkTargetPayload, type LarkTargetState, type ProvisionFieldsPayload,
   type ProvisionFieldsResult, type ProvisionPlan, type RebuildTablePayload, type RebuildTableResult,
-  type RetypeFieldsPayload, type RetypeFieldsResult, type SyncEnqueueResult, type SyncStatus, type Table,
+  type RetypeFieldsPayload, type RetypeFieldsResult, type SyncEnqueueResult, type SyncStatus,
   type TableRole, type TableSchema
 } from "../api";
 import { LarkHealthStrip } from "../components/lark/LarkHealthStrip";

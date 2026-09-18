@@ -122,6 +122,51 @@ const SCREENSHOT_PNG = png(
     [30, 33, 36]
   )
 );
+// 表级校验（POST /api/lark/table-schema）。判决必须按「当前选中的那张表 + 角色」
+// 现算，所以这里刻意让两张表给出不同的答案：
+//   执行记录（tbl-exec）缺「截图」→ 打开页面、校验它，就是一条红字；
+//   冒烟测试bug表（tbl-bug）带齐两个角色各自的必填列 → 切过去、校验一次，红字消失。
+// 这就是本次重构要演示的那条路径，也是本地手测「门 1」的入口。
+const TABLE_FIELDS = {
+  "tbl-exec": { 用例编号: "text", 结果: "single_select", 说明: "text", 控制台输出: "text" },
+  // 两个角色的必填列都齐：它既是缺陷表的默认选项，也要能被当成执行表选中来演示门 1。
+  "tbl-bug": {
+    用例编号: "text",
+    结果: "single_select",
+    截图: "attachment",
+    问题描述: "text",
+    进展状态: "single_select"
+  }
+};
+// 必填列按 role 算，与后端一致：execution 用 REQUIRED_RUN_FIELD_TYPES、bug 用
+// REQUIRED_BUG_FIELD_TYPES（backend/app/lark/fields.py:61/:73，两边都含「截图」）。
+const REQUIRED_FIELDS = {
+  execution: ["用例编号", "结果", "截图"],
+  bug: ["问题描述", "进展状态", "截图"]
+};
+
+// 表不在 base 里 → 422（真实接口也是 422：表没了与没权限是两回事）；role 非法 → 422。
+function schemaOf(tableId, role) {
+  if (!Object.hasOwn(TABLE_FIELDS, tableId)) {
+    return { status: 422, body: { detail: `这个多维表格里没有这张数据表：${tableId}` } };
+  }
+  if (!Object.hasOwn(REQUIRED_FIELDS, role)) {
+    return { status: 422, body: { detail: `role 必须是 execution 或 bug：${role}` } };
+  }
+  const fields = TABLE_FIELDS[tableId];
+  const required = REQUIRED_FIELDS[role];
+  return {
+    status: 200,
+    body: {
+      table_id: tableId,
+      fields,
+      required,
+      schema_errors: required
+        .filter((name) => !Object.hasOwn(fields, name))
+        .map((name) => `缺少必填字段「${name}」`)
+    }
+  };
+}
 
 // ------------------------------------------------------------------- fixtures
 
@@ -733,6 +778,11 @@ const server = createServer(async (req, res) => {
   }
 
   if (path === "/api/lark/resolve") {
+    // 执行表的判决与 /api/lark/table-schema 同源：两处都不能各自手写一份字段，
+    // 否则「读取时的红字」与「校验后的红字」会互相打脸。
+    // 注意 execution_fields 的值现在是真正的类型名：旧 mock 回的是「字段名→字段名」，
+    // 字段 chips 会显示成 用例编号 · 用例编号。
+    const execution = schemaOf("tbl-exec", "execution").body;
     return send(res, 200, {
       source_url: "https://example.larksuite.com/base/mockBaseToken",
       base_token: "mockBaseToken",
@@ -742,11 +792,16 @@ const server = createServer(async (req, res) => {
         { table_id: "tbl-bug", name: "冒烟测试bug表" }
       ],
       selected: { table_id: "tbl-exec", table_name: "执行记录", view_id: null },
-      execution_fields: { 用例编号: "用例编号", 结果: "结果", 说明: "说明", 控制台输出: "控制台输出" },
-      required_execution_fields: ["用例编号", "结果", "说明", "控制台输出"],
-      schema_errors: [],
+      execution_fields: execution.fields,
+      required_execution_fields: execution.required,
+      schema_errors: execution.schema_errors,
       read_errors: []
     });
+  }
+  if (path === "/api/lark/table-schema") {
+    const payload = await body(req);
+    const answer = schemaOf(payload?.table_id, payload?.role);
+    return send(res, answer.status, answer.body);
   }
 
   if (path === "/api/ai-prompts") {

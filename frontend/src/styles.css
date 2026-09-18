@@ -107,10 +107,7 @@ table { width: 100%; border-collapse: collapse; font-size: .8rem; } th { color: 
 .reports-layout { max-width: 820px; }.report-panel { padding: 22px; background: #fff; border: 1px solid #dfe3e5; border-radius: 8px; }.report-summary { color: #5b6469; font-size: .84rem; line-height: 1.6; }
 .report-actions { display: flex; flex-wrap: wrap; gap: 10px; }.report-actions a { text-decoration: none; }
 .lark-check-layout { max-width: 900px; }.lark-panel { margin-bottom: 16px; padding: 18px 20px; background: #fff; border: 1px solid #dfe3e5; border-radius: 8px; }
-.lark-healthy { color: #a23b36; }.inline-status.saved { color: #1c6b45; }
-.lark-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); gap: 6px 18px; margin: 12px 0; padding: 0; }
-.lark-facts dt { color: #7c858a; font-size: .7rem; font-weight: 800; }.lark-facts dd { margin: 4px 0 0; font-weight: 700; }
-.lark-fields { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; color: #5b6469; font-size: .78rem; }.lark-field { padding: 2px 8px; background: #f3f5f5; border-radius: 999px; font-size: .72rem; }
+.inline-status.saved { color: #1c6b45; }
 .lark-consent { display: flex; align-items: center; gap: 9px; margin: 14px 0 12px; font-weight: 700; }.lark-consent input { width: auto; min-height: auto; }
 .sync-badge { padding: 3px 9px; border-radius: 999px; font-size: .72rem; font-weight: 700; }.sync-badge.confirmed { color: #1c6b45; background: #e2f2e9; }.sync-badge.unconfirmed { color: #8a6206; background: #fdf1d5; }
 .lark-queue { margin-top: 10px; padding-top: 10px; border-top: 1px solid #eceeef; }.lark-queue .inline-status { margin: 0 0 10px; }
@@ -123,7 +120,6 @@ table { width: 100%; border-collapse: collapse; font-size: .8rem; } th { color: 
 
 .lark-panel-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
 .lark-panel-heading .ghost-button { min-height: 32px; }
-.lark-roles { margin-top: 14px; }.lark-roles .inline-status { margin: 0 0 12px; }
 /* Task 5：一行状态条 + 4 步向导的外壳（只新增；死规则的清理在 Task 7） */
 .lark-step { margin-bottom: 12px; background: #fff; border: 1px solid #dfe3e5; border-radius: 8px; }
 .lark-step-heading { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin: 0; padding: 12px 16px; font-size: .95rem; }
