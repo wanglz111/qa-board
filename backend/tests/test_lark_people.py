@@ -50,6 +50,13 @@ def test_clearing_the_page_field_falls_back_to_the_environment_again(
     assert people.resolved_reporter_open_id(db_session) == "ou_from_env"
     assert people.resolved_owner_open_id(db_session) is None
 
+    # The fallback above passes for any falsy column value, "" included; this is
+    # what pins the constraint that "not configured" is SQL NULL, not an empty
+    # string (an unset id is omitted from the request, an empty one is sent).
+    row = db_session.scalars(select(LarkPeople)).one()
+    assert row.reporter_open_id is None
+    assert row.owner_open_id is None
+
 
 def test_saving_twice_keeps_one_row(db_session):
     people.save_people(db_session, reporter_open_id="ou_one", owner_open_id=None)

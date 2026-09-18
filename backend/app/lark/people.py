@@ -30,7 +30,7 @@ router = APIRouter(prefix="/api", dependencies=[Depends(require_admin)])
 # Every token is interpolated into a request the writer sends as-is, and Lark
 # only ever mints open ids in this shape. Refusing anything else here is what
 # keeps a display name ("Max") or a union id out of a column that reads neither.
-OPEN_ID = re.compile(r"^ou_[A-Za-z0-9_-]{1,64}$")
+OPEN_ID = re.compile(r"^ou_[A-Za-z0-9_-]{1,64}\Z")
 
 SINGLETON_ID = 1
 
@@ -74,11 +74,17 @@ def resolved_owner_open_id(db: Session) -> str | None:
 def save_people(
     db: Session, *, reporter_open_id: str | None, owner_open_id: str | None
 ) -> LarkPeople:
-    """Write both ids, or NULL for "not configured"; never a name."""
+    """Normalize both ids and write them; "not configured" is NULL, never "".
+
+    Format validation is not this function's job: the boundary is the HTTP
+    layer's ``_checked``, which strips and refuses anything that is not an open
+    id with a 422. This one trusts its caller but still normalizes, so a blank
+    or whitespace-only value lands as NULL however it arrived.
+    """
 
     row = read_people(db)
-    row.reporter_open_id = reporter_open_id or None
-    row.owner_open_id = owner_open_id or None
+    row.reporter_open_id = (reporter_open_id or "").strip() or None
+    row.owner_open_id = (owner_open_id or "").strip() or None
     db.commit()
     db.refresh(row)
     return row
