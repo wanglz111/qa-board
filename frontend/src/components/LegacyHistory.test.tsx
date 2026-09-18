@@ -128,10 +128,10 @@ it("refuses the retest while the caller says a save is in flight", async () => {
     />
   );
 
-  const retest = await screen.findByRole("button", { name: /复测（新标签/ });
-  expect(retest).toBeDisabled();
-  await userEvent.click(retest);
-  expect(onStartRetest).not.toHaveBeenCalled();
+  // `toBeDisabled()` is the whole judgement: `userEvent.click` deliberately does
+  // not dispatch on a disabled element, so asserting that the click did nothing
+  // could never fail.
+  expect(await screen.findByRole("button", { name: /复测（新标签/ })).toBeDisabled();
 });
 
 it("switches between legacy and current views", async () => {

@@ -13,6 +13,7 @@ import type {
   SubmitPayload,
   SyncStatus
 } from "../api";
+import { ApiError } from "../api";
 import { toneOf, type Tone } from "../caseTone";
 import { CaseDetail } from "../components/CaseDetail";
 import { CaseGrid } from "../components/CaseGrid";
@@ -60,6 +61,17 @@ function useIdempotencyKey() {
 
 function message(reason: unknown) {
   return reason instanceof Error ? reason.message : "保存失败";
+}
+
+// A rejected `commitReserved` cannot be retried into success with an edited
+// payload: the row is already committed (the earlier attempt landed and only its
+// read-back failed), the edited payload mints a new key, no row carries that key,
+// and `submit_attempt` refuses with 409 「Attempt is already committed」. The only
+// other 409 the route answers is an idempotency-key collision, which the
+// signature — it carries this reservation's own id — rules out in practice. Both
+// mean "this save did not land", which is all the message claims.
+function isAlreadyCommitted(reason: unknown) {
+  return reason instanceof ApiError && reason.status === 409;
 }
 
 // A read is not trusted to have the shape its type promises: an unmocked
@@ -117,7 +129,10 @@ export function ExecutionView({
   // rather than a behaviour a test pins.
   const submitting = inFlight > 0;
   const beginRequest = () => setInFlight((count) => count + 1);
-  const endRequest = () => setInFlight((count) => count - 1);
+  // Floored at zero: a stray release must not leave the counter negative, where
+  // the next request would bring it back to `0` and the desk would look idle
+  // while it is still waiting on the server.
+  const endRequest = () => setInFlight((count) => Math.max(0, count - 1));
   // The visit identity: it increments on exactly the two events that move the
   // desk (`selectGroup`, `showCase`), so a save that outlives several awaits
   // compares it to tell whether the operator is still on the case it belongs to.
@@ -341,6 +356,9 @@ export function ExecutionView({
     };
     beginRequest();
     setStatus(null);
+    // Whether this save commits a reservation or creates a row. The catch needs
+    // it: a rejected commit is a different animal from a rejected create.
+    const committingReservation = Boolean(reserved && commitReserved);
     let advanceTo: number | null = null;
     // Whether the row is stored is the one thing the catch below has to know:
     // everything after the submit is *reading back* a save that already landed,
@@ -462,9 +480,18 @@ export function ExecutionView({
             }
           : {
               // The submit request itself was rejected: nothing was stored, so the
-              // form must keep the note for the retry.
+              // form must keep the note for the retry — unless this was a
+              // reservation the server has already committed. That one can never
+              // be retried into success once the payload is edited (the signature
+              // carries the payload, so the edit mints a new key that no row
+              // carries, and the route refuses the attempt it already committed).
+              // 「可重试」 there is the same false invitation this defect is about,
+              // one layer down: the way out is to reload, not to press save again.
               tone: "error",
-              text: `保存失败：${message(reason)}，可重试`
+              text:
+                committingReservation && isAlreadyCommitted(reason)
+                  ? `重测 ${reserved?.label ?? ""} 已经提交过，这次修改没有保存：刷新页面后可重新提交`
+                  : `保存失败：${message(reason)}，可重试`
             }
       );
     } finally {
@@ -478,8 +505,18 @@ export function ExecutionView({
   async function retryUpload() {
     if (!lastAttemptId) return;
     beginRequest();
-    const uploaded = await uploadAll(lastAttemptId, images);
-    endRequest();
+    let uploaded = false;
+    try {
+      uploaded = await uploadAll(lastAttemptId, images);
+    } catch {
+      // `uploadAll` reports a failed upload by returning false today, but the
+      // count must not depend on that: one rejection escaping here would leave
+      // the counter above zero and lock the save button and the keyboard
+      // shortcuts for the rest of the session.
+      uploaded = false;
+    } finally {
+      endRequest();
+    }
     setStatus(
       uploaded
         ? { tone: "saved", text: "截图已全部上传" }
