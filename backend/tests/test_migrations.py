@@ -35,8 +35,25 @@ def test_empty_test_schema_upgrades_to_head_twice(migrated_database):
     with migrated_database.connect() as connection:
         assert set(inspect(connection).get_table_names()) == EXPECTED_TABLES
         assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-            "0014_group_archive"
+            "0015_import_ticket_autovacuum"
         )
+        # An uploaded bundle is one bytea, so it lives in TOAST, and the import
+        # flow clears it as soon as the ticket is used. The dead TOAST that leaves
+        # is only reclaimed if autovacuum picks this table up, and the default
+        # trigger never fires for a table with a handful of rows — production sat
+        # at 92 MB of dead TOAST until it was vacuumed by hand. Table storage
+        # parameters live in the database rather than in the model, so this is
+        # where they are checked. Scoped to the schema under test: relname alone
+        # also matches a table of the same name left behind in another schema.
+        reloptions = connection.scalar(
+            text(
+                "SELECT reloptions FROM pg_class "
+                "WHERE relname = 'import_tickets' "
+                "AND relnamespace = current_schema()::regnamespace"
+            )
+        )
+        assert "autovacuum_vacuum_threshold=5" in reloptions
+        assert "autovacuum_vacuum_scale_factor=0" in reloptions
         # A retired group is hidden, not destroyed: the moment it was archived is
         # a column of the row, and NULL means it is still on the board.
         assert "archived_at" in {
@@ -179,7 +196,7 @@ def test_short_code_backfill_keeps_existing_groups_addressable(database_at_0004)
 
     with database_at_0004.connect() as connection:
         assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-            "0014_group_archive"
+            "0015_import_ticket_autovacuum"
         )
         assert connection.scalar(
             text("SELECT short_code FROM groups WHERE id = :id"), {"id": group_id}

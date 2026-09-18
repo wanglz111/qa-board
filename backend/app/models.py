@@ -280,6 +280,16 @@ class CaseReferenceLink(Base):
 
 
 class ImportTicket(Base):
+    """An uploaded bundle waiting to be imported: one use, 30 minutes.
+
+    `original_file` is the whole upload — for a casebook, the zip with its
+    pictures — so PostgreSQL keeps it in this table's TOAST relation. The import
+    flow clears it the moment the ticket is consumed or expires (the row stays as
+    a tombstone, so a stale page gets a clear answer), and that leaves dead TOAST
+    rows behind. A table this small never trips the default autovacuum trigger, so
+    it carries its own thresholds; see `0015_import_ticket_autovacuum`.
+    """
+
     __tablename__ = "import_tickets"
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
