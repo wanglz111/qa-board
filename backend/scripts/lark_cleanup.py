@@ -18,8 +18,20 @@
     CLEANUP_EXEC_TABLE    默认 tblGMDjey2ufbUxd
     CLEANUP_BUG_TABLE     默认 tblUyjeopEHO8QVx
 
-为什么顺序不能颠倒：删掉一个还被人引用的选项会连带清空那些单元格的值，
-所以错位行必须先走。
+顺序：先删行 → 再洗选项 → 最后删废表。
+
+**但顺序本身不足以保住数据。** 实测（一次真实事故的复盘）：
+
+    `PUT .../tables/{tbl}/fields/{fld}` 带 `property.options` 会**重建整份选项表并重新
+    分配 option id**，于是所有引用旧 option id 的单元格都被清空 —— 不只是被删掉的那些
+    选项，**保留下来的选项所引用的值也一起没了**。4 个单选列洗完，13 行已有数据的值全空。
+
+所以洗选项这一步实际是四段式：**快照 → 洗 → 写回 → 独立重读逐行核对**。
+「我只删了没用的选项，所以其他值安全」这个推断只在**没有数据的探针表**上成立，
+而探针表恰恰观察不到这件事（当初就是在一张空表上验的，所以误判为安全）。
+
+同理：任何洗结构的操作之后都不要采信脚本自己的复查，必须另起一次独立读
+（下面核对阶段会重新 GET records，而不是复用写回时的响应）。
 """
 
 from __future__ import annotations
@@ -63,6 +75,9 @@ WASHES: list[tuple[str, str, tuple[str, ...]]] = [
 ]
 
 JUNK_TABLES = ("数据表", "Bug表", "测试流程表")
+
+# 两个角色表（标签, 表 id）；删行、快照、写回、核对都按这个顺序走。
+ROLE_TABLES: tuple[tuple[str, str], ...] = (("执行记录", EXEC_TABLE), ("缺陷记录", BUG_TABLE))
 
 
 class Lark:
@@ -130,6 +145,73 @@ def misplaced(lark: Lark, table: str, column: str) -> list[dict[str, Any]]:
     ]
 
 
+def wash_columns(table: str) -> list[str]:
+    """这张表上即将被洗掉的单选列名。"""
+    return [name for tbl, name, _ in WASHES if tbl == table]
+
+
+def snapshot(
+    lark: Lark, table: str, columns: list[str], skip_ids: set[str] | None = None
+) -> dict[str, dict[str, Any]]:
+    """洗选项前把要保留下来的值 dump 下来：{record_id: {列名: 原值}}。
+
+    只记「即将被洗的那些列」，不整行 dump（截图/人员/日期等列不参与洗，写回时也不带，
+    免得把无关字段一起回写）。只记确实有值的列，空值不落进来，这样写回时不会把
+    None 覆盖上去。值按飞书返回的原样存（单选就是选项名字符串）。
+    """
+    skip = skip_ids or set()
+    out: dict[str, dict[str, Any]] = {}
+    for record in lark.records(table):
+        record_id = record.get("record_id")
+        if not record_id or record_id in skip:
+            continue
+        fields = record.get("fields") or {}
+        kept = {
+            name: fields[name] for name in columns if fields.get(name) not in (None, "", [])
+        }
+        if kept:
+            out[record_id] = kept
+    return out
+
+
+def restore(lark: Lark, table: str, saved: dict[str, dict[str, Any]]) -> None:
+    """按 record_id 把快照逐行写回。"""
+    if not saved:
+        return
+    lark.request(
+        "POST",
+        f"/open-apis/bitable/v1/apps/{BASE_TOKEN}/tables/{table}/records/batch_update",
+        json={
+            "records": [
+                {"record_id": record_id, "fields": values} for record_id, values in saved.items()
+            ]
+        },
+    )
+
+
+def check_restored(lark: Lark, table: str, saved: dict[str, dict[str, Any]]) -> int:
+    """独立重读一次（不复用写回的响应），逐 record_id 与快照比对；返回不一致的行数。"""
+    live = {r.get("record_id"): (r.get("fields") or {}) for r in lark.records(table)}
+    bad = 0
+    for record_id, values in saved.items():
+        fields = live.get(record_id)
+        if fields is None:
+            print(f"    {record_id}  !! 写回后这一行不见了")
+            bad += 1
+            continue
+        diffs = [
+            f"{name}: 期望 {value!r} 实际 {fields.get(name)!r}"
+            for name, value in values.items()
+            if fields.get(name) != value
+        ]
+        if diffs:
+            print(f"    {record_id}  !! {'; '.join(diffs)}")
+            bad += 1
+        else:
+            print(f"    {record_id}  OK")
+    return bad
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--apply", action="store_true", help="真的执行删除；默认只打印")
@@ -172,21 +254,33 @@ def main() -> int:
     for table in junk_tables:
         print(f"  {table['table_id']}  {table['name']}")
 
+    # 将被删掉的错位行：快照要跳过它们（它们不保留，值也不需要救）。
+    doomed = {row["record_id"] for _, rows in plan.items() for row in rows}
+
     if not args.apply:
+        print("\n=== 洗选项前的快照计划（dry-run 预览）===")
+        for label, table in ROLE_TABLES:
+            preview = snapshot(lark, table, wash_columns(table), doomed)
+            print(f"  {label}（{table}）：快照 {len(preview)} 行 → 洗完写回 {len(preview)} 行")
         print("\n（dry-run：什么都没改。加 --apply 才执行。）")
         return 0
 
-    for label, table, rows in (
-        ("执行记录", EXEC_TABLE, plan["执行记录"]),
-        ("缺陷记录", BUG_TABLE, plan["缺陷记录"]),
-    ):
-        ids = [row["record_id"] for row in rows]
+    for label, table in ROLE_TABLES:
+        ids = [row["record_id"] for row in plan[label]]
         lark.request(
             "POST",
             f"/open-apis/bitable/v1/apps/{BASE_TOKEN}/tables/{table}/records/batch_delete",
             json={"records": ids},
         )
         print(f"已删 {label} {len(ids)} 行")
+
+    # 洗选项会重建整份选项表，连保留下来的选项所引用的值也一起清空（见文件头）。
+    # 所以删完错位行、动选项之前，先把要保留的值按 record_id 快照下来。
+    print("\n=== 洗选项前快照要保留的值 ===")
+    saved: dict[str, dict[str, dict[str, Any]]] = {}
+    for label, table in ROLE_TABLES:
+        saved[table] = snapshot(lark, table, wash_columns(table), doomed)
+        print(f"  {label}（{table}）：快照 {len(saved[table])} 行")
 
     for table, name, wanted in WASHES:
         live = next(f for f in lark.fields(table) if f.get("field_name") == name)
@@ -201,6 +295,20 @@ def main() -> int:
         )
         print(f"已洗 {table}.{name}")
 
+    print("\n=== 按 record_id 写回快照 ===")
+    for label, table in ROLE_TABLES:
+        if not saved[table]:
+            print(f"  {label}（{table}）：无值需要写回")
+            continue
+        restore(lark, table, saved[table])
+        print(f"  {label}（{table}）：已写回 {len(saved[table])} 行")
+
+    print("\n=== 独立重读核对写回结果 ===")
+    mismatched = 0
+    for label, table in ROLE_TABLES:
+        print(f"  {label}（{table}）：")
+        mismatched += check_restored(lark, table, saved[table])
+
     for table in junk_tables:
         lark.request(
             "DELETE", f"/open-apis/bitable/v1/apps/{BASE_TOKEN}/tables/{table['table_id']}"
@@ -213,9 +321,12 @@ def main() -> int:
         current = [o.get("name") for o in (live.get("property") or {}).get("options", [])]
         ok = current == list(wanted)
         print(f"  {table}.{name}: {'OK' if ok else '!! 仍有差异'} {current}")
-    for label, table in (("执行记录", EXEC_TABLE), ("缺陷记录", BUG_TABLE)):
+    for label, table in ROLE_TABLES:
         print(f"  {label} 剩余行数：{len(lark.records(table))}")
     print(f"  剩余表：{[t['name'] for t in lark.tables()]}")
+    if mismatched:
+        print(f"\n!! 写回后有 {mismatched} 行与快照不一致（见上面的 !! 行）：值没救回来。")
+        return 1
     return 0
 
 
