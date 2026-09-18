@@ -31,6 +31,7 @@
 12. 只有图上确实能指出具体位置时才写 `focus`：`{ "label": "确认按钮", "note": "文案应为「确认购买」", "box": [x, y, w, h] }`，坐标 0–1 归一化；写不出坐标就只留 `label`（`note` 可选）。
 13. 三处集合必须完全一致：`assets/` 文件、`assets` 对象 key、被 `references` 引用到的 key。不要导出没有被任何用例引用的图片。
 14. 不要输出 Base64，不要输出图片二进制，不要联网抓图。
+15. 每条用例都必须带 `priority` 和 `layer`：沿用「已有用例」里该条的「优先级」和「执行分层」，分别写进 `priority`（只能 `P0` / `P1` / `P2`）和 `layer`（只能 `Smoke` / `Core` / `Regression`），写法与枚举完全一致，不要改名、不要换大小写。已有用例没写这两个值、或某条确实判断不出来时，**先停下来问我**（一次把缺的条目列清楚），不要自己猜、也不允许省略：漏写不会报错，但优先级和执行分层会整批丢失，属于缺陷。
 
 **JSON Schema（必须逐条满足）**
 
@@ -197,6 +198,7 @@
 5. 所有 `not_verifiable` 都带了 `visual.note`，其它 check 都至少有一条 `references`？
 6. `box` 是否都是 0–1 之间的 4 个数字？
 7. `expect_absent` 只放了明确要求「不应出现」的内容？
+8. 逐条核对（不是抽查）每条用例的 `priority` 和 `layer` 都写了，且取值分别在 `P0`/`P1`/`P2` 与 `Smoke`/`Core`/`Regression` 之内？
 
 【需求】
 （在这里粘贴 PRD / 页面说明）
@@ -209,20 +211,25 @@
 
 ---
 
-## 第二部分：格式速查（人工维护，AI 不需要看到）
+## 第二部分：格式速查（人工参考；AI 即使读到也不得放宽第一部分）
+
+> 本节和第三部分是给人看的补充说明，**不是对第一部分的放宽**：哪个字段必填、能不能省，一律以第一部分「硬性要求」为准。若你正在生成 JSON，读到本节也不能据此省掉 `priority`、`layer` 或任何第一部分要求的字段。
 
 完整说明见 [CASEBOOK-FORMAT.md](CASEBOOK-FORMAT.md)。要点：
 
 - 包结构只有一个 JSON 加一棵图片树：`casebook.json` + `assets/<key>.<png|jpg|jpeg|webp>`；**文件名就是 key**。
 - 图片按组去重：同一张图被多条用例引用时只存一份，用例侧保留 role / caption / focus。
 - ZIP ≤ 100 MB，解压后 ≤ 250 MB，单张图 ≤ 20 MB 且 ≤ 5000 万像素，用例 1–5000 条。
-- 校验是严格模式：字段、类型、枚举、三处集合任一不符都会 422 作废；可选字段只能省略，不能写 `null`。
+- 校验是严格模式：字段、类型、枚举、三处集合任一不符都会 422 作废；`position`、`focus`、`box` 这类**可省字段**要么按类型写对，要么整个不写，写 `null` 会被拒绝。
+- `priority` / `layer` 是第一部分的必填纪律：漏写**不会**报错，但导入和 Lark 都拿不到值，线上表现就是整批优先级落成 P2——不要把它当成上一条里的「可省字段」。
 - 图片由人从设计稿导出，AI 只写 JSON。
 
 ## 第三部分：常见错误写法
 
 | 写法 | 结果 |
 | --- | --- |
+| 用例里漏写 `priority` / `layer` | 导入不报错，但优先级和执行分层整批丢失，Lark 里全部显示 P2（见第一部分硬性要求第 15 条） |
+| `"priority": "p0"` / `"layer": "smoke"` | `cases[0].priority: expected one of P0\|P1\|P2`（枚举大小写严格） |
 | 顶层多写 `"slices": [...]` | `casebook.json: unknown field(s) slices` |
 | 用例里写 `"steps": "1. 打开页面"` | `cases[0].steps: must be an array of strings` |
 | `"role": "Expected"` | `references[0].role: expected one of expected\|locator` |
