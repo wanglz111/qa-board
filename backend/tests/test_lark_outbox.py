@@ -8,7 +8,6 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 import app.lark.outbox as outbox_module
-import app.worker as worker_module
 from app.config import settings
 from app.lark.fields import person_field_names
 from app.lark.outbox import (
@@ -19,6 +18,7 @@ from app.lark.outbox import (
     retry_failed_jobs,
     run_job,
 )
+from app.lark.people import save_people
 from app.lark.target import target_for
 from app.lark.write import (
     bug_fields,
@@ -291,6 +291,40 @@ def test_a_person_typed_run_column_is_filled_with_an_id_or_left_out(failed_attem
 
     assert "负责人" not in with_id
     assert with_id["报告人"] == [{"id": "ou_reporter"}]
+
+
+def test_the_owner_column_receives_the_configured_open_id(failed_attempt):
+    """负责人 is a person column now, so a display name there is a refused write."""
+
+    fields = execution_fields(
+        failed_attempt,
+        failed_attempt.group_case,
+        owner="待指派",
+        reporter="Max",
+        attachments=[],
+        person_fields={"负责人", "报告人"},
+        reporter_id="ou_reporter",
+        owner_id="ou_owner",
+    )
+
+    assert fields["负责人"] == [{"id": "ou_owner"}]
+    assert fields["报告人"] == [{"id": "ou_reporter"}]
+
+
+def test_an_unconfigured_owner_stays_a_display_name_on_a_text_column(failed_attempt):
+    """A legacy text column keeps receiving the name it always has."""
+
+    fields = execution_fields(
+        failed_attempt,
+        failed_attempt.group_case,
+        owner="待指派",
+        reporter="Max",
+        attachments=[],
+        person_fields=set(),
+        owner_id="ou_owner",
+    )
+
+    assert fields["负责人"] == "待指派"
 
 
 def test_a_person_typed_defect_column_is_never_sent_text(failed_attempt):
@@ -1419,9 +1453,11 @@ def test_an_upload_failure_keeps_the_job_queued_with_its_screenshot(
 def test_a_configured_reporter_id_fills_the_person_column(
     fake_lark, confirmed_group, failed_attempt, screenshot_store, db_session, monkeypatch
 ):
+    # The id is resolved in app.lark.people, so that is the settings object the
+    # deployment's environment value has to be planted on: the worker no longer
+    # reads DEFAULT_REPORTER_ID off its own module.
     monkeypatch.setattr(
-        worker_module,
-        "settings",
+        "app.lark.people.settings",
         replace(settings, default_reporter_id="ou_61dabbc372d72932a4f6d8c7afb9de75"),
     )
 
@@ -1430,6 +1466,34 @@ def test_a_configured_reporter_id_fills_the_person_column(
     assert fake_lark.created_records[1]["fields"]["反馈人"] == [
         {"id": "ou_61dabbc372d72932a4f6d8c7afb9de75"}
     ]
+
+
+def test_the_worker_takes_the_person_ids_from_the_saved_settings(
+    fake_lark, failed_attempt, confirmed_group, db_session
+):
+    """The page's saved ids are what the create carries, not the env value.
+
+    ``confirmed_group`` stores a fingerprint whose 负责人/报告人 are text — the
+    live tables' shape before the conversion. Flipping them to person columns
+    (11) here is what a re-read of a converted table produces, and the writer
+    shapes its value from that stored fingerprint alone.
+    """
+
+    target = _stored_target(db_session, confirmed_group.id)
+    target.schema_fingerprint = (
+        "优先级:3|报告人:11|日期:5|结果:3|用例:1|截图:17|控制台:1|负责人:11"
+        "||"
+        "优先级:3|反馈人:11|反馈时间:5|备注:1|截图:17|跟进人:11|进展状态:3|问题描述:1"
+    )
+    db_session.commit()
+
+    save_people(db_session, reporter_open_id="ou_reporter", owner_open_id="ou_owner")
+
+    process_one_job(fake_lark, failed_attempt)
+
+    fields = fake_lark.created_records[0]["fields"]
+    assert fields["负责人"] == [{"id": "ou_owner"}]
+    assert fields["报告人"] == [{"id": "ou_reporter"}]
 
 
 def test_a_freshly_queued_row_waits_for_the_evidence_of_its_attempt(

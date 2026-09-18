@@ -11,6 +11,7 @@ from app.config import settings
 from app.db import engine
 from app.lark.client import LarkClient, build_lark_client
 from app.lark.outbox import claim_next_job, park_job_for_target_change, run_job
+from app.lark.people import resolved_owner_open_id, resolved_reporter_open_id
 from app.lark.target import target_for
 from app.lark.write import HttpLarkWriteGateway, LarkWriteGateway
 from app.models import Attempt, LarkTarget, SyncJob
@@ -76,7 +77,10 @@ def process_one_job(
         # address is only the fallback when no name is configured.
         reporter=reporter or settings.default_reporter or settings.admin_email,
         owner=settings.default_owner,
-        reporter_id=settings.default_reporter_id or None,
+        # The open ids live in the settings row the page writes; the environment
+        # value is only what a deployment that never opened that page still has.
+        reporter_id=resolved_reporter_open_id(session),
+        owner_id=resolved_owner_open_id(session),
         now=now,
     )
     return job.state

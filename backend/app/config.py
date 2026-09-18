@@ -22,15 +22,21 @@ class Settings:
     lark_base_url: str = "https://open.feishu.cn"
     lark_app_id: str = ""
     lark_app_secret: str = ""
-    # 负责人 and 报告人 are plain text columns in the verified run table, and the
-    # hand-built rows carry the deployment's display names, not the sign-in
-    # address the operator types at login. DEFAULT_OWNER/DEFAULT_REPORTER hold
-    # those names so a generated row reads like a hand-run one.
+    # 负责人 and 报告人 are person columns in every run table this tool builds,
+    # and a person column accepts nothing but an open id. A legacy table built by
+    # hand may still carry them as text, so the writer decides per table from the
+    # schema fingerprint stored with that group's target: a person column gets a
+    # configured open id, a text column keeps the display name it always had.
+    # DEFAULT_OWNER/DEFAULT_REPORTER only ever feed a text column — a person
+    # column nobody holds an id for is left out of the request entirely, which
+    # still writes the row.
     default_owner: str = "待指派"
     default_reporter: str = ""
-    # The 反馈人 column of the verified defect table is a person column, and only
-    # an open id is accepted there. Empty means "no id is known": the writer then
-    # keeps 反馈人 as text so a legacy text column still receives the name.
+    # The fallback for a deployment whose settings page has never been filled in.
+    # What the page saves lives in the lark_people row and takes precedence over
+    # this value, so it is no longer the only source of the reporter's open id.
+    # Empty means "no id is known": a person-typed 报告人/反馈人 is then left
+    # out, while a legacy text column still receives the display name.
     default_reporter_id: str = ""
 
 

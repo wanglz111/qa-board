@@ -101,19 +101,21 @@ def execution_fields(
     attachments: list[str] | None = None,
     person_fields: set[str] | None = None,
     reporter_id: str | None = None,
+    owner_id: str | None = None,
 ) -> dict[str, Any]:
     people = person_fields or set()
     fields: dict[str, Any] = {
         "用例": f"{case.code} {case.title}",
         "结果": attempt.result or "",
         "优先级": _priority(case.priority, RUN_PRIORITY_OPTIONS),
-        # 负责人 and 报告人 are two separate plain-text columns: the hand-run
-        # rows file the case under the deployment's owner (待指派) and name the
-        # reporter, rather than repeating one address in both. Either column is
-        # a person column in a table this tool did not build, and then only a
-        # configured open id may fill it — 负责人, which is a placeholder, is
-        # left empty there instead of failing the create.
-        "负责人": _person_field_value("负责人", text=owner, person_fields=people),
+        # 负责人 and 报告人 are two separate columns. Both are person columns in
+        # every table this tool builds, and then only a configured open id may
+        # fill them — 负责人, which carries the deployment's placeholder, is left
+        # empty there instead of failing the create. A table that still has them
+        # as text keeps receiving the display name it always has.
+        "负责人": _person_field_value(
+            "负责人", text=owner, person_fields=people, open_id=owner_id
+        ),
         "报告人": _person_field_value(
             "报告人", text=reporter, person_fields=people, open_id=reporter_id
         ),

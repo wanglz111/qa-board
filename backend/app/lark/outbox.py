@@ -321,6 +321,7 @@ def run_job(
     reporter: str,
     owner: str | None = None,
     reporter_id: str | None = None,
+    owner_id: str | None = None,
     now: datetime | None = None,
 ) -> SyncJob:
     """Run one job. A remote create is never repeated once its id is stored."""
@@ -387,6 +388,7 @@ def run_job(
             attachments=attachments,
             person_fields=run_people,
             reporter_id=reporter_id,
+            owner_id=owner_id,
         )
         try:
             job.new_exec_record_id = gateway.create_execution(fields)
