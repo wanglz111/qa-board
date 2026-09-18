@@ -158,7 +158,7 @@ desk 内紧凑进度行（PiP 可见）：
 1. **守卫用「访问令牌」而不是下标**：`save()` 开头记 `savedVisit = caseRequest.current`（`caseRequest` 只在 `selectGroup` / `showCase` 里自增），所有**用例范围**的写入用 `loadedGroup.current === savedGroupId && caseRequest.current === savedVisit` 判定。下标比不出来「一直没走开」与「走开又回到同一下标」，后者会被强行拽走。`caseIndexRef` 因此整个删除。
 2. **截图没传成功就不前进**：`advanceTo = uploaded ? nextUntestedIndex(updated, savedIndex) : null`。原规格没写这条，但前进会清空 `images`（证据被丢弃），而 `keepStatus` 留下的 error 状态 + 未失效的 `lastAttemptId` 会让下一条用例上的「重试上传截图」把**新用例的截图传到上一条的 attempt**。留在原用例才让附件与重试按钮都指向正确的记录。
 3. **迟到的写入一律不许跨界**：`setAttempts` / `setLastAttemptId` / `setImages([])` / 表单复位 / 前进 都带同一对守卫；保存期间切走后落地的保存不再改动画面上那一条的任何东西。
-4. **`setReserved` 收窄为「只清掉本次保存消费的那条预留」**（`setReserved(current => current?.id === reserved?.id ? null : current)`）：`LegacyHistory` 的「复测」按钮没有 `disabled`，操作员能在保存飞行期间预留，原写法会把它抹掉并孤儿化标签。
+4. **`setReserved` 收窄为「只清掉本次保存消费的那条预留」**（`setReserved(current => current?.id === reserved?.id ? null : current)`）：`LegacyHistory` 的「复测」按钮没有 `disabled`，操作员能在保存飞行期间预留，原写法会把它抹掉并孤儿化标签。**（2026-09-18 补记）**：该按钮现在带 `disabled`，操作员已无法在保存飞行期间预留，所以这条收窄在 UI 上不可达；它作为「预留归操作员所有」的语义声明保留，代码注释里声明了没有测试能钉住它。**退租的时机**也一并调整（`a9b227a`）：不再紧跟提交，而是挪到「提交后的整条读取链完成」时——否则读取失败后重试会铸出新 key 并多写一行（见附录 G 的 O10）。
 5. **`startRetest` 丢弃迟到的预留**（捕获组与访问令牌，返回时比对）：预留落在已被离开的用例上时不写入 `reserved`。预留行仍是 `started` 且无结果，丢弃不丢数据。
 6. **`setStatus` 刻意不门控**：它是「事件发生了」的通知、且文本自带用例编号（`{code} 已保存到本地 · …`）；门控掉等于静默吞掉「到底存进去没有」的反馈。
 7. **`setCases` / `setSync` 只按组门控**（它们描述的是这个组的列表与徽标，不是某一次访问）。
@@ -167,19 +167,21 @@ desk 内紧凑进度行（PiP 可见）：
 9. **desk 进度行必须写出全部四个计数**：`{done}/{total} · 通过{p} 不通过{f} 跳过{s} 未测{u}`。原设计的 `✓/✗/○` 三符号版**没有「跳过」这一格**，而 PiP 窗口里看不到侧栏图例——恰恰是「画中画显示逻辑准确」这一约束落空的地方。
 10. **`备注` 第一行标签的权威性**见第 C 节的实施期修正；D1 的两条反例同时被钉住（埋在第 2 行以后的标签失效；带第一行标签的行不会被自由文本里的巧合编号抢走）。
 
-### G. 实施期发现的待决缺陷（不在本次批准范围内，未修，交人类决定）
+### G. 实施期发现的待决缺陷（O1/O2/O3/O10 已修，其余仍待人类决定）
 
 | # | 缺陷 | 证据 | 建议修法 |
 |---|---|---|---|
-| O1 | 幂等键签名不含 group（`save()` 的 `signature` 只有 code/result/note/console/reserved），而 `Attempt.idempotency_key` 全局唯一且服务端按 key 去重：两个组里的同编号用例提交**完全相同**的载荷时会复用同一个 key → 第二次保存可能被服务端当成重复而什么都没存 | `backend/app/models.py:157`（unique）、`backend/app/execution.py:74-92`（按 key 匹配）、`frontend/src/views/Execution.tsx` 的 `signature` | 把 `savedGroupId` 加进签名数组 + 一条跨组回归测试 |
-| O2 | `submitting` 被「保存」与「预留重测」共用：预留流程的 `finally { setSubmitting(false) }` 会在保存仍在飞行时释放保存的 spinner（于是可能出现并发提交） | 复审探针（`LegacyHistory` 路径）复现 | 拆成两个标志或改计数器 |
-| O3 | `LegacyHistory.tsx:243` 的「复测（新标签，不覆盖旧结果）」按钮**没有 `disabled`**，保存期间仍可点（O2 的入口） | 同上 | 与其他入口对齐，加 `disabled={submitting}` |
-| O3b | 修正 4 只保护到「画面未移动」为止：保存期间预留、保存落地后自动前进，`showCase` 的 `setReserved(null)` 仍会把这条预留丢弃（整体复审用 2 用例组复现）。**附录里原先写的「预留本身已由修正 4 保护」是错的** | 复审探针 | 前进前先判断是否有本用例未消费的预留；或给预留加「随用例离开即释放」的语义 |
+| O1 **已修** | 幂等键签名不含 group（`save()` 的 `signature` 只有 code/result/note/console/reserved），而 `Attempt.idempotency_key` 全局唯一且服务端按 key 去重：两个组里的同编号用例提交**完全相同**的载荷时会复用同一个 key。**症状更正**：这不是「静默丢结果」——`_matching_attempt` 发现 key 属于别的用例时，`create_attempt` 直接答 **409 `Idempotency key conflict`**，而重试铸出的仍是同一个 key（签名没变），于是卡在报错循环里，直到操作员改结果/改说明或刷新页面 | `backend/app/models.py:157`（unique）、`backend/app/execution.py:75-93`（按 key 匹配）、`frontend/src/views/Execution.tsx` 的 `signature` | 已把 `savedGroupId` 放进签名数组（`22b621a`）；`Execution.test.tsx` 的「scopes the idempotency key to the group…」用两组同编号 B-001 钉住「两次提交的 key 不同」 |
+| O2 **已修** | `submitting` 被「保存」与「预留重测」共用：预留流程的 `finally { setSubmitting(false) }` 会在保存仍在飞行时释放保存的 spinner（于是可能出现并发提交） | 复审探针（`LegacyHistory` 路径）复现 | 已改成**在飞计数器**（`inFlight`，`submitting = inFlight > 0`，`beginRequest`/`endRequest`，`22b621a`）。**没有测试能证伪它**：让两个请求重叠的唯一入口是 O3 那个按钮，O3 修好后已关死；代码注释里已声明这是「写在结构里的不变式」，不是测试钉住的行为 |
+| O3 **已修** | `LegacyHistory.tsx:243` 的「复测（新标签，不覆盖旧结果）」按钮**没有 `disabled`**，保存期间仍可点（O2 的入口，也是 O3b 的入口） | 同上 | 新增 `retestDisabled` prop、执行台传 `submitting`（`22b621a`）；`LegacyHistory.test.tsx` 钉组件契约，`Execution.test.tsx` 的「refuses a retest while a save is in flight…」钉「飞行期间点不动、保存落地后按钮回来」 |
+| O3b | 修正 4 只保护到「画面未移动」为止：保存期间预留、保存落地后自动前进，`showCase` 的 `setReserved(null)` 仍会把这条预留丢弃（整体复审用 2 用例组复现）。**附录里原先写的「预留本身已由修正 4 保护」是错的** | 复审探针 | 前进前先判断是否有本用例未消费的预留；或给预留加「随用例离开即释放」的语义。**（2026-09-18 补记）O3 修好后「保存飞行期间预留」这个入口已关死**；残留的是「先预留、再手动切用例/切组/刷新」——`reserved` 只活在内存里、服务端也不会把它读回来，于是预留被丢且留下一条永久 `started` 行（与 O8 同源） |
 | O8 | `state == "started"` 的 attempt 行**全仓没有任何清理路径**（无 sweeper）：本分支的两条丢弃路径各会留下一条永久行并消耗一个 `sequence`/标签位（UI 不可见：`list_attempts` 过滤 committed，`latest_result` 排除 started） | 复审资源审计 | 加一个按时间清理陈旧 `started` 行的任务 |
 | O9 | `setCases(updated)` 只按组门控：保存飞行期间切走再切回（同组 ABA、新访问），陈旧快照会覆盖刚取回的新列表（行数变化时可见） | 复审探针 | 这条写入也用访问令牌门控 |
-| O10 | `save()` 的 `catch` 包住了提交**之后**的读取（attempts/progress/sync/上传），提交其实已入库时也会报「保存失败…可重试」；若操作员改了说明再重试，会多出一条 append 行 | 复审探针 | 把「提交」与「提交后的读取」分开 try，或按错误来源分别措辞 |
+| O10 **已修** | `save()` 的 `catch` 包住了提交**之后**的读取（attempts/progress/sync/上传），提交其实已入库时也会报「保存失败…可重试」；若操作员改了说明再重试，会多出一条 append 行（**原样重试不会**：同一 key 被服务端去重） | 复审探针 | 已按错误来源分别措辞（`22b621a`）：提交答上来就置 `stored = true`，catch 里 `stored` 为真时报「`{code} 结果已保存到本地，但执行记录读取失败（…）」；回归测试「says a stored save was stored when only reading it back fails」。**预留路径的重复行也一并堵上**（`a9b227a`）：预留原先在提交后立刻退租，读取失败后操作员再按保存会铸出新 key，`create_attempt` 便多写一行；现在退租挪到「提交后整条读取链完成」时（与表单复位同处），重试仍拿同一 key、服务端答回已存的那行，若重试时改了说明则响 409 `Attempt is already committed`（响亮报错，不再静默多行）。回归测试「keeps a reserved save retryable when a read after it fails」 |
 | O11 | `retryUpload` 会**重传全部附件**，而 `screenshots.py` 每次都新插一行（uuid 主键、无去重）→ 部分失败后重试会留下重复的 Lark 附件与永久孤儿文件 | 复审审计（早于本分支） | 给上传加幂等（按 attempt+hash 去重） |
 | O12 | `caseTone` 把未知结果算「未测」，而导航的 `isDone` 算「已测」：出现第四个结果值时会出现「本组已全部测过」+ 图例「未测 1」+ 无色方格（当前不可达：写路径被 `Literal` 与 CHECK 约束） | 复审探针（`latest_result:"阻塞"`） | 两处共用同一个「是否已测」判定 |
+
+**本轮状态（2026-09-18，`22b621a` + `a9b227a`）**：O1 / O2 / O3 / O10 已修，共 5 条新回归测试，每条都做了「变异体失败 → 还原变绿」的验证。O10 分两半：措辞按来源分岔（`22b621a`）、预留路径的重试保持幂等（`a9b227a`，把预留退租挪到提交后读取链完成时）。O3 的 `disabled` 顺带关掉了 O3b 的入口，也让「二、F」第 4 条的收窄写法在 UI 上不可达（代码保留为「预留归操作员所有」的语义声明，注释里已注明没有测试能钉住它）。门槛：vitest **205 passed / 18 files**、`npm run build` 干净、playwright **25 passed / 0 failed**、`git diff --check` 干净；backend 未改动（测试库 5433 当时未运行，故未重跑）。**仍开放**：O3b（手动移动/刷新仍会丢预留）、O8、O9、O11、O12（与 `findings.md` 的 O5 同源，不可达）。上表 O1 行的症状描述本轮已按实际行为更正。
 
 ## 三、影响面与验证策略
 
