@@ -148,7 +148,11 @@ export function LarkCheckView({
     setChosen(autoOpen);
   }, [autoOpen]);
   const allDone = STEP_ORDER.every((step) => done[step]);
-  const openStep: StepId | null = chosen === undefined ? (allDone ? null : "tables") : chosen;
+  // 唤醒的自动展开必须是**派生**的，不能只交给上面那个被动 effect 去 setChosen：数据落地的那一次
+  // 提交里 chosen 还是 undefined，若不带 autoOpen 就落到 "tables"，目标步先被渲染成 attention，
+  // 下一帧才变 open —— 页面闪一格红标题，同步断言的测试就会读到 attention（复审 I1）。
+  // 用户选择仍优先：chosen 一旦有值（点过标题，或自动展开已生效），一切照旧听 chosen。
+  const openStep: StepId | null = chosen === undefined ? (autoOpen ?? (allDone ? null : "tables")) : chosen;
   const summaries: Record<StepId, string> = {
     tables: executionVerdict === "ok" && bugVerdict === "ok" ? "两张表都已校验" : "还有表没有校验",
     headers: target ? `已保存目标：${target.execution_table_name} / ${target.bug_table_name}` : HEADER_HINT,
