@@ -160,6 +160,14 @@ export type LarkTargetState = {
   read_errors: string[];
 };
 
+export type LarkPeople = {
+  reporter_open_id: string;
+  owner_open_id: string;
+  env_reporter_open_id: string;
+  effective_reporter_open_id: string;
+  effective_owner_open_id: string;
+};
+
 export type TableRole = "execution" | "bug";
 
 export type Table = { table_id: string; name: string };
@@ -508,6 +516,13 @@ export const api = {
   },
   screenshotUrl: (screenshotId: string) => `/api/screenshots/${screenshotId}`,
   referenceAssetUrl: (assetId: string) => `/api/case-reference-assets/${assetId}`,
+  larkPeople: () => request<LarkPeople>("/api/lark/people"),
+  saveLarkPeople: (payload: { reporter_open_id: string; owner_open_id: string }) =>
+    mutation<LarkPeople>("/api/lark/people", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    }),
   aiPrompts: () => request<AiPrompt[]>("/api/ai-prompts"),
   reportUrl: (groupId: string, format: "csv" | "xlsx") =>
     `/api/groups/${groupId}/reports.${format}`,
