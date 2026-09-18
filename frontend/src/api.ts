@@ -372,6 +372,10 @@ export type ReconcileRow = {
   label: string;
   status: "same" | "local_only" | "remote_only" | "conflict" | "unmatched";
   differing: string[];
+  // True only when this row's own record was read in the table before and is
+  // absent from it now: only a read of the table itself witnesses a deletion,
+  // and only such a row may be deleted locally.
+  remote_deleted: boolean;
   local: { attempt_id: string; result: string | null; console_text: string | null } | null;
   remote: { record_id: string | null; result: string | null; console_text: string | null } | null;
   decision: "use_remote" | "use_local" | null;
@@ -386,7 +390,10 @@ export type ReconcileDiff = {
   unresolved: number;
 };
 
-export type ReconcileDecision = { key: string; action: "use_remote" | "use_local" };
+export type ReconcileDecision = {
+  key: string;
+  action: "use_remote" | "use_local" | "delete_local";
+};
 
 export class ApiError extends Error {
   // ``detail`` stays raw because a refusal is a string while a change request
@@ -567,7 +574,12 @@ export const api = {
   reconcile: (groupId: string, source: "live" | "stored") =>
     request<ReconcileDiff>(`/api/groups/${groupId}/reconcile?source=${source}`),
   applyReconcile: (groupId: string, decisions: ReconcileDecision[]) =>
-    mutation<{ pulled: number; kept: number; skipped: { key: string; reason: string }[] }>(
+    mutation<{
+      pulled: number;
+      kept: number;
+      removed: number;
+      skipped: { key: string; reason: string }[];
+    }>(
       `/api/groups/${groupId}/reconcile/apply`,
       {
         method: "POST",

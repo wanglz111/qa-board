@@ -70,11 +70,11 @@ cd /home/lucascool/qa-board
 # 1) 和 CI 一致的验证（后端需要一个本地 PostgreSQL 测试库）
 cd backend
 TEST_DATABASE_URL=postgresql+psycopg://testdeck:testdeck@127.0.0.1:5433/testdeck_test \
-  .venv/bin/python -m pytest -q          # 期望 446 passed
+  .venv/bin/python -m pytest -q          # 期望 458 passed
 cd ../frontend
-npx vitest run                            # 期望 208 passed（18 文件）
+npx vitest run                            # 期望 212 passed（18 文件）
 npm run build                             # tsc -b + vite build；产物文件名是内容 hash，部署后拿来比对
-npx playwright test                       # 期望 26 passed
+npx playwright test                       # 期望 28 passed
 cd ..
 
 # 2) 推送 main 和版本 tag（推送 tag 才会触发镜像发布）

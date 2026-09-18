@@ -393,6 +393,9 @@ const STATE = {
 
 const ATTEMPTS = new Map();
 let attemptSeq = 0;
+// Reconcile keys whose local row the operator deleted: the read stops showing
+// them, so the page after a delete looks like the page after a real one.
+const deletedInLark = new Set();
 
 function attemptFor(code, result, note, consoleText, when) {
   attemptSeq += 1;
@@ -635,21 +638,44 @@ const server = createServer(async (req, res) => {
     });
   }
 
+  if ((match = path.match(/^\/api\/groups\/([^/]+)\/reconcile\/apply$/))) {
+    const payload = await body(req);
+    const decisions = Array.isArray(payload?.decisions) ? payload.decisions : [];
+    // Answer what it did, like the server does, and forget it on restart like
+    // everything else here: a deleted row is remembered only so the next read
+    // does not show it again.
+    for (const decision of decisions) {
+      if (decision?.action === "delete_local") deletedInLark.add(decision.key);
+    }
+    return send(res, 200, {
+      pulled: decisions.filter((item) => item?.action === "use_remote").length,
+      kept: decisions.filter((item) => item?.action === "use_local").length,
+      removed: decisions.filter((item) => item?.action === "delete_local").length,
+      skipped: []
+    });
+  }
+
   if ((match = path.match(/^\/api\/groups\/([^/]+)\/reconcile$/))) {
     const same = { local: { attempt_id: "attempt-1", result: "通过", console_text: null }, remote: { record_id: "rec-1", result: "通过", console_text: null } };
+    // B-013's record was deleted in Lark: remote_deleted is what lets the page
+    // offer the one action that removes a local row.
+    const rows = [
+      { key: "B-001", case_code: "B-001", label: "B-001", status: "same", differing: [], remote_deleted: false, decision: null, ...same },
+      { key: "B-003", case_code: "B-003", label: "B-003", status: "conflict", differing: ["result", "note"], remote_deleted: false, decision: null, local: { attempt_id: "attempt-2", result: "不通过", console_text: "POST /api/login -> 200 (expected 400)" }, remote: { record_id: "rec-2", result: "通过", console_text: null } },
+      { key: "B-007", case_code: "B-007", label: "B-007", status: "local_only", differing: [], remote_deleted: false, decision: null, local: { attempt_id: "attempt-3", result: "未执行", console_text: null }, remote: null },
+      { key: "B-011", case_code: "B-011", label: "B-011", status: "remote_only", differing: [], remote_deleted: false, decision: null, local: null, remote: { record_id: "rec-4", result: "通过", console_text: null } },
+      { key: "B-013", case_code: "B-013", label: "B-013", status: "local_only", differing: [], remote_deleted: true, decision: null, local: { attempt_id: "attempt-6", result: "不通过", console_text: "wallet.bind timeout" }, remote: null },
+      { key: "旧记录#12", case_code: "B-099", label: "旧记录#12", status: "unmatched", differing: [], remote_deleted: false, decision: null, local: null, remote: { record_id: "rec-5", result: "不通过", console_text: null } }
+    ].filter((row) => !deletedInLark.has(row.key));
+    const counts = { same: 0, local_only: 0, remote_only: 0, conflict: 0, unmatched: 0 };
+    for (const row of rows) counts[row.status] += 1;
     return send(res, 200, {
       source: url.searchParams.get("source") === "stored" ? "stored" : "live",
       source_table_name: "执行记录",
       read_errors: [],
-      rows: [
-        { key: "B-001", case_code: "B-001", label: "B-001", status: "same", differing: [], decision: null, ...same },
-        { key: "B-003", case_code: "B-003", label: "B-003", status: "conflict", differing: ["result", "note"], decision: null, local: { attempt_id: "attempt-2", result: "不通过", console_text: "POST /api/login -> 200 (expected 400)" }, remote: { record_id: "rec-2", result: "通过", console_text: null } },
-        { key: "B-007", case_code: "B-007", label: "B-007", status: "local_only", differing: [], decision: null, local: { attempt_id: "attempt-3", result: "未执行", console_text: null }, remote: null },
-        { key: "B-011", case_code: "B-011", label: "B-011", status: "remote_only", differing: [], decision: null, local: null, remote: { record_id: "rec-4", result: "通过", console_text: null } },
-        { key: "旧记录#12", case_code: "B-099", label: "旧记录#12", status: "unmatched", differing: [], decision: null, local: null, remote: { record_id: "rec-5", result: "不通过", console_text: null } }
-      ],
-      counts: { same: 1, local_only: 1, remote_only: 1, conflict: 1, unmatched: 1 },
-      unresolved: 4
+      rows,
+      counts,
+      unresolved: rows.filter((row) => row.status !== "same").length
     });
   }
 

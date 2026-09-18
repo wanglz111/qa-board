@@ -74,6 +74,21 @@ def screenshot_payload(screenshot: Screenshot) -> dict[str, Any]:
     }
 
 
+def discard_stored(storage_key: str) -> None:
+    """Remove one stored picture, best effort.
+
+    The caller calls this after the row that named the file has been deleted, so
+    there is nothing left to roll back and nothing to report a failure to: a file
+    that survives is unreachable through the API either way, and the alternative
+    — failing the request the administrator already saw succeed — would be worse.
+    """
+
+    try:
+        _storage_path(storage_key).unlink(missing_ok=True)
+    except (HTTPException, OSError):
+        pass
+
+
 def _already_stored(
     db: Session, attempt_id: UUID, content_hash: str
 ) -> Screenshot | None:

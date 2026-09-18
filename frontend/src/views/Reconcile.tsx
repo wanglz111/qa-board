@@ -8,7 +8,12 @@ import {
   type ReconcileRow
 } from "../api";
 
-type ApplyResult = { pulled: number; kept: number; skipped: { key: string; reason: string }[] };
+type ApplyResult = {
+  pulled: number;
+  kept: number;
+  removed: number;
+  skipped: { key: string; reason: string }[];
+};
 
 // Both sides of a row carry the value a difference is judged on.
 type SideRecord = { result: string | null; console_text: string | null } | null;
@@ -59,7 +64,9 @@ export function Reconcile({ groupId, load, apply, loadGroups }: Props) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [selected, setSelected] = useState<string[]>([]);
-  const [confirming, setConfirming] = useState(false);
+  // Which confirmation is up. Adopting and deleting are both irreversible
+  // enough to ask first, and they promise opposite things.
+  const [confirming, setConfirming] = useState<"adopt" | "delete" | null>(null);
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<ApplyResult | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
@@ -99,7 +106,7 @@ export function Reconcile({ groupId, load, apply, loadGroups }: Props) {
     setLoading(true);
     setError("");
     setSelected([]);
-    setConfirming(false);
+    setConfirming(null);
     setResult(null);
     load(activeGroupId, source)
       .then((next) => !cancelled && setDiff(next))
@@ -116,6 +123,13 @@ export function Reconcile({ groupId, load, apply, loadGroups }: Props) {
   const unresolved = rows.filter((row) => row.status !== "same" && row.decision === null);
   const selectedRows = rows.filter((row) => selected.includes(row.key));
   const allSelected = unresolved.length > 0 && unresolved.every((row) => selected.includes(row.key));
+  // Deleting is offered only for rows whose own record has left the table, and
+  // only when every selected row is one of those: a confirmation that mixes a
+  // deletion with rows it cannot touch would have to explain which is which.
+  // The count is the rows that will actually go, not the rows that are ticked —
+  // a disabled "删除本地记录（1）" would read as "one is deletable but no".
+  const deletableRows = selectedRows.filter((row) => row.remote_deleted);
+  const canDelete = selectedRows.length > 0 && deletableRows.length === selectedRows.length;
 
   function toggleRow(key: string) {
     setSelected((current) =>
@@ -138,7 +152,7 @@ export function Reconcile({ groupId, load, apply, loadGroups }: Props) {
     if (!activeGroupId || decisions.length === 0) return;
     setBusy(true);
     setError("");
-    setConfirming(false);
+    setConfirming(null);
     try {
       const applied = await apply(activeGroupId, decisions);
       setResult(applied);
@@ -282,7 +296,10 @@ export function Reconcile({ groupId, load, apply, loadGroups }: Props) {
               </thead>
               <tbody>
                 {rows.map((row) => (
-                  <tr key={row.key} className={`reconcile-row ${row.status}`}>
+                  <tr
+                    key={row.key}
+                    className={`reconcile-row ${row.remote_deleted ? "remote_deleted" : row.status}`}
+                  >
                     <td>
                       {row.status !== "same" && row.decision === null ? (
                         <input
@@ -300,8 +317,15 @@ export function Reconcile({ groupId, load, apply, loadGroups }: Props) {
                       ) : null}
                     </td>
                     <td>
-                      <span className={`reconcile-status ${row.status}`}>
-                        {STATUS_LABEL[row.status]}
+                      {/* The record is gone: "仅本地" would read as "this tool
+                          never filed it", which is the opposite situation and
+                          the one that cannot be deleted. */}
+                      <span
+                        className={`reconcile-status ${
+                          row.remote_deleted ? "remote_deleted" : row.status
+                        }`}
+                      >
+                        {row.remote_deleted ? "表里已删除" : STATUS_LABEL[row.status]}
                       </span>
                       {row.decision ? <span className="reconcile-done">已核对</span> : null}
                     </td>
@@ -338,7 +362,7 @@ export function Reconcile({ groupId, load, apply, loadGroups }: Props) {
             type="button"
             className="primary"
             disabled={selected.length === 0 || busy}
-            onClick={() => setConfirming(true)}
+            onClick={() => setConfirming("adopt")}
           >
             采用表内记录（{selected.length}）
           </button>
@@ -350,14 +374,25 @@ export function Reconcile({ groupId, load, apply, loadGroups }: Props) {
           >
             保留本地记录（{selected.length}）
           </button>
+          <button
+            type="button"
+            className="danger-button"
+            disabled={!canDelete || busy}
+            onClick={() => setConfirming("delete")}
+          >
+            删除本地记录（{deletableRows.length}）
+          </button>
         </div>
         <p className="attachment-hint">
           「保留本地记录」只记录这个决定：Lark
-          表只接收新增记录，本地结果不会写回表。两种处理都不会改动本地原始记录和截图。
+          表只接收新增记录，本地结果不会写回表。这两种处理都不会改动本地原始记录和截图。
+        </p>
+        <p className="attachment-hint">
+          「删除本地记录」只对曾经上传过、且这次读表确认表里已经没有的记录可用。它会一并删掉本地记录、它的截图和上传状态，进度与报告会随之变化，而且无法撤销。
         </p>
         {source === "stored" ? (
           <p className="attachment-hint">
-            「读本地快照」不联网；采用表内记录时服务器仍会当场读表，以表内当前值为准。
+            「读本地快照」不联网，所以它看不出表里的记录被删了：要删本地记录，先切到「当场读表」。采用表内记录时服务器仍会当场读表，以表内当前值为准。
           </p>
         ) : null}
         {selectedRows.length > 0 ? (
@@ -368,6 +403,7 @@ export function Reconcile({ groupId, load, apply, loadGroups }: Props) {
           <div className="reconcile-result" role="status">
             <p className="inline-status saved">
               已拉回 {result.pulled} 条 · 保留 {result.kept} 条
+              {result.removed > 0 ? ` · 删除 ${result.removed} 条` : ""}
             </p>
             {result.skipped.map((skip) => (
               <p key={`${skip.key}-${skip.reason}`} className="inline-status warning">
@@ -389,7 +425,7 @@ export function Reconcile({ groupId, load, apply, loadGroups }: Props) {
           onKeyDown={(event) => {
             if (event.key === "Escape" && !busy) {
               event.preventDefault();
-              setConfirming(false);
+              setConfirming(null);
             }
           }}
         >
@@ -399,37 +435,58 @@ export function Reconcile({ groupId, load, apply, loadGroups }: Props) {
             aria-modal="true"
             aria-labelledby="reconcile-dialog-title"
           >
-            <h3 id="reconcile-dialog-title">采用表内记录？</h3>
-            <p>
-              这会在本组新增一条记录（source=reconcile），本地原始记录和截图会原样保留，这条新记录不会写回
-              Lark。
-            </p>
-            <ul className="reconcile-dialog-keys">
-              {selectedRows.map((row) => (
-                <li key={row.key}>{row.key}</li>
-              ))}
-            </ul>
-            <p className="attachment-hint">
-              采用后本组会多出一条来自表内的记录，原来的本地记录与截图仍然留在本地，不会被改写。
-            </p>
+            {confirming === "delete" ? (
+              <>
+                <h3 id="reconcile-dialog-title">删除本地记录？</h3>
+                <p>
+                  这些记录在 Lark 表里已经没有了，删除会一并删掉本地记录、它的截图和上传状态。这一步无法撤销。
+                </p>
+                <ul className="reconcile-dialog-keys">
+                  {selectedRows.map((row) => (
+                    <li key={row.key}>{row.key}</li>
+                  ))}
+                </ul>
+                <p className="attachment-hint">
+                  只删本地：服务器会在删除前当场再读一次表，确认这些记录确实不在表里；表本身不会被改写。
+                </p>
+              </>
+            ) : (
+              <>
+                <h3 id="reconcile-dialog-title">采用表内记录？</h3>
+                <p>
+                  这会在本组新增一条记录（source=reconcile），本地原始记录和截图会原样保留，这条新记录不会写回
+                  Lark。
+                </p>
+                <ul className="reconcile-dialog-keys">
+                  {selectedRows.map((row) => (
+                    <li key={row.key}>{row.key}</li>
+                  ))}
+                </ul>
+                <p className="attachment-hint">
+                  采用后本组会多出一条来自表内的记录，原来的本地记录与截图仍然留在本地，不会被改写。
+                </p>
+              </>
+            )}
             <div className="reconcile-dialog-actions">
               <button
                 type="button"
                 className="ghost-button"
                 disabled={busy}
-                onClick={() => setConfirming(false)}
+                onClick={() => setConfirming(null)}
               >
                 取消
               </button>
               <button
                 ref={confirmRef}
                 type="button"
-                className="primary"
+                className={confirming === "delete" ? "danger-button" : "primary"}
                 disabled={busy}
-                onClick={() => void run(decisionsFor("use_remote"))}
+                onClick={() =>
+                  void run(decisionsFor(confirming === "delete" ? "delete_local" : "use_remote"))
+                }
               >
                 {busy ? <LoaderCircle className="spin" size={16} /> : <AlertTriangle size={16} />}
-                确认采用
+                {confirming === "delete" ? "确认删除" : "确认采用"}
               </button>
             </div>
           </div>

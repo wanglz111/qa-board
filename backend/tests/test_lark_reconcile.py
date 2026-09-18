@@ -439,6 +439,7 @@ def test_a_racing_apply_retries_and_still_applies_the_other_keys(
     assert second.json() == {
         "pulled": 1,
         "kept": 0,
+        "removed": 0,
         "skipped": [{"key": "B-001", "reason": "这条已经核对过"}],
     }
     marks = {
@@ -638,7 +639,7 @@ def test_a_row_that_already_agrees_needs_no_decision(
         json={"decisions": [{"key": "B-001", "action": "use_remote"}]},
     ).json()
 
-    assert body == {"pulled": 0, "kept": 0, "skipped": []}
+    assert body == {"pulled": 0, "kept": 0, "removed": 0, "skipped": []}
     assert db_session.scalars(select(ReconcileMark)).all() == []
     assert db_session.scalars(select(Attempt).where(Attempt.source == "reconcile")).all() == []
 
@@ -655,6 +656,7 @@ def test_adopting_a_row_that_is_not_in_the_table_is_skipped(
     assert body == {
         "pulled": 0,
         "kept": 0,
+        "removed": 0,
         "skipped": [{"key": "B-001", "reason": "表里没有这条记录"}],
     }
 
@@ -673,6 +675,7 @@ def test_a_decision_for_a_row_that_was_not_read_is_skipped(
     assert body == {
         "pulled": 0,
         "kept": 0,
+        "removed": 0,
         "skipped": [{"key": "B-404", "reason": "本次读取没有这条记录"}],
     }
 
@@ -732,3 +735,338 @@ def test_attempt_payload_and_report_expose_the_source(
     header, *lines = report.splitlines()
     assert header.split(",")[-1] == "source"
     assert lines[0].endswith("reconcile")
+
+
+# --- A record the administrator deleted in Lark ---------------------------------
+#
+# "I filed this one by mistake, then deleted it in Lark." The local row is the
+# only thing left, and reconcile has to be able to take it with it — but only
+# when the record really is gone from the table.
+
+
+def _uploaded(
+    db_session,
+    confirmed_group,
+    attempt,
+    *,
+    record_id: str = "r1",
+    fingerprint: str | None = None,
+) -> SyncJob:
+    """The upload of one attempt, as the outbox would have recorded it."""
+
+    from app.lark.target import target_for
+
+    target = target_for(db_session, confirmed_group.id)
+    job = SyncJob(
+        attempt_id=attempt.id,
+        state="synced",
+        new_exec_record_id=record_id,
+        target_fingerprint=target.target_fingerprint if fingerprint is None else fingerprint,
+    )
+    db_session.add(job)
+    db_session.commit()
+    return job
+
+
+def test_a_row_whose_record_left_the_table_says_so(
+    lark_fake, authenticated_client, confirmed_group, failed_attempt, db_session
+):
+    _uploaded(db_session, confirmed_group, failed_attempt)
+    lark_fake.records = []
+
+    body = authenticated_client.get(
+        f"/api/groups/{confirmed_group.id}/reconcile?source=live"
+    ).json()
+
+    assert [row["status"] for row in body["rows"]] == ["local_only"]
+    assert body["rows"][0]["remote_deleted"] is True
+
+
+def test_a_row_that_was_never_uploaded_does_not_say_so(
+    lark_fake, authenticated_client, confirmed_group, failed_attempt
+):
+    # No sync job: the attempt never reached the table, so its absence from the
+    # table is not a deletion.
+    lark_fake.records = []
+
+    body = authenticated_client.get(
+        f"/api/groups/{confirmed_group.id}/reconcile?source=live"
+    ).json()
+
+    assert body["rows"][0]["remote_deleted"] is False
+    assert body["rows"][0]["status"] == "local_only"
+
+
+def test_deleting_the_local_row_takes_its_evidence_and_upload_with_it(
+    lark_fake, authenticated_client, confirmed_group, failed_attempt, db_session, upload_dir
+):
+    from app.models import Screenshot
+
+    _uploaded(db_session, confirmed_group, failed_attempt)
+    db_session.add(
+        Screenshot(
+            attempt_id=failed_attempt.id,
+            storage_key="evidence.png",
+            content_hash="a" * 64,
+            mime="image/png",
+            size_bytes=3,
+        )
+    )
+    db_session.commit()
+    (upload_dir / "evidence.png").write_bytes(b"png")
+    lark_fake.records = []
+
+    body = authenticated_client.post(
+        f"/api/groups/{confirmed_group.id}/reconcile/apply",
+        json={"decisions": [{"key": "B-001", "action": "delete_local"}]},
+    ).json()
+
+    assert body == {"pulled": 0, "kept": 0, "removed": 1, "skipped": []}
+    db_session.expire_all()
+    assert db_session.scalars(select(Attempt)).all() == []
+    assert db_session.scalars(select(SyncJob)).all() == []
+    assert db_session.scalars(select(Screenshot)).all() == []
+    assert db_session.scalars(select(ReconcileMark)).all() == []
+    assert not (upload_dir / "evidence.png").exists()
+    # Nothing left to reconcile: the row is gone from both sides.
+    after = authenticated_client.get(
+        f"/api/groups/{confirmed_group.id}/reconcile?source=live"
+    ).json()
+    assert after["rows"] == []
+    assert after["unresolved"] == 0
+
+
+def test_a_never_uploaded_row_is_not_deletable(
+    lark_fake, authenticated_client, confirmed_group, failed_attempt, db_session
+):
+    lark_fake.records = []
+
+    body = authenticated_client.post(
+        f"/api/groups/{confirmed_group.id}/reconcile/apply",
+        json={"decisions": [{"key": "B-001", "action": "delete_local"}]},
+    ).json()
+
+    assert body["removed"] == 0
+    assert [skip["reason"] for skip in body["skipped"]] == [
+        "这条记录没有上传到表里，删不掉"
+    ]
+    db_session.expire_all()
+    assert len(db_session.scalars(select(Attempt)).all()) == 1
+
+
+def test_a_delete_is_refused_when_a_fresh_read_still_shows_the_record(
+    lark_fake, authenticated_client, confirmed_group, failed_attempt, db_session
+):
+    """The diff may answer from a snapshot up to a minute old; deleting may not.
+
+    The administrator took the snapshot before the row landed, or Lark was
+    mid-flight. Either way the local row stays: an unconfirmed delete is not a
+    delete.
+    """
+
+    _uploaded(db_session, confirmed_group, failed_attempt)
+    lark_fake.records = []
+    authenticated_client.get(f"/api/groups/{confirmed_group.id}/reconcile?source=live")
+    # The record is still there — the snapshot above just did not have it yet.
+    lark_fake.records = [
+        {"record_id": "r1", "fields": {"用例": "B-001 管理员登录", "结果": "不通过"}}
+    ]
+
+    body = authenticated_client.post(
+        f"/api/groups/{confirmed_group.id}/reconcile/apply",
+        json={"decisions": [{"key": "B-001", "action": "delete_local"}]},
+    ).json()
+
+    assert body["removed"] == 0
+    assert [skip["reason"] for skip in body["skipped"]] == [
+        "这条记录在表里还在，不能删"
+    ]
+    db_session.expire_all()
+    assert len(db_session.scalars(select(Attempt)).all()) == 1
+
+
+def test_a_delete_is_refused_when_a_new_record_wears_the_same_label(
+    lark_fake, authenticated_client, confirmed_group, failed_attempt, db_session
+):
+    _uploaded(db_session, confirmed_group, failed_attempt)
+    lark_fake.records = []
+    authenticated_client.get(f"/api/groups/{confirmed_group.id}/reconcile?source=live")
+    lark_fake.records = [
+        {"record_id": "r2", "fields": {"用例": "B-001 管理员登录", "结果": "通过"}}
+    ]
+
+    body = authenticated_client.post(
+        f"/api/groups/{confirmed_group.id}/reconcile/apply",
+        json={"decisions": [{"key": "B-001", "action": "delete_local"}]},
+    ).json()
+
+    assert body["removed"] == 0
+    assert [skip["reason"] for skip in body["skipped"]] == [
+        "表里已经有一条同名的记录，请重新读取后再核对"
+    ]
+    db_session.expire_all()
+    assert len(db_session.scalars(select(Attempt)).all()) == 1
+
+
+def test_a_record_filed_against_another_table_is_not_treated_as_deleted(
+    lark_fake, authenticated_client, confirmed_group, failed_attempt, db_session
+):
+    """A group re-pointed at another table cannot read its old table's absence
+    as a deletion: the record exists, this read is simply looking elsewhere."""
+
+    _uploaded(db_session, confirmed_group, failed_attempt, fingerprint="old-table")
+    lark_fake.records = []
+
+    body = authenticated_client.get(
+        f"/api/groups/{confirmed_group.id}/reconcile?source=live"
+    ).json()
+
+    assert body["rows"][0]["remote_deleted"] is False
+    posted = authenticated_client.post(
+        f"/api/groups/{confirmed_group.id}/reconcile/apply",
+        json={"decisions": [{"key": "B-001", "action": "delete_local"}]},
+    ).json()
+    assert posted["removed"] == 0
+
+
+def test_an_unreadable_row_still_counts_as_present(
+    lark_fake, authenticated_client, confirmed_group, failed_attempt, db_session
+):
+    """A record whose 用例 field no longer parses is still in the table.
+
+    Falling back to the parsed rows would read "I cannot understand it" as "it
+    was deleted" and offer to delete the local row of a record that is still
+    there.
+    """
+
+    _uploaded(db_session, confirmed_group, failed_attempt)
+    lark_fake.records = [
+        {"record_id": "r1", "fields": {"用例": "（被改坏了）", "结果": "不通过"}}
+    ]
+
+    body = authenticated_client.get(
+        f"/api/groups/{confirmed_group.id}/reconcile?source=live"
+    ).json()
+
+    assert [row["status"] for row in body["rows"]] == ["local_only"]
+    assert body["rows"][0]["remote_deleted"] is False
+
+
+def test_a_deleted_record_resurfaces_a_row_decided_before(
+    lark_fake, authenticated_client, confirmed_group, failed_attempt, db_session
+):
+    """The recorded decision answered a conflict that no longer exists.
+
+    Without this the row would keep its "已核对" state and stay un-deletable —
+    the administrator would have no way to act on the deletion they just made.
+    """
+
+    _uploaded(db_session, confirmed_group, failed_attempt)
+    db_session.add(
+        ReconcileMark(
+            group_id=confirmed_group.id,
+            record_key="B-001",
+            decision="use_local",
+            remote_record_id="r1",
+        )
+    )
+    db_session.commit()
+    lark_fake.records = []
+
+    body = authenticated_client.get(
+        f"/api/groups/{confirmed_group.id}/reconcile?source=live"
+    ).json()
+
+    assert body["rows"][0]["decision"] is None
+    assert body["unresolved"] == 1
+
+    posted = authenticated_client.post(
+        f"/api/groups/{confirmed_group.id}/reconcile/apply",
+        json={"decisions": [{"key": "B-001", "action": "delete_local"}]},
+    ).json()
+    assert posted["removed"] == 1
+
+
+def test_a_delete_clears_the_label_for_the_next_attempt(
+    lark_fake, authenticated_client, confirmed_group, failed_attempt, db_session
+):
+    """Once the label is free the case can be filed again — and must not be
+    born already marked as reconciled."""
+
+    from app.execution import allocate_attempt
+
+    case = failed_attempt.group_case
+    _uploaded(db_session, confirmed_group, failed_attempt)
+    db_session.add(
+        ReconcileMark(
+            group_id=confirmed_group.id,
+            record_key="B-001",
+            decision="use_local",
+            remote_record_id="r1",
+        )
+    )
+    db_session.commit()
+    lark_fake.records = []
+
+    authenticated_client.post(
+        f"/api/groups/{confirmed_group.id}/reconcile/apply",
+        json={"decisions": [{"key": "B-001", "action": "delete_local"}]},
+    )
+    db_session.expire_all()
+
+    # The administrator files the case again; it gets the code as its label,
+    # the way the first attempt of a case always does.
+    fresh = allocate_attempt(db_session, case)
+    assert fresh.label == "B-001"
+    fresh.state = "committed"
+    fresh.result = "通过"
+    db_session.commit()
+
+    body = authenticated_client.get(
+        f"/api/groups/{confirmed_group.id}/reconcile?source=live"
+    ).json()
+    row = next(row for row in body["rows"] if row["key"] == "B-001")
+    assert row["decision"] is None
+
+
+def test_a_delete_asked_of_a_row_with_no_local_side_is_skipped(
+    lark_fake, authenticated_client, confirmed_group, db_session
+):
+    """The API is total: a key the page would never offer still answers."""
+
+    lark_fake.records = [
+        {"record_id": "r1", "fields": {"用例": "B-001 管理员登录", "结果": "通过"}}
+    ]
+
+    response = authenticated_client.post(
+        f"/api/groups/{confirmed_group.id}/reconcile/apply",
+        json={"decisions": [{"key": "B-001", "action": "delete_local"}]},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["removed"] == 0
+    assert response.json()["skipped"] == [
+        {"key": "B-001", "reason": "这条差异没有本地记录，删不掉"}
+    ]
+
+
+def test_a_key_named_twice_deletes_once(
+    lark_fake, authenticated_client, confirmed_group, failed_attempt, db_session
+):
+    _uploaded(db_session, confirmed_group, failed_attempt)
+    lark_fake.records = []
+
+    body = authenticated_client.post(
+        f"/api/groups/{confirmed_group.id}/reconcile/apply",
+        json={
+            "decisions": [
+                {"key": "B-001", "action": "delete_local"},
+                {"key": "B-001", "action": "delete_local"},
+            ]
+        },
+    ).json()
+
+    assert body["removed"] == 1
+    assert body["skipped"] == [{"key": "B-001", "reason": "这条已经核对过"}]
+    db_session.expire_all()
+    assert db_session.scalars(select(Attempt)).all() == []

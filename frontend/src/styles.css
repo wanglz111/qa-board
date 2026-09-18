@@ -74,6 +74,9 @@ table { width: 100%; border-collapse: collapse; font-size: .8rem; } th { color: 
 .outcome-form textarea { width: 100%; padding: 9px 11px; color: #20242a; background: #fff; border: 1px solid #cfd5d8; border-radius: 5px; font: inherit; resize: vertical; }
 .attachment-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 12px; }.attachment-hint { color: #8b9398; font-size: .74rem; }
 .ghost-button { display: inline-flex; align-items: center; gap: 7px; min-height: 36px; padding: 6px 12px; color: #455158; background: #fff; border: 1px solid #d3d8da; border-radius: 5px; font-size: .8rem; font-weight: 700; }.ghost-button:disabled { color: #9aa2a7; cursor: not-allowed; }
+/* Destructive: deleting a local record takes its evidence with it, so the
+   button reads as an alarm rather than as one more way to reconcile. */
+.danger-button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 36px; padding: 6px 12px; color: #8f2f2a; background: #fff; border: 1px solid #e3b4af; border-radius: 5px; font-size: .8rem; font-weight: 750; }.danger-button:hover:not(:disabled) { background: #fdf3f2; }.danger-button:disabled { color: #b9adb0; border-color: #e8e2e3; cursor: not-allowed; }
 .attachment-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 120px)); gap: 10px; margin: 0 0 14px; padding: 0; list-style: none; }
 .attachment-preview { min-width: 0; }
 .attachment-preview-frame { position: relative; aspect-ratio: 1; overflow: hidden; background: #eef1f2; border: 1px solid #d9dddf; border-radius: 6px; }
@@ -120,10 +123,12 @@ table { width: 100%; border-collapse: collapse; font-size: .8rem; } th { color: 
 .reconcile-table input[type="checkbox"] { width: auto; min-height: auto; }
 .reconcile-table th:first-child, .reconcile-table td:first-child { width: 34px; }
 .reconcile-row.conflict { background: #fffafa; }
+.reconcile-row.remote_deleted { background: #fdf7f6; }
 .reconcile-row code { color: #176b57; font-weight: 700; }
 .reconcile-label { margin-left: 6px; color: #7c858a; font-size: .72rem; }
 .reconcile-status { display: inline-block; padding: 2px 8px; border-radius: 999px; color: #5b6469; background: #eef0f1; font-size: .72rem; font-weight: 800; }
 .reconcile-status.conflict { color: #a23b36; background: #fbe7e5; }
+.reconcile-status.remote_deleted { color: #8f2f2a; background: #f6dedb; }
 .reconcile-status.local_only { color: #33587a; background: #eaf1f7; }
 .reconcile-status.remote_only { color: #1c6b45; background: #e2f2e9; }
 .reconcile-status.unmatched { color: #8a6206; background: #fdf1d5; }

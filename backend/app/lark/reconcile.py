@@ -5,18 +5,27 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app import screenshots
 from app.auth import require_admin
 from app.db import get_db
 from app.execution import allocate_attempt
 from app.lark import cache as lark_cache
 from app.lark.client import LarkClient, LarkError, get_lark_client
 from app.lark.history import parse_case_reference, record_case_text, record_fields
-from app.lark.target import target_for
-from app.models import Attempt, Group, GroupCase, LarkHistoryRef, ReconcileMark, SyncJob
+from app.lark.target import LarkTarget, target_for
+from app.models import (
+    Attempt,
+    Group,
+    GroupCase,
+    LarkHistoryRef,
+    ReconcileMark,
+    Screenshot,
+    SyncJob,
+)
 
 
 router = APIRouter(prefix="/api", dependencies=[Depends(require_admin)])
@@ -27,6 +36,16 @@ READABLE_RESULTS = ("通过", "不通过", "未执行")
 # The loser retries against a fresh read, where the raced key reads as decided
 # and the rest of the payload is genuinely applied.
 MAX_APPLY_ATTEMPTS = 5
+
+# Why a local row cannot be deleted. Each refusal is a different situation, and
+# the administrator has to be able to tell them apart: one means waiting and
+# reading again, another means this row never was the table's to begin with.
+DELETE_NEEDS_AN_UPLOAD = "这条记录没有上传到表里，删不掉"
+DELETE_NEEDS_A_LOCAL_ROW = "这条差异没有本地记录，删不掉"
+DELETE_NEEDS_THE_SAME_TABLE = "这条记录上传时的目标表与当前表不一致，删不掉"
+DELETE_REFUSED_STILL_IN_TABLE = "这条记录在表里还在，不能删"
+DELETE_REFUSED_NEW_LABEL = "表里已经有一条同名的记录，请重新读取后再核对"
+DELETE_REFUSED_MISSING = "本地这条记录已经不在，请重新读取"
 
 
 def normalize_result(value: Any) -> str:
@@ -128,9 +147,72 @@ def reconcile_rows(
                 ),
                 "local": local_match,
                 "remote": remote_match,
+                # Filled in by the reader: a pure join cannot tell a record that
+                # was deleted from one it simply never saw.
+                "remote_deleted": False,
             }
         )
     return rows
+
+
+def _uploads(
+    db: Session, attempts: list[Attempt]
+) -> dict[str, tuple[str | None, str | None]]:
+    """Each attempt's upload: the record it created and the table it went to."""
+
+    if not attempts:
+        return {}
+    return {
+        str(attempt_id): (record_id, fingerprint)
+        for attempt_id, record_id, fingerprint in db.execute(
+            select(
+                SyncJob.attempt_id,
+                SyncJob.new_exec_record_id,
+                SyncJob.target_fingerprint,
+            ).where(
+                SyncJob.attempt_id.in_([attempt.id for attempt in attempts]),
+                SyncJob.new_exec_record_id.is_not(None),
+            )
+        ).all()
+    }
+
+
+def _mark_deleted_records(
+    rows: list[dict[str, Any]],
+    remote: list[dict[str, Any]],
+    uploads: dict[str, tuple[str | None, str | None]],
+    target: LarkTarget | None,
+) -> None:
+    """Flag the local rows whose uploaded record is no longer in the table.
+
+    The flag decides whether the page offers to delete a local row, so it errs
+    towards "no". Two readings of "absent" are deliberately rejected:
+
+    * the IDs come from the raw read, not from the rows that parsed — a record
+      whose ``用例`` field no longer parses is still in the table, and reading
+      "I cannot make sense of it" as "it was deleted" would invite deleting the
+      local copy of a record that is still there;
+    * a group re-pointed at another table answers "no" for the same reason: its
+      old records are missing from this read, they were not deleted.
+
+    A snapshot read (``source="stored"``) passes no target and therefore flags
+    nothing: only a read of the table itself can witness a deletion.
+    """
+
+    if target is None:
+        return
+    present = {record.get("record_id") for record in remote}
+    for row in rows:
+        local = row["local"]
+        if local is None:
+            continue
+        record_id, fingerprint = uploads.get(local["attempt_id"], (None, None))
+        row["remote_deleted"] = bool(
+            record_id
+            and record_id not in present
+            and fingerprint is not None
+            and fingerprint == target.target_fingerprint
+        )
 
 
 def reconcile_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
@@ -188,16 +270,11 @@ def read_reconcile(
         raise HTTPException(status_code=404, detail="Group not found")
     target = target_for(db, group_id)
     attempts = _attempts(db, group_id)
-    remote_ids = {
-        attempt_id: record_id
-        for attempt_id, record_id in db.execute(
-            select(SyncJob.attempt_id, SyncJob.new_exec_record_id).where(
-                SyncJob.attempt_id.in_([attempt.id for attempt in attempts]),
-                SyncJob.new_exec_record_id.is_not(None),
-            )
-        ).all()
-    }
-    local = [local_row(attempt, remote_ids.get(attempt.id)) for attempt in attempts]
+    uploads = _uploads(db, attempts)
+    local = [
+        local_row(attempt, uploads.get(str(attempt.id), (None, None))[0])
+        for attempt in attempts
+    ]
     known_codes = set(
         db.scalars(select(GroupCase.code).where(GroupCase.group_id == group_id)).all()
     )
@@ -224,6 +301,7 @@ def read_reconcile(
             read_errors.append(str(error))
 
     rows = reconcile_rows(local=local, remote=remote, known_codes=known_codes)
+    _mark_deleted_records(rows, remote, uploads, target if source == "live" else None)
     decided = {
         mark.record_key: mark.decision
         for mark in db.scalars(
@@ -231,7 +309,12 @@ def read_reconcile(
         ).all()
     }
     for row in rows:
-        row["decision"] = decided.get(row["key"])
+        decision = decided.get(row["key"])
+        # A record that left the table is a situation the recorded decision was
+        # never about. Keeping it would leave the row reading as already
+        # reconciled and therefore unselectable, which is precisely the dead end
+        # this flag exists to end.
+        row["decision"] = None if row["remote_deleted"] else decision
     return {
         "source": source,
         "source_table_name": source_table_name,
@@ -246,7 +329,7 @@ def read_reconcile(
 
 class Decision(BaseModel):
     key: str
-    action: Literal["use_remote", "use_local"]
+    action: Literal["use_remote", "use_local", "delete_local"]
 
 
 class ApplyRequest(BaseModel):
@@ -288,6 +371,83 @@ def _adopt(db: Session, group_id: UUID, row: dict[str, Any]) -> str | None:
     return None
 
 
+def _delete_local(
+    db: Session,
+    group_id: UUID,
+    row: dict[str, Any],
+    client: LarkClient,
+    target: LarkTarget | None,
+) -> tuple[str | None, list[str]]:
+    """Delete the local attempt whose record the administrator removed in Lark.
+
+    Returns the reason it was refused, or None and the stored evidence keys the
+    caller removes once the transaction has committed.
+
+    Every guard is re-checked here against a read that bypasses the minute-long
+    snapshot the diff may have answered from. That snapshot is good enough to
+    show an administrator a difference; it is not good enough to delete with.
+    """
+
+    local = row["local"]
+    if local is None:
+        # The page never offers this, but the API is total: a key that names a
+        # row with no local side answers a refusal rather than an error.
+        return DELETE_NEEDS_A_LOCAL_ROW, []
+    attempt_id = UUID(local["attempt_id"])
+    record_id = local["remote_record_id"]
+    if not record_id:
+        return DELETE_NEEDS_AN_UPLOAD, []
+    if target is None:
+        return DELETE_NEEDS_THE_SAME_TABLE, []
+    fingerprint = db.scalar(
+        select(SyncJob.target_fingerprint).where(SyncJob.attempt_id == attempt_id)
+    )
+    if fingerprint is None or fingerprint != target.target_fingerprint:
+        return DELETE_NEEDS_THE_SAME_TABLE, []
+
+    # Deliberately before the row lock below: a statement waiting on that lock
+    # counts against the 3 s statement_timeout, so it must not be held across an
+    # HTTP request.
+    records = client.list_records(target.execution_base_token, target.execution_table_id)
+    if record_id in {record.get("record_id") for record in records}:
+        return DELETE_REFUSED_STILL_IN_TABLE, []
+    if any(
+        parsed is not None and parsed["label"] == row["label"]
+        for parsed in (remote_row(record) for record in records)
+    ):
+        return DELETE_REFUSED_NEW_LABEL, []
+
+    locked = db.scalar(
+        select(Attempt.id)
+        .where(Attempt.id == attempt_id, Attempt.source == "execution")
+        .with_for_update()
+    )
+    if locked is None:
+        return DELETE_REFUSED_MISSING, []
+    attempt = db.get(Attempt, attempt_id)
+    if attempt is None:
+        return DELETE_REFUSED_MISSING, []
+    keys = list(
+        db.scalars(
+            select(Screenshot.storage_key).where(Screenshot.attempt_id == attempt_id)
+        ).all()
+    )
+    # The decision recorded for this key answered a difference that no longer
+    # exists, and the label the row held is about to become free again: leaving
+    # the mark behind would decide the next row to wear that name before anyone
+    # had looked at it.
+    db.execute(
+        delete(ReconcileMark).where(
+            ReconcileMark.group_id == group_id,
+            ReconcileMark.record_key == row["key"],
+        )
+    )
+    # The screenshot rows and the upload go with it through their foreign keys.
+    db.delete(attempt)
+    db.flush()
+    return None, keys
+
+
 def _unique_violation(error: IntegrityError) -> str | None:
     """The constraint a Postgres unique violation named, when it named one."""
 
@@ -305,9 +465,13 @@ def _apply_decisions(
     read = read_reconcile(group_id, db, client, source="live")
     if read["read_errors"]:
         raise HTTPException(status_code=409, detail="；".join(read["read_errors"]))
+    target = target_for(db, group_id)
     rows = {row["key"]: row for row in read["rows"]}
-    pulled = kept = 0
+    pulled = kept = removed = 0
     skipped: list[dict[str, str]] = []
+    # Files are removed after the commit, so a refused or rolled back payload
+    # never deletes the evidence of a row that is still there.
+    taken_evidence: list[str] = []
     # The mark is written inside this transaction, so a payload that names the
     # same key twice would otherwise adopt it twice before the read state moves.
     decided_keys: set[str] = set()
@@ -328,11 +492,22 @@ def _apply_decisions(
                 skipped.append({"key": decision.key, "reason": reason})
                 continue
             pulled += 1
+        elif decision.action == "delete_local":
+            reason, keys = _delete_local(db, group_id, row, client, target)
+            if reason is not None:
+                skipped.append({"key": decision.key, "reason": reason})
+                continue
+            removed += 1
+            taken_evidence.extend(keys)
         else:
             # The remote table only ever receives new records, so keeping the
             # local version is recorded rather than written back.
             kept += 1
         decided_keys.add(decision.key)
+        if decision.action == "delete_local":
+            # A mark would outlive the row it decided and pre-decide the next
+            # one: the removal above is this key's whole outcome.
+            continue
         mark = db.scalar(
             select(ReconcileMark).where(
                 ReconcileMark.group_id == group_id,
@@ -343,10 +518,15 @@ def _apply_decisions(
         mark.remote_record_id = (row["remote"] or {}).get("record_id")
         db.add(mark)
     db.commit()
+    # The rows are gone and cannot come back, so the files they named are now
+    # unreachable: removing them is housekeeping, and failing to remove one
+    # leaves an orphan rather than a row anyone can still see.
+    for storage_key in taken_evidence:
+        screenshots.discard_stored(storage_key)
     # An adoption only changes the local DB, so this is harmless rather than
     # necessary: the remote table the snapshot was taken from is untouched.
     lark_cache.invalidate_group(db, group_id)
-    return {"pulled": pulled, "kept": kept, "skipped": skipped}
+    return {"pulled": pulled, "kept": kept, "removed": removed, "skipped": skipped}
 
 
 @router.post("/groups/{group_id}/reconcile/apply")
