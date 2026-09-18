@@ -247,26 +247,31 @@ def write_snapshot_file(saved: dict[str, dict[str, dict[str, Any]]]) -> str:
 
 # 恢复指引：快照落盘后立刻打印一次，失败路径上再打印一次。
 # 里面的 {} 都是给控制者照抄的文本，不是本脚本的格式化占位符（所以用 replace 而不是 format）。
+#
+# 注意：下面这段代码**必须顶格写**，一个字都不能缩进 —— 打印出来的就是原样的字符串，
+# 而 `<<'PY'` 要求终止符 PY 顶格，正文也不能带多余缩进（否则粘下去第一行就是
+# IndentationError，终止符不顶格则 shell 会一直吞后续行）。这个"可直接照抄"是 Critical
+# 要的产物，别为了好看缩进它。
 RECOVERY_TEMPLATE = """\
-恢复方法（把 <APP_ID>/<APP_SECRET> 换成部署里的值，照抄即可；快照路径就在上面那段和下面这段里）：
+恢复方法（把 <APP_ID>/<APP_SECRET> 换成部署里的值；下面从 cd 到最后那个 PY 整段原样照抄）：
 
-  cd backend && LARK_APP_ID=<APP_ID> LARK_APP_SECRET=<APP_SECRET> .venv/bin/python - <<'PY'
-  import json, os, httpx
-  snap = json.load(open("<SNAPSHOT>", encoding="utf-8"))
-  cli = httpx.Client(base_url=snap["base_url"], timeout=30.0)
-  tok = cli.post("/open-apis/auth/v3/tenant_access_token/internal",
-                 json={"app_id": os.environ["LARK_APP_ID"],
-                       "app_secret": os.environ["LARK_APP_SECRET"]}).json()["tenant_access_token"]
-  for tbl, entry in snap["tables"].items():
-      recs = [{"record_id": rid, "fields": f} for rid, f in entry["values"].items()]
-      if not recs:
-          continue
-      rsp = cli.post(f"/open-apis/bitable/v1/apps/{snap['base_token']}/tables/{tbl}/records/batch_update",
-                     headers={"Authorization": f"Bearer {tok}"}, json={"records": recs})
-      print(tbl, entry["label"], len(recs), rsp.json().get("code"))
-  PY
+cd backend && LARK_APP_ID=<APP_ID> LARK_APP_SECRET=<APP_SECRET> .venv/bin/python - <<'PY'
+import json, os, httpx
+snap = json.load(open("<SNAPSHOT>", encoding="utf-8"))
+cli = httpx.Client(base_url=snap["base_url"], timeout=30.0)
+tok = cli.post("/open-apis/auth/v3/tenant_access_token/internal",
+               json={"app_id": os.environ["LARK_APP_ID"],
+                     "app_secret": os.environ["LARK_APP_SECRET"]}).json()["tenant_access_token"]
+for tbl, entry in snap["tables"].items():
+    recs = [{"record_id": rid, "fields": f} for rid, f in entry["values"].items()]
+    if not recs:
+        continue
+    rsp = cli.post(f"/open-apis/bitable/v1/apps/{snap['base_token']}/tables/{tbl}/records/batch_update",
+                   headers={"Authorization": f"Bearer {tok}"}, json={"records": recs})
+    print(tbl, entry["label"], len(recs), rsp.json().get("code"))
+PY
 
-它对应的 batch_update 调用形态：
+它对应的 batch_update 调用形态（说明用，不用抄）：
   POST /open-apis/bitable/v1/apps/<BASE_TOKEN>/tables/<TABLE_ID>/records/batch_update
   body {"records": [{"record_id": "<record_id>", "fields": {"<列名>": "<原值>"}}, ...]}
 """
@@ -455,20 +460,31 @@ def main() -> int:
         if not ok:
             option_diffs.append(f"{table}.{name}")
         print(f"  {table}.{name}: {'OK' if ok else '!! 仍有差异'} {current}")
+    # 收尾这两次读取同样是自查输出，失败也要成为判据：不能出现「结论说全 OK、验收行却写着读取失败」。
+    read_failed: list[str] = []
     for label, table in ROLE_TABLES:
         try:
             count: Any = len(lark.records(table))
         except (SystemExit, Exception) as exc:
             count = f"读取失败：{exc}"
+            read_failed.append(f"{label} 剩余行数")
         print(f"  {label} 剩余行数：{count}")
     try:
         remaining: Any = [t["name"] for t in lark.tables()]
     except (SystemExit, Exception) as exc:
         remaining = f"读取失败：{exc}"
+        read_failed.append("剩余表")
     print(f"  剩余表：{remaining}")
 
     print("\n=== 结论 ===")
-    if not (wash_failure or writeback_failed or mismatched or option_diffs or junk_failed):
+    if not (
+        wash_failure
+        or writeback_failed
+        or mismatched
+        or option_diffs
+        or junk_failed
+        or read_failed
+    ):
         print("  洗选项 / 写回 / 核对 / 删废表 全部 OK。")
         return 0
     if wash_failure:
@@ -481,6 +497,8 @@ def main() -> int:
         print(f"  !! 选项复查仍有差异：{option_diffs}")
     if junk_failed:
         print(f"  !! 删废表失败：{junk_failed}")
+    if read_failed:
+        print(f"  !! 收尾读取失败：{read_failed}")
     print("  !! 本次没有全绿，以非 0 退出。不要重跑本脚本。")
     print(f"  快照文件：{snapshot_path}")
     print_recovery(snapshot_path)
