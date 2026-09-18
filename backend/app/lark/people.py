@@ -51,12 +51,21 @@ def read_people(db: Session) -> LarkPeople:
 
 
 def resolved_reporter_open_id(db: Session) -> str | None:
-    """The id 反馈人/报告人 receive: what the page saved, else the env fallback."""
+    """The id 反馈人/报告人 receive: what the page saved, else the env fallback.
+
+    The page's value was checked at the HTTP boundary (``_checked``); the
+    environment value never is, so it is checked here. A ``DEFAULT_REPORTER_ID``
+    that is not an open id — a display name, a union id, or the ``ou_...``
+    placeholder someone pasted out of the template — resolves to ``None``:
+    omitting the column still writes the row, while a token Lark refuses takes
+    every defect row down with it.
+    """
 
     row = _stored(db)
     if row is not None and row.reporter_open_id:
         return row.reporter_open_id
-    return settings.default_reporter_id or None
+    fallback = settings.default_reporter_id or ""
+    return fallback if OPEN_ID.match(fallback) else None
 
 
 def resolved_owner_open_id(db: Session) -> str | None:

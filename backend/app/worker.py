@@ -73,8 +73,10 @@ def process_one_job(
         job,
         gateway,
         attempt,
-        # 负责人/报告人 are display names in the hand-run rows; the sign-in
-        # address is only the fallback when no name is configured.
+        # 负责人/报告人 are person columns in every table this tool builds, so
+        # what reaches them is the open id resolved below — or nothing at all.
+        # These two display names are only what an older, hand-built text column
+        # receives; the sign-in address is the last fallback for that path.
         reporter=reporter or settings.default_reporter or settings.admin_email,
         owner=settings.default_owner,
         # The open ids live in the settings row the page writes; the environment

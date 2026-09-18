@@ -183,6 +183,15 @@ def snapshot(
     return out
 
 
+def record_ids(lark: Lark, table: str) -> set[str]:
+    """这张表当前所有行的 record_id 集合（「快照窗口」的基准）。
+
+    快照只留「有值要救的行」，认不出窗口里新进来的行；id 集合才能。写回之后拿它
+    一比，任何不在里面的 id 都是快照没覆盖到、谁也恢复不了的行。
+    """
+    return {record["record_id"] for record in lark.records(table) if record.get("record_id")}
+
+
 def restore(lark: Lark, table: str, saved: dict[str, dict[str, Any]]) -> None:
     """按 record_id 把快照逐行写回。"""
     if not saved:
@@ -368,9 +377,13 @@ def main() -> int:
     # 所以删完错位行、动选项之前，先把要保留的值按 record_id 快照下来。
     print("\n=== 洗选项前快照要保留的值 ===")
     saved: dict[str, dict[str, dict[str, Any]]] = {}
+    # 快照窗口的基准：这一刻每张表有哪些行。快照本身只留「有值要救的行」，
+    # 写回之后光看它认不出窗口里新进来的行 —— id 集合才能。
+    before_ids: dict[str, set[str]] = {}
     try:
         for label, table in ROLE_TABLES:
             saved[table] = snapshot(lark, table, wash_columns(table), doomed)
+            before_ids[table] = record_ids(lark, table)
             print(f"  {label}（{table}）：快照 {len(saved[table])} 行")
     except (SystemExit, Exception) as exc:
         print(f"  !! 快照阶段失败：{exc}")
@@ -462,9 +475,25 @@ def main() -> int:
         print(f"  {table}.{name}: {'OK' if ok else '!! 仍有差异'} {current}")
     # 收尾这两次读取同样是自查输出，失败也要成为判据：不能出现「结论说全 OK、验收行却写着读取失败」。
     read_failed: list[str] = []
+    # 快照窗口：快照只取一次，而线上 worker 是每 5 秒轮询同一个库的常驻进程。
+    # 快照之后才出现的行不在 saved 里，洗选项抹掉它们的值也没有东西能恢复 ——
+    # 所以这里再读一次 id 集合，把窗口里新进来的行点名出来；剩余行数与快照基准
+    # 的差异同样进判据（「剩 8 行 / 剩 5 行」不能只是打印给人看）。
+    unexpected_rows: dict[str, list[str]] = {}
+    count_mismatch: list[str] = []
     for label, table in ROLE_TABLES:
         try:
-            count: Any = len(lark.records(table))
+            rows = lark.records(table)
+            count: Any = len(rows)
+            fresh = sorted(
+                record["record_id"]
+                for record in rows
+                if record.get("record_id") and record["record_id"] not in before_ids[table]
+            )
+            if fresh:
+                unexpected_rows[label] = fresh
+            if count != len(before_ids[table]):
+                count_mismatch.append(f"{label} 剩 {count} / 快照时 {len(before_ids[table])}")
         except (SystemExit, Exception) as exc:
             count = f"读取失败：{exc}"
             read_failed.append(f"{label} 剩余行数")
@@ -477,14 +506,18 @@ def main() -> int:
     print(f"  剩余表：{remaining}")
 
     print("\n=== 结论 ===")
-    if not (
+    # 判据：洗选项/写回/删废表/选项复查，加上窗口里冒出来的行与行数异常。
+    # 收尾读取失败单独看待（见下面的只读分支）。
+    data_failed = bool(
         wash_failure
         or writeback_failed
         or mismatched
         or option_diffs
         or junk_failed
-        or read_failed
-    ):
+        or unexpected_rows
+        or count_mismatch
+    )
+    if not (data_failed or read_failed):
         print("  洗选项 / 写回 / 核对 / 删废表 全部 OK。")
         return 0
     if wash_failure:
@@ -497,11 +530,34 @@ def main() -> int:
         print(f"  !! 选项复查仍有差异：{option_diffs}")
     if junk_failed:
         print(f"  !! 删废表失败：{junk_failed}")
+    for label, fresh in unexpected_rows.items():
+        print(
+            f"  !! 快照之后新出现的 {len(fresh)} 行（不在快照里：洗选项清掉的值没有东西"
+            f"能写回，必须在 Lark 里人工核对这几行）：{label} {fresh}"
+        )
+    if count_mismatch:
+        print(
+            "  !! 剩余行数与快照时不一致："
+            + "；".join(count_mismatch)
+            + "（多于快照 = 窗口里新出现的行；少于快照 = 窗口里被删掉的行）"
+        )
     if read_failed:
         print(f"  !! 收尾读取失败：{read_failed}")
+    if read_failed and not data_failed:
+        # 写入与核对都已成功，少掉的只是收尾统计数字。这时唯一安全的下一步是
+        # 只读重跑核对；照抄快照恢复会重写那批行，覆盖掉清理之后有人在这几列里
+        # 做过的编辑 —— 一次 30 秒 httpx 超时不该换来这个。
+        print("  写入与核对已全部成功；仅收尾统计读取失败 → 只读重跑核对，不要用快照恢复。")
+        print(f"  快照文件（留档即可，本次不要用它写回）：{snapshot_path}")
+        return 1
     print("  !! 本次没有全绿，以非 0 退出。不要重跑本脚本。")
     print(f"  快照文件：{snapshot_path}")
-    print_recovery(snapshot_path)
+    if wash_failure or writeback_failed or mismatched or option_diffs or junk_failed:
+        print_recovery(snapshot_path)
+    else:
+        # 剩下的失败（窗口报警）都发生在写回与核对成功之后：快照写回救不回窗口里
+        # 新出现的行，只会重写那批已经正确的行 —— 同样不给可以照抄的写回指引。
+        print("  上面点到的行/项快照救不回来：只读重跑核对，并在 Lark 里人工核对那几行。")
     return 1
 
 

@@ -13,14 +13,10 @@ const LOADED: LarkPeople = {
   effective_owner_open_id: ""
 };
 
-const SAVED: LarkPeople = {
-  reporter_open_id: "ou_reporter",
-  owner_open_id: "ou_owner",
-  env_reporter_open_id: "ou_from_env",
-  effective_reporter_open_id: "ou_reporter",
-  effective_owner_open_id: "ou_owner"
-};
-
+// Both ids set. One fixture covers two roles, because the server echoes back the
+// row it stored: this is what the page loads in the "clears both ids" case, and
+// what a save of both boxes resolves with. It used to exist twice, byte-identical
+// (``SAVED``), which was a fixture no assertion could tell apart.
 const BOTH_SET: LarkPeople = {
   reporter_open_id: "ou_reporter",
   owner_open_id: "ou_owner",
@@ -55,7 +51,7 @@ it("shows what the saved ids will actually be written as", async () => {
 });
 
 it("saves both boxes", async () => {
-  const save = vi.fn().mockResolvedValue(SAVED);
+  const save = vi.fn().mockResolvedValue(BOTH_SET);
   render(<SettingsView load={async () => LOADED} save={save} />);
 
   await waitUntilLoaded();

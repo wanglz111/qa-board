@@ -70,6 +70,41 @@ def test_clearing_the_page_field_falls_back_to_the_environment_again(
     assert row.owner_open_id is None
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        "ou_...",  # the placeholder the deployment template used to ship
+        "Max",  # a display name
+        "max@example.com",
+        "on_61dabbc372d72932a4f6d8c7afb9de75",  # a union id, not an open id
+        "ou_bad id",
+    ],
+)
+def test_an_unusable_environment_reporter_resolves_to_nothing(
+    monkeypatch, db_session, value
+):
+    """The env fallback is the one path nothing else validates, so it is validated here.
+
+    Sending any of these as 反馈人 gets every defect row refused by Lark; an unset
+    id only leaves the column empty, and the row is written either way.
+    """
+
+    monkeypatch.setattr(
+        people, "settings", replace(settings, default_reporter_id=value)
+    )
+
+    assert people.resolved_reporter_open_id(db_session) is None
+
+
+def test_a_valid_environment_reporter_is_returned_verbatim(monkeypatch, db_session):
+    real = "ou_61dabbc372d72932a4f6d8c7afb9de75"
+    monkeypatch.setattr(
+        people, "settings", replace(settings, default_reporter_id=real)
+    )
+
+    assert people.resolved_reporter_open_id(db_session) == real
+
+
 def test_saving_twice_keeps_one_row(db_session):
     people.save_people(db_session, reporter_open_id="ou_one", owner_open_id=None)
     people.save_people(db_session, reporter_open_id="ou_two", owner_open_id=None)
