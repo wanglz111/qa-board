@@ -224,7 +224,13 @@ export function StepHeaders({
             plan={plan}
             open={provisionOpen}
             onClose={() => setProvisionOpen(false)}
-            onOpenRequest={() => setProvisionOpen(true)}
+            // The notice on the page belongs to the run that produced it. A
+            // new run may not be read together with the previous run's line,
+            // so the line goes when its action is taken up again.
+            onOpenRequest={() => {
+              setNotice("");
+              setProvisionOpen(true);
+            }}
             onFinished={setNotice}
             onChanged={onChanged}
             onRoleFixed={onRoleFixed}
@@ -239,7 +245,10 @@ export function StepHeaders({
             plan={plan}
             open={retypeOpen}
             onClose={() => setRetypeOpen(false)}
-            onOpenRequest={() => setRetypeOpen(true)}
+            onOpenRequest={() => {
+              setNotice("");
+              setRetypeOpen(true);
+            }}
             onFinished={setNotice}
             onChanged={onChanged}
             onRoleFixed={onRoleFixed}
@@ -254,7 +263,10 @@ export function StepHeaders({
             plan={plan}
             open={rebuildOpen}
             onClose={() => setRebuildOpen(false)}
-            onOpenRequest={() => setRebuildOpen(true)}
+            onOpenRequest={() => {
+              setNotice("");
+              setRebuildOpen(true);
+            }}
             onFinished={setNotice}
             onChanged={onChanged}
             rebuild={rebuild}

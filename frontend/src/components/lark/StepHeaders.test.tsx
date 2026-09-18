@@ -285,3 +285,39 @@ it("re-reads the plan after a run, so a fixed header stops being offered", async
   expect(screen.queryByRole("button", { name: "设置表头" })).not.toBeInTheDocument();
   expect(loadPlan).toHaveBeenCalledTimes(2);
 });
+
+it("clears the finished run's notice when the next action is opened", async () => {
+  const plan: ProvisionPlan = {
+    roles: { execution: [{ name: "结果", type: 1, type_name: "text", properties: {} }], bug: [] },
+    retype: {
+      execution: [
+        {
+          name: "优先级",
+          type: 3,
+          type_name: "single_select",
+          field_id: "fld-prio",
+          current_type: 1,
+          current_type_name: "text",
+          properties: {}
+        }
+      ],
+      bug: []
+    }
+  };
+  const provision = vi.fn().mockResolvedValue({ created_fields: ["结果"], schema_errors: [], target: TARGET });
+  const retype = vi.fn().mockResolvedValue({ retyped_fields: ["优先级"], schema_errors: [], target: TARGET });
+  render(props({ plan, provision, retype }));
+
+  await screen.findByText(/缺少 1 个表头/);
+  await userEvent.click(screen.getByRole("button", { name: "设置表头" }));
+  await userEvent.click(screen.getByRole("button", { name: "创建这些表头" }));
+  expect(await screen.findByText("已创建 1 个表头，请重新确认写入")).toBeVisible();
+
+  // That line belongs to the run that just finished. Opening the next action
+  // must clear it: a stale line read beside a run that has not happened yet is
+  // the page claiming a state it is not in.
+  await userEvent.click(screen.getByRole("button", { name: "修正表头类型" }));
+
+  expect(await screen.findByRole("dialog")).toBeVisible();
+  expect(screen.queryByText("已创建 1 个表头，请重新确认写入")).not.toBeInTheDocument();
+});
