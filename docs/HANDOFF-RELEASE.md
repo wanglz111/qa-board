@@ -633,7 +633,9 @@ live base `LIhnb0ok7a1TMksi3t1jrVoLpke` 现有 5 张表，其中这两张是本�
 ### 上线记录
 
 - `main` 从 `b14f658` 推进到 `2bf6b85`（两个提交：`e21cdcd`、`2bf6b85`），打 tag **`v0.1.14`**。
-- 镜像：`ghcr.io/wanglz111/qa-board-{api,web}` 的 **`v0.1.14`** 与 **`sha-2bf6b85e71deb573bbc53dba3c96ddc0c777c5a3`** 两个 tag 都已存在（tag 推送后约 2 分半，匿名 `docker manifest inspect` 确认；`sha-` 那组是回滚锚点）。**本次 CI 的 run 链接没有记**：匿名 GitHub API 配额当时已用尽（`core.remaining = 0`），而镜像存在即证明 `verify` 与两个 `publish` 都过了——查 CI 别轮询 API，直接看 GHCR。
+- CI：run [#35312976670](https://github.com/wanglz111/qa-board/actions/runs/35312976670) **success**（event `push`、`head_branch` = `v0.1.14`、`head_sha` = `2bf6b85`，05:59:23 → 06:02:17）：`verify` 92s success、`publish (api)` 31s success、`publish (web)` 77s success。
+- 镜像：`ghcr.io/wanglz111/qa-board-{api,web}` 的 **`v0.1.14`** 与 **`sha-2bf6b85e71deb573bbc53dba3c96ddc0c777c5a3`** 两个 tag 都已存在（匿名 `docker manifest inspect` 确认；`sha-` 那组是回滚锚点）。
+- 「查 CI」这件事本身记一笔：发版当时匿名 GitHub API 配额已经耗尽（`core.remaining = 0`），短间隔轮询只会返回空列表、看起来像「run 还没出现」；本机出口 IP 和同节点的人共用那 60/小时 的桶，很容易被一起烧光。**认证后是 5000/小时**：本机 `~/.bashrc` 里有 `GH_TOKEN`（细粒度 PAT），`source ~/.github-quota.sh` 后用 `ghq` 可以先看认证状态与剩余配额。没 token 时的替代判据是直接看 GHCR 有没有镜像——镜像存在即证明 `verify` 与两个 `publish` 都过了。
 - 本地验证（`2bf6b85`）：后端 **472 passed**、前端 **215 passed / 18 files**、`npm run build` 干净（产物 `index-1ZWoocE3.js` / `index-7aFSDEjz.css`）、Playwright **30 passed**、`git diff --check` 干净。
 - 服务器：部署前数据库备份 `backups/backup-20260918-140025.sql.gz`（140 KB，`gzip -t` 通过），`.env` 备份为 `.env.bak-20260918-140417`，`./deploy.sh v0.1.14`，`migrate` 退出码 0（**本次有新迁移**：`0013_screenshot_content_hash` → `0014_group_archive`）。
 
