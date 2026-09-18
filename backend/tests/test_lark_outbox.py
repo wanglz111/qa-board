@@ -449,6 +449,37 @@ def test_timeout_without_a_provable_match_stops_until_reviewed(
     assert fake_lark.created_execution > created_before
 
 
+def test_timeout_never_adopts_a_lookalike_row_from_before_this_tool(
+    fake_lark, confirmed_group, failed_attempt, db_session
+):
+    # A hand-run row that predates this tool, carrying the same case text, the
+    # same result and the same console output as the attempt being written — only
+    # its 日期 differs. An adoption rule that matched on the case text (or on the
+    # label, which for a first attempt is the bare case code) would take this row
+    # for the one the timeout may have created and report the attempt as synced
+    # while nothing at all was written.
+    fake_lark.records.append(
+        {
+            "record_id": "old-1",
+            "fields": {
+                "用例": "B-001 管理员登录",
+                "结果": "不通过",
+                "控制台": "wallet.bind timeout",
+                "日期": 1,
+            },
+        }
+    )
+    fake_lark.timeout_after_create = True
+    fake_lark.hide_created_records = True
+
+    state = process_one_job(fake_lark, failed_attempt)
+
+    assert state == "uncertain"
+    job = _job(db_session, failed_attempt)
+    assert job.error_kind == "timeout_unreconciled"
+    assert job.new_exec_record_id is None
+
+
 def test_known_failure_before_create_backs_off(
     fake_lark, confirmed_group, failed_attempt, db_session
 ):
