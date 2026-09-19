@@ -16,7 +16,7 @@ SCHEMA_BLOCK = re.compile(
 )
 
 
-def test_prompts_endpoint_serves_both_documents(authenticated_client):
+def test_prompts_endpoint_serves_every_document(authenticated_client):
     response = authenticated_client.get("/api/ai-prompts")
 
     assert response.status_code == 200
@@ -73,3 +73,16 @@ def test_format_doc_embeds_the_same_schema():
     assert json.loads(match.group("schema")) == json.loads(
         SCHEMA.read_text(encoding="utf-8")
     )
+
+
+def test_the_shipped_prompt_golden_sample_still_parses():
+    from app.importers.schema import parse_file
+
+    for prompt in PROMPTS:
+        if prompt["id"] != "case-results":
+            continue
+        block = re.findall(r"```csv\n(.*?)```", prompt["path"].read_text(encoding="utf-8"), re.DOTALL)
+        assert block, "the prompt must ship a csv fence"
+        cases = parse_file("golden.csv", block[-1].encode("utf-8"))
+        assert [case.code for case in cases] == ["LOGIN-001", "LOGIN-002", "LOGIN-003"]
+        assert [case.result for case in cases] == ["通过", None, "不通过"]

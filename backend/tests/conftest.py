@@ -780,27 +780,55 @@ FIXTURE_SCHEMA_FINGERPRINT = (
 
 
 @pytest.fixture
-def confirmed_group(db_session, imported_group) -> Group:
-    draft = TargetDraft("app-exec", "tbl-runs", None, "app-bug", "tbl-defects")
-    db_session.add(
-        LarkTarget(
-            group_id=imported_group.id,
-            source_url="https://tenant.larksuite.com/wiki/node-1",
-            execution_base_token="app-exec",
-            execution_base_name="执行库",
-            execution_table_id="tbl-runs",
-            execution_table_name="执行记录",
-            bug_base_token="app-bug",
-            bug_base_name="缺陷库",
-            bug_table_id="tbl-defects",
-            bug_table_name="缺陷记录",
-            schema_fingerprint=FIXTURE_SCHEMA_FINGERPRINT,
-            target_fingerprint=draft.fingerprint,
-            confirmed_at=datetime.now(timezone.utc),
+def confirm_group_target(db_session):
+    """Approve a Lark target for any group, the way the Lark page does."""
+
+    def factory(group_id: UUID) -> Group:
+        draft = TargetDraft("app-exec", "tbl-runs", None, "app-bug", "tbl-defects")
+        db_session.add(
+            LarkTarget(
+                group_id=group_id,
+                source_url="https://tenant.larksuite.com/wiki/node-1",
+                execution_base_token="app-exec",
+                execution_base_name="执行库",
+                execution_table_id="tbl-runs",
+                execution_table_name="执行记录",
+                bug_base_token="app-bug",
+                bug_base_name="缺陷库",
+                bug_table_id="tbl-defects",
+                bug_table_name="缺陷记录",
+                schema_fingerprint=FIXTURE_SCHEMA_FINGERPRINT,
+                target_fingerprint=draft.fingerprint,
+                confirmed_at=datetime.now(timezone.utc),
+            )
         )
+        db_session.commit()
+        return db_session.get(Group, group_id)
+
+    return factory
+
+
+@pytest.fixture
+def confirmed_group(db_session, imported_group, confirm_group_target) -> Group:
+    return confirm_group_target(imported_group.id)
+
+
+@pytest.fixture
+def outcomes_book() -> str:
+    """A three-row text file: two conclusions and one blank row.
+
+    New tests take it from here instead of pasting their own copy; the older
+    ``test_groups_api.py`` constant predates it and stays as it is.
+    """
+
+    return (
+        "用例编号,执行顺序,用例标题,所属模块,优先级,执行分层,前置条件,测试数据,执行步骤,预期结果,执行结果,实测过程\n"
+        'B-001,1,管理员登录,账户,P0,Smoke,,,"1. 打开登录页","1. 页面: 进入工作台",通过,"1. 实测 1.2s"\n'
+        "B-002,2,未绑定拦截,账户,P0,Smoke,,,"
+        '"1. 直访业务页","1. 页面: 被拦截",,\n'
+        'B-003,3,邀请码校验,账户,P1,Smoke,,,"1. 输入邀请码",'
+        '"1. 页面: 回显推荐人",不通过,"1. 实测回显 8+8，设计稿 6+6"\n'
     )
-    db_session.commit()
-    return imported_group
 
 
 @pytest.fixture

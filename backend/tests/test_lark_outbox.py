@@ -1727,3 +1727,72 @@ def test_an_imported_row_reaches_lark_with_its_evidence(
     assert fields["实测过程"] == "1. 实测遮罩 rgba(0,0,0,.65)"
     assert fields["结果"] == "通过"
     assert fields["用例"] == "B-002 导入的实测过程"
+
+
+def test_a_results_file_reaches_lark_and_a_blank_row_does_not(
+    authenticated_client, fake_lark, confirm_group_target, outcomes_book, db_session
+):
+    """The whole chain, once: file → attempts → queue → the run table.
+
+    The blank row is the point of the feature — it must produce no run row at
+    all, not a row whose 结果 cell happens to be empty.
+    """
+
+    preview = authenticated_client.post(
+        "/api/import/preview",
+        files={"file": ("outcomes.csv", outcomes_book.encode("utf-8"), "text/csv")},
+    ).json()
+    confirm = authenticated_client.post(
+        "/api/import/confirm",
+        json={"ticket_id": preview["ticket_id"], "name": "验收"},
+    ).json()
+    assert confirm["attempt_count"] == 2
+
+    group_id = confirm["id"]
+    confirm_group_target(group_id)
+    assert enqueue_group_attempts(db_session, group_id) == 2
+
+    attempts = db_session.scalars(
+        select(Attempt).where(Attempt.group_case_id.in_(
+            select(GroupCase.id).where(GroupCase.group_id == group_id)
+        ))
+    ).all()
+    for attempt in attempts:
+        assert process_one_job(fake_lark, attempt) == "synced"
+
+    written = [record["fields"] for record in fake_lark.created_records]
+    # 不通过的 B-003 在执行行之外还开一条缺陷行，所以 ``created_records``
+    # （执行 + 缺陷，见 FakeLark）是 3 条；执行行只有带 ``用例`` 的那两条。
+    # 留空的 B-002 两处都不出现——它连 attempt 都没有。
+    runs = [field for field in written if "用例" in field]
+    assert len(runs) == 2
+    assert len(written) == 3
+    assert sorted(field["用例"] for field in runs) == ["B-001 管理员登录", "B-003 邀请码校验"]
+    assert {field["实测过程"] for field in runs} == {"1. 实测 1.2s", "1. 实测回显 8+8，设计稿 6+6"}
+    assert all("B-002" not in field["用例"] for field in runs)
+
+
+def test_a_hand_run_reaches_lark_with_the_evidence_it_collected(
+    authenticated_client, fake_lark, confirmed_group, db_session
+):
+    """The other write path: a person ran it and typed what they saw."""
+
+    created = authenticated_client.post(
+        f"/api/groups/{confirmed_group.id}/cases/B-001/attempts",
+        json={
+            "result": "不通过",
+            "note": "绑定框未拦截",
+            "evidence": "1. 直访业务页未被拦截",
+            "idempotency_key": "hand-run-evidence-1",
+        },
+    )
+    assert created.status_code == 201, created.text
+
+    attempt = db_session.scalar(
+        select(Attempt).where(Attempt.idempotency_key == "hand-run-evidence-1")
+    )
+    assert process_one_job(fake_lark, attempt) == "synced"
+
+    fields = fake_lark.created_records[0]["fields"]
+    assert fields["实测过程"] == "1. 直访业务页未被拦截"
+    assert fields["结果"] == "不通过"
