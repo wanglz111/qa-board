@@ -887,7 +887,7 @@ ALTER TABLE import_tickets SET (
 
 ## 27. v0.1.18：一次导入用例 + 实测结果、第三份提示词、执行表新增必填列「实测过程」（**待发布**）
 
-计划与规格：`docs/superpowers/plans/2026-09-19-import-with-results.md`、`docs/superpowers/specs/2026-09-19-import-with-results-design.md`。分支 `feat/import-with-results`，19 个提交 / 39 个文件（`git diff --shortstat main...HEAD` = **+1716 / −87**）——其中 18 个提交是代码与规格，最后一条就是本节（`git show --numstat` = **85 / 0**，纯追加）。
+计划与规格：`docs/superpowers/plans/2026-09-19-import-with-results.md`、`docs/superpowers/specs/2026-09-19-import-with-results-design.md`。分支 `feat/import-with-results`，20 个提交 / 39 个文件（`git diff --shortstat main...HEAD` = **+1716 / −87**）——其中 18 个提交是代码与规格；第 19 条 `f2c0ee8` 是本节正文（`git show --numstat` = **85 / 0**，纯追加）；第 20 条（本节之上最后一条）只把「回滚」一段的措辞从"读起来像实测"改成"写明是推理"，并同步了本行的提交计数。
 
 > **本节交付时，`feat/import-with-results` 尚未合并、尚未打 tag、尚未构建镜像、尚未部署**：最后一个代码提交是 `5343dad`，本节的文档提交落在它之后、就是分支尖端。发版动作照 §4.1（本地：验证 → 打 tag）、§4.2（Actions：镜像发布）、§4.3 / §4.4 的既有流程走，本节不代跑；也**没有"上线记录"表**（没发生的事不写）。下面那条**四步上线顺序**是功能层面的硬要求，与发版流程是两件事，别混。
 
@@ -968,5 +968,5 @@ ALTER TABLE import_tickets SET (
 4. **`downgrade()` 全局零覆盖**（`backend/tests/` 里 grep `downgrade` 零命中）——包括本次新增的 `0017`：`test_migrations.py` 只验证"空库升级到 head（两次）"与"从 `0004` 升到 head"，**没有一条回退用例**。属仓库既有全局缺口。
 5. **`match_bugs` 的读回问题会被本功能撞得更频繁**（`lark/history.py:276`，**另一个计划的范围**）：本功能给每一条"不通过"按既有逻辑在缺陷表开一行，**但缺陷行归到哪个用例名下，靠的是 `match_bugs` 的启发式**——依次是：显式关联字段（`关联用例` / `用例编号`）→ 备注首行是不是本工具写的 `用例：{code}` 标签 → **描述里"长得像编号"的 token**（`_description_match`）→ 备注里任意位置的标签。第三档是概率游戏：缺陷表里散文行越多，"把某行挂到别的用例下"的机会越大。本功能会**批量**往那张表里加行（一批 41 行进表、失败行各开一条缺陷行），等于把撞上这个既有读回的次数放大。**这不是"与本功能无关"**：本分支按 spec §11 只把本地行白名单从 1 个值扩到 2 个，读回语义一个字没动，修它要单开一次改动。
 
-**回滚**：`0017` 的 `downgrade()` 会先把 `ck_attempts_source` 收紧回 `('execution','reconcile')`——库里只要已有 `import` 行，这一步在 Postgres 上就会因既有行不满足约束而失败；就算成功，紧接着的 `drop_column` 会把所有导入的实测过程原文丢掉。**所以回滚只回镜像、别 downgrade 数据库**：DB 停在 `0017` 对 v0.1.17 的代码是安全的（旧代码不写 `import`，放宽后的 CHECK 仍接受 `execution`/`reconcile`，多出来的列被忽略）。
+**回滚**：迁移只向前（同 §5）。`0017` 的 `downgrade()` 按代码顺序会先把 `ck_attempts_source` 收紧回 `('execution','reconcile')`，而 Postgres 重建 CHECK 时会校验既有行——**这是读代码得出的推理、本次没有实跑**（见未决项 4：这条回退路径在仓库里零覆盖）：库里只要已有 `import` 行，这一步就会失败；就算它能成功，紧接着的 `drop_column` 也会丢掉导入的实测过程原文。**所以回滚只回镜像、别 downgrade 数据库**：DB 停在 `0017` 对 v0.1.17 的代码是安全的（旧代码不写 `import`，放宽后的 CHECK 仍接受 `execution`/`reconcile`，多出来的列被忽略——同 §5 里 `0011` 那种"只新增列"的情形）。
 
