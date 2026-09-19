@@ -5,7 +5,11 @@ import pytest
 from sqlalchemy import select
 
 from app.lark.client import RECORD_MUTATION_METHODS, LarkError
-from app.lark.fields import BUG_PRIORITY_OPTIONS, PASS_RESULT_OPTIONS
+from app.lark.fields import (
+    BUG_PRIORITY_OPTIONS,
+    PASS_RESULT_OPTIONS,
+    REQUIRED_BUG_FIELD_TYPES,
+)
 from app.lark.provision import (
     PROVISION_FIELD_TYPES,
     ROLE_SCHEMA,
@@ -230,6 +234,60 @@ def test_setting_headers_is_idempotent(lark_fake, authenticated_client, provisio
     assert lark_fake.created_fields[0]["base_token"] == "app-exec"
     assert lark_fake.created_fields[0]["table_id"] == "tbl-runs"
     assert lark_fake.created_views == []
+
+
+def test_setting_headers_refuses_the_table_of_the_other_role(
+    lark_fake, authenticated_client, provision_group
+):
+    """The crossed step ① is refused instead of being written into the wrong table.
+
+    This is the live incident: 「执行记录表」 held the defect table, so a run of
+    this endpoint created 用例/结果/负责人/控制台/报告人/日期/实测过程 inside the
+    defect table — 15 headers where the template has 8. The endpoint trusted the
+    stored target and never looked at what the table actually was.
+    """
+
+    lark_fake.fields = [
+        {"field_id": f"fld-bug-{index}", "field_name": name, "type": types[0]}
+        for index, (name, types) in enumerate(REQUIRED_BUG_FIELD_TYPES.items())
+    ]
+
+    response = authenticated_client.post(
+        f"/api/groups/{provision_group.id}/lark/provision/fields",
+        json={
+            "role": "execution",
+            "field_names": ["结果", "日期"],
+            "create_view": False,
+            "acknowledge": True,
+        },
+    )
+
+    assert response.status_code == 409, response.text
+    assert "缺陷记录表" in response.json()["detail"]
+    assert "第 1 步" in response.json()["detail"]
+    assert lark_fake.created_fields == []
+
+
+def test_the_crossed_role_refusal_spares_empty_and_partial_tables(
+    lark_fake, authenticated_client, provision_group
+):
+    """A fresh table and a half-configured run table both stay writable."""
+
+    for fields in (
+        [{"field_name": "文本", "type": 1}],
+        [{"field_name": "用例", "type": 1}],
+    ):
+        lark_fake.fields = fields
+        response = authenticated_client.post(
+            f"/api/groups/{provision_group.id}/lark/provision/fields",
+            json={
+                "role": "execution",
+                "field_names": ["结果"],
+                "create_view": False,
+                "acknowledge": True,
+            },
+        )
+        assert response.status_code == 200, response.text
 
 
 def test_creating_a_table_returns_its_new_id(lark_fake, authenticated_client, provision_group):

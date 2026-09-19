@@ -138,6 +138,46 @@ ROLE_SCHEMA: dict[str, dict[str, FieldSpec]] = {
 }
 
 
+# What one role's table looks like from the outside, and what the other role's
+# looks like. Every path that writes headers trusts the stored target's role →
+# table mapping, so a crossed 「执行记录表」/「缺陷记录表」 in step ① used to be
+# discovered only after the run table's headers had been created inside the
+# defect table. The marker sets below are what that check reads.
+_ROLE_OWN_MARKERS: dict[str, tuple[str, ...]] = {
+    "execution": ("用例", "结果"),
+    "bug": ("问题描述", "进展状态"),
+}
+_ROLE_NAMES: dict[str, str] = {"execution": "执行记录表", "bug": "缺陷记录表"}
+
+
+def refuse_wrong_role_table(role: str, fields: Iterable[dict[str, Any]]) -> None:
+    """Refuse a table that already is the other role's table.
+
+    Only a table that carries the other role's own columns *and* none of this
+    role's own is refused: a fresh table (the primary column alone), a table
+    that is merely missing headers, and a table that already satisfies this
+    role all pass. A genuine table of the other role is the one case where
+    writing this role's schema there can only be the crossed selection.
+    """
+
+    names = {str(field.get("field_name") or "") for field in fields}
+    own = _ROLE_OWN_MARKERS[role]
+    if any(name in names for name in own):
+        return
+    other_role = "bug" if role == "execution" else "execution"
+    other = _ROLE_OWN_MARKERS[other_role]
+    if not all(name in names for name in other):
+        return
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            f"这张表看起来是{_ROLE_NAMES[other_role]}：它已经有「{'」「'.join(other)}」，"
+            f"却没有「{'」「'.join(own)}」。请回第 1 步确认"
+            "「执行记录表」和「缺陷记录表」没有选反，再生成表头。"
+        ),
+    )
+
+
 def schema_order(role: str) -> list[str]:
     """The required headers of one role, in the reference table's column order."""
 
@@ -392,6 +432,7 @@ def provision_fields(
     checked_fingerprint = target.target_fingerprint
     base_token, table_id = _role_table(target, payload.role)
     fields, listed_views = _read_table_listings(client, base_token, table_id)
+    refuse_wrong_role_table(payload.role, fields)
     planned = {field["name"]: field for field in provision_plan(fields, payload.role)}
     view = _view_state(listed_views)
 
@@ -518,6 +559,7 @@ def retype_fields(
     checked_fingerprint = target.target_fingerprint
     base_token, table_id = _role_table(target, payload.role)
     fields, _views = _read_table_listings(client, base_token, table_id)
+    refuse_wrong_role_table(payload.role, fields)
     planned = {field["name"]: field for field in retype_plan(fields, payload.role)}
 
     retyped: list[str] = []
