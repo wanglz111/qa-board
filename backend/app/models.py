@@ -144,7 +144,7 @@ class Attempt(Base):
             name="ck_attempts_state_result",
         ),
         CheckConstraint(
-            "source IN ('execution', 'reconcile')", name="ck_attempts_source"
+            "source IN ('execution', 'reconcile', 'import')", name="ck_attempts_source"
         ),
     )
 
@@ -158,6 +158,9 @@ class Attempt(Base):
     result: Mapped[str | None] = mapped_column(String)
     note: Mapped[str | None] = mapped_column(Text)
     console_text: Mapped[str | None] = mapped_column(Text)
+    # 实测过程 as the operator wrote it: the row's evidence narrative, which the
+    # writer puts into Lark's own 实测过程 column. 控制台 keeps the console dump.
+    evidence: Mapped[str | None] = mapped_column(Text)
     idempotency_key: Mapped[str | None] = mapped_column(String, unique=True)
     source: Mapped[str] = mapped_column(
         String, nullable=False, server_default="execution", default="execution"
@@ -170,6 +173,12 @@ class Attempt(Base):
     screenshots: Mapped[list[Screenshot]] = relationship(
         back_populates="attempt", cascade="all, delete-orphan", passive_deletes=True
     )
+
+
+# Every attempt this tool creates locally: one a person ran, one materialised
+# from an imported result. Both are ours to queue and to diff against the
+# table; 'reconcile' rows were adopted from the table and mirror it.
+LOCAL_SOURCES: tuple[str, ...] = ("execution", "import")
 
 
 class Screenshot(Base):
