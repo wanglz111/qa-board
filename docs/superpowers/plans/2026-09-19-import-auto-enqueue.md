@@ -28,10 +28,11 @@
 
 ## 3. 为什么你完全看不出来（蓝军视角，四条可见性缺陷）
 
-1. **徽标在说谎。** `frontend/src/views/Execution.tsx:731-733` 显示「待同步 {sync.queued} 条」，`queued` 是 **SyncJob 数**。41 条 import attempt + 0 个 job 时它显示**「待同步 0 条」**——看起来已经同步完了。真正该说的是 `pending_attempts`。
-2. **控件整块隐身。** `frontend/src/components/lark/StepSync.tsx:19`：`if (!confirmed && parked === 0) return null;`。目标没确认时，连"本地还有结果没进 Lark"这句话都不渲染。
-3. **文案被丢掉。** `outbox.py:549` 的 `detail`（"目标表已确认，可显式排入同步" / "尚未确认目标表，本地结果不会写入 Lark"）在 `StepSync.tsx` 里**一次都没被渲染**。
-4. **按钮的可用性依赖一个看不见的数。** `StepSync.tsx:38` 的 `disabled` 条件是 `pending_attempts === 0`，而这个数只在这一页出现。
+1. **徽标在说谎。** `frontend/src/views/Execution.tsx:731-733` 显示「待同步 {sync.queued} 条」，`queued` 是 **SyncJob 数**。41 条 import attempt + 0 个 job 时它显示**「待同步 0 条」**——看起来已经同步完了。
+2. **控件整块隐身 + 第 ④ 步打不开。** `frontend/src/components/lark/StepSync.tsx:19`：`if (!confirmed && parked === 0) return null;`——目标没确认时这句话根本不渲染；而 `frontend/src/views/LarkCheck.tsx:139` 的 `enterable.sync` 同样把第 ④ 步的标题按钮 disable 掉，所以就算渲染出来也没人打得开。用户看到的就是"没有同步按钮"。
+3. **摘要报 0。** 同一处 `summaries.sync` 在未确认时输出「待同步 0 · 已同步 0」——本地明明有 41 条结果，这一行读起来就是"什么都没发生"。
+4. **`detail` 被丢掉。** `outbox.py:549` 的文案（"目标表已确认，可显式排入同步" / "尚未确认目标表，本地结果不会写入 Lark"）在 `StepSync.tsx` 里**一次都没被渲染**。
+5. **按钮的可用性依赖一个看不见的数。** `StepSync.tsx:38` 的 `disabled` 条件是 `pending_attempts === 0`，而灰按钮不给任何解释（`title` 在 disabled 上通常也不显示）。
 
 ## 4. 现在就能导进去（不改代码）
 
@@ -64,21 +65,28 @@
 
 ## 5. 改进方案
 
-### P0-A：确认目标后自动回填（一处改动，收益最大）
+### P0-A：确认目标后自动回填（一处改动，收益最大）— **已实施**
 
-`confirm_target`（`target.py:649`）写 `confirmed_at` 之后，调用 `enqueue_group_attempts(db, group_id)`，并把计数放进响应（新增 `"queued_local_attempts": int`）；前端 `StepApprove` 确认成功后提示「已自动排入 N 条本地结果」。
+`confirm_target` 写 `confirmed_at` 之后，调用 `enqueue_group_attempts(db, group_id)`，并把计数放进响应（新增 `"queued_local_attempts": int`）；前端确认成功后提示「已自动排入 N 条本地结果」。跨模块 import 必须放在函数内（`outbox` 顶层 import 了 `target_for`，模块级会成环）。
 
-**为什么在这里自动是安全的**：`confirm_target` 在 `read_errors`/`schema_errors` 非空时直接 409（`target.py:634-643`），且 `target_fingerprint` 在行锁内复核（`:645-648`）。也就是说"自动排队"发生的那一刻，目标表一定是刚验过表头、指纹刚核对过的表——不会造出 park 行。这正是文档 §10 要求的顺序（先补列 → 再确认 → 再同步）。
+**为什么在这里自动是安全的**：`confirm_target` 在 `read_errors`/`schema_errors` 非空时直接 409，且 `target_fingerprint` 在行锁内复核。也就是说"自动排队"发生的那一刻，目标表一定是刚验过表头、指纹刚核对过的表——不会造出 park 行。这正是文档 §10 要求的顺序（先补列 → 再确认 → 再同步）。
 
 **风险**：只改变"确认那一刻"的行为；确认之后 target 再被 provision 清批准，job 照样 park，语义不变。
 
-### P0-B：徽标说真话（`Execution.tsx:731-733`）
+### P0-B：徽标说真话（`Execution.tsx:731-733`）— **未实施，且原文的写法是错的**
 
-`sync.pending_attempts > 0 && sync.queued === 0` 时追加「· 本地待排入 {pending_attempts} 条」，可点击跳到 Lark 检查页。**没有这一步，P0-A 之外的老组仍然会看到"待同步 0 条"的假象。**
+原文写「`pending_attempts > 0 && queued === 0` 时显示"本地待排入 N 条"」。**这条是错的**：`read_sync`（`outbox.py:523-536`）的 `pending_attempts` 统计的是**全部 committed 本地行，完全不看有没有 SyncJob**——41 条全部同步完之后它仍然是 41。照原文做，徽标会在同步完成之后永远挂着"本地待排入 41 条"，把一个假数字换成另一个假数字。
 
-### P0-C：`StepSync` 不再整块隐身（`StepSync.tsx:19`）
+要做就得先让**服务端**给出真正的"还没排队的本地行数"（例如 `committed 本地行 LEFT JOIN sync_jobs WHERE job IS NULL`，新增字段，不动 `pending_attempts` 的既有语义——它同时被 `stepsComplete` 的 `queueClean` 和排队按钮的 disabled 条件消费，改了会连带改掉两处行为）。这是 P0-B 的真正成本，原文低估了。
 
-渲染条件改成 `sync !== null && (confirmed || parked > 0 || pending_attempts > 0)`，并把 `sync.detail` 渲染出来；未确认时按钮 disabled，文案改成"先确认目标表"。顺手把"按钮 disabled 的原因"写成可见文字，而不是只挂在 `title` 上。
+### P0-C：`StepSync` 不再整块隐身（`StepSync.tsx:19`、`LarkCheck.tsx:139`）— **已实施**
+
+只改渲染条件是不够的：第 ④ 步的**标题按钮**由 `enterable.sync` 决定，未确认时它是 disabled，面板渲染出来也没人打得开。两处必须同时改：
+
+- `StepSync.tsx`：`if (!confirmed && parked === 0 && pending === 0) return null;`，并补两段可见文案——未确认但本地有 N 条结果时说明"先在第 ③ 步确认写入，确认后自动排入"（**不给排队按钮**：`/sync/enqueue` 对未确认目标直接 409）；已确认但本地没有带结论的结果时说明"没有可排入的本地结果"（灰按钮也是"没有按钮"）。
+- `LarkCheck.tsx`：`enterable.sync` 加 `|| (sync?.pending_attempts ?? 0) > 0`；`summaries.sync` 在未确认时不许再报"待同步 0 · 已同步 0"，改为「N 条本地结果在等待确认写入目标」，且队列未读回来时报「同步状态尚未读取」而不是 0（同状态条第 8 条：没读到的数字不许出口）。
+
+**`sync.detail` 仍未渲染**：这一轮用它旁边的计数说清楚了同一件事，`detail` 那两个字符串（`outbox.py:549/551`）目前依旧没有任何消费方，要么删要么用，别继续躺着。
 
 ### P1：导入成功后的交接提示（`Import.tsx:93`）
 
@@ -86,11 +94,12 @@
 
 ## 6. 验收（每条都要有可跑的测试）
 
-- **backend / `tests/test_lark_target.py`**：确认目标后响应 `queued_local_attempts` 等于该组已有 committed 本地行数；未确认目标前调用不产生任何 `SyncJob`（防"假接线"）。
-- **backend / `tests/test_lark_outbox.py`**：既有 `test_a_results_file_reaches_lark_and_a_blank_row_does_not` 覆盖 file → attempt → queue → 执行表；补一条"未确认时 enqueue 抛 409 而不是静默 0"。
-- **frontend / `StepSync.test.tsx`**：未确认 + `pending_attempts > 0` 时必须渲染，且 `detail` 文本可见、按钮 disabled。
-- **frontend / `Execution.test.tsx`**：`pending_attempts=41, queued=0` 时徽标出现「本地待排入 41 条」。
-- **e2e / `frontend/e2e/import.spec.ts`**：确认目标后出现"已自动排入 N 条"。**e2e 不在 CI 里**，是发版前手跑的门。
+- **backend / `tests/test_lark_target.py`** ✅ `test_approving_a_target_queues_the_local_results_it_made_writable`：保存目标后队列仍为空 → 确认后 `queued_local_attempts == 1` 且 job 为 pending → 再确认一次返回 0、不重复插。
+- **backend / `tests/test_lark_outbox.py`**：既有 `test_a_results_file_reaches_lark_and_a_blank_row_does_not` 覆盖 file → attempt → queue → 执行表。**仍缺**一条"未确认时 enqueue 抛 409 而不是静默 0"。
+- **frontend / `StepSync.test.tsx`** ✅ 未确认 + `pending_attempts > 0` 时渲染并说明下一步、且**不给**排队按钮（`/sync/enqueue` 对未确认目标 409）；已确认 + 队列全空时解释"没有可排入的本地结果"而不是留一个灰按钮。
+- **frontend / `LarkCheck.test.tsx`** ✅ 未确认 + `pending_attempts = 5` 时第 ④ 步可打开、摘要报「5 条本地结果在等待确认写入目标」（队列未读回来时报「同步状态尚未读取」，不报 0）。
+- **frontend / `Execution.test.tsx`** ⬜ 属于 P0-B，P0-B 需要先有服务端新计数（见上），**未实施**。
+- **e2e / `frontend/e2e/import.spec.ts`** ⬜ 确认目标后出现"已自动排入 N 条"。**e2e 不在 CI 里**，是发版前手跑的门。
 - **人工门**：真表写入不由任何自动化覆盖，交付说明里写明。
 
 ## 7. 明确不做 / 边界

@@ -90,6 +90,26 @@ describe("StepSync", () => {
     expect(container.firstChild).toBeNull();
   });
 
+  it("speaks up for local results it cannot queue yet, and never offers a button that would 409", () => {
+    const { container } = renderSync({
+      sync: sync({ confirmed: false, pending_attempts: 3 }),
+      confirmed: false
+    });
+
+    expect(container.querySelector(".lark-queue")).toHaveTextContent(
+      "本地已保存 3 条结果，但这一组还没有确认写入目标"
+    );
+    // 未确认时不给排队按钮：/sync/enqueue 对未确认的目标直接拒绝。
+    expect(screen.queryByRole("button", { name: /排入同步/ })).toBeNull();
+  });
+
+  it("explains an empty queue instead of leaving a dead grey button", () => {
+    const { container } = renderSync({ sync: sync({ pending_attempts: 0 }) });
+
+    expect(container.querySelector(".lark-queue")).toHaveTextContent("没有可排入的本地结果");
+    expect(screen.getByRole("button", { name: /排入同步/ })).toBeDisabled();
+  });
+
   it("warns before releasing uncertain rows and shows last_error as an alert", async () => {
     const user = userEvent.setup();
     const { container, onRetry } = renderSync({

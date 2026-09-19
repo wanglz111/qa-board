@@ -15,8 +15,10 @@ export function StepSync({ sync, confirmed, queueing, retrying, onEnqueue, onRet
   const failed = sync?.failed ?? 0;
   const uncertain = sync?.uncertain ?? 0;
   const parked = sync?.parked ?? 0;
-  // 现状的可见条件原样保留：没确认、又没有待管理员处理的行时，这块没有可说的话。
-  if (!confirmed && parked === 0) return null;
+  const pending = sync?.pending_attempts ?? 0;
+  // 过去这块在「没确认、又没有待管理员处理的行」时整块不渲染：于是「本组还有 N 条本地
+  // 结果没进表」这句话全站都不存在，用户只看到一个打不开的第 ④ 步，读成「没有同步按钮」。
+  if (!confirmed && parked === 0 && pending === 0) return null;
   return (
     <div className="lark-queue">
       <p className="inline-status">
@@ -90,6 +92,21 @@ export function StepSync({ sync, confirmed, queueing, retrying, onEnqueue, onRet
         <p className="attachment-hint">
           {parked} 条记录正在等待管理员处理，不会自行同步：只有管理员确认它们应写入当前目标表后才会继续。若目标表确实更换过，按「重新指向当前目标表」或「把已保存的本地结果排入同步」都会把它们重新指向当前目标表；若本组的写入确认已被撤销，需要先重新确认。
           {confirmed ? null : "本组目前尚未确认写入目标，这些记录不会同步。"}
+        </p>
+      ) : null}
+      {/* 未确认的组没有「排入同步」按钮：/sync/enqueue 对未确认的目标直接 409，给一个点了
+          必然失败的按钮比不给更糟。但这句话必须说出来——否则「怎么同步」在页面上没有答案。 */}
+      {!confirmed && pending > 0 ? (
+        <p className="attachment-hint">
+          本地已保存 {pending} 条结果，但这一组还没有确认写入目标：先在第 ③ 步勾选并确认写入。
+          确认成功后这些结果会自动排入队列，未确认之前不会向任何表写入。
+        </p>
+      ) : null}
+      {/* 灰按钮也是「没有按钮」：本地没有带结论的结果时，把原因写出来而不是只让它变灰。 */}
+      {confirmed && pending === 0 && failed === 0 && uncertain === 0 && parked === 0 ? (
+        <p className="attachment-hint">
+          没有可排入的本地结果：只有带结论（通过 / 不通过 / 未执行）的行才建执行记录，
+          结果留空的用例只建用例，Lark 里不会出现这一行。
         </p>
       ) : null}
     </div>

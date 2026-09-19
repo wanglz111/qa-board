@@ -327,6 +327,21 @@ it("says how many local results the approval just queued, and reloads the queue"
   await waitFor(() => expect(loadSync).toHaveBeenCalledTimes(2));
 });
 
+it("lets an unconfirmed group with local results open step 4 and says what is missing", async () => {
+  const loadSync = vi.fn().mockResolvedValue(syncStatus({ confirmed: false, pending_attempts: 5 }));
+  renderCheck({ loadTarget: async () => stateWith(TARGET), loadSync });
+
+  // 没确认写入目标，但本地有 5 条结果在等：第 ④ 步必须能打开，否则「怎么同步」无处可问。
+  // 队列是异步读回来的：先等那一行报出真数字（读到之前它不许报 0）。
+  const summary = await screen.findByText("5 条本地结果在等待确认写入目标");
+  expect(summary.closest(".lark-step")).toHaveTextContent("第 4 步");
+
+  await ensureStepOpen(4);
+  expect(screen.getByText(/本地已保存 5 条结果/)).toBeVisible();
+  // 没确认就不给排队按钮：那个按钮对未确认的目标只会 409。
+  expect(screen.queryByRole("button", { name: /排入同步/ })).toBeNull();
+});
+
 it("blocks confirmation and explains when the live table reports schema errors", async () => {
   const { container } = renderCheck({
     loadTarget: async () => stateWith(TARGET, { schema_errors: ["缺少必填字段「截图」"], read_errors: [] })

@@ -132,11 +132,12 @@ export function LarkCheckView({
   const executionBase = effectiveBase(draft, "execution"), bugBase = effectiveBase(draft, "bug");
   const executionVerdict = verdictFor(draft, "execution"), bugVerdict = verdictFor(draft, "bug");
   // 「前置未完成不可进」：① 永远可进；② 没 target 时进去是一句回第 ① 步的提示（规格 §12 P2）；
-  // ③ 要两表 verdict 都 ok，否则勾选也点不动；④ 要有已确认目标或真的有待处理异常。
+  // ③ 要两表 verdict 都 ok，否则勾选也点不动；④ 要有已确认目标、真的有待处理异常，
+  // 或者本地还有结果在等确认——最后这条不加，「本地有结果但没按钮」就永远没有出口。
   const enterable: Record<StepId, boolean> = {
     tables: true, headers: true,
     approve: target !== null && executionVerdict === "ok" && bugVerdict === "ok",
-    sync: confirmed || syncTrouble
+    sync: confirmed || syncTrouble || (sync?.pending_attempts ?? 0) > 0
   };
   // 只有 D2 的两条「必须主动提醒」抢导航：状态条变红，或指向第 ④ 步（含 parked 的 warn）。
   // 「尚未确认」也带 step=approve，但那是正常进度 —— 抢它会把用户从第 ① 步拽走。
@@ -159,7 +160,11 @@ export function LarkCheckView({
     headers: target ? `已保存目标：${target.execution_table_name} / ${target.bug_table_name}` : HEADER_HINT,
     approve: confirmed ? (invalidated ? "确认已失效，需要重新确认" : "已确认") : "尚未确认：本地结果不会写入 Lark",
     sync: syncTrouble ? `失败 ${syncFailed} · 待人工确认 ${syncUncertain} · 待管理员处理 ${syncParked}`
-      : `待同步 ${sync?.queued ?? 0} · 已同步 ${sync?.synced ?? 0}`
+      : confirmed ? `待同步 ${sync?.queued ?? 0} · 已同步 ${sync?.synced ?? 0}`
+      // 未确认又有本地结果：这一行是那句「本地结果没进表」唯一的出口，别让它报 0 · 0。
+      // 队列还没读回来时也不许报数——没读到的数字出口就是假话（同状态条第 8 条）。
+      : sync === null ? "同步状态尚未读取"
+      : `${sync.pending_attempts} 条本地结果在等待确认写入目标`
   };
 
   function buildPayload(acknowledge: boolean): LarkTargetPayload {
