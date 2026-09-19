@@ -978,3 +978,67 @@ ALTER TABLE import_tickets SET (
 
 **回滚**：迁移只向前（同 §5）。`0017` 的 `downgrade()` 按代码顺序会先把 `ck_attempts_source` 收紧回 `('execution','reconcile')`，而 Postgres 重建 CHECK 时会校验既有行——**这是读代码得出的推理、本次没有实跑**（见未决项 4：这条回退路径在仓库里零覆盖）：库里只要已有 `import` 行，这一步就会失败；就算它能成功，紧接着的 `drop_column` 也会丢掉导入的实测过程原文。**所以回滚只回镜像、别 downgrade 数据库**：DB 停在 `0017` 对 v0.1.17 的代码是安全的（旧代码不写 `import`，放宽后的 CHECK 仍接受 `execution`/`reconcile`，多出来的列被忽略——同 §5 里 `0011` 那种"只新增列"的情形）。
 
+## 28. v0.1.19：确认写入即自动排入同步、本地结果的不可见状态被消除、一个角色互换守卫（tag `v0.1.19` · 2026-09-19）
+
+范围：`git log --oneline v0.1.18..HEAD` 共 **4 条**（其中 `f4a13c3` 是 v0.1.18 自己的收尾文档）；`git diff --shortstat v0.1.18..HEAD` = **11 个文件 / +394 −19**，只看代码是 **9 个文件 / +280 −14**。**本次没有迁移**：`alembic_version` 停在 `0017_attempt_evidence`（v0.1.18 已上），`migrate` 应当是一次空跑。
+
+前两条来自用户报的两个现象，第三条来自一次真实的线上事故（见本节末）。
+
+### 这次改了什么
+
+**1. 确认写入目标 = 本地结果入队的那一刻（`085d849`）。** 在此之前，`enqueue_group_attempts` 的**唯一**调用点是第 ④ 步那个按钮（`outbox.py:579`）；而手工录入结果本来就会自动入队（`execution.py:202/257`），所以"导入的结果全躺在本地"这件事在设计上就没有自动出口。现在 `confirm_target` 在写 `confirmed_at` 之后排入该组全部已提交本地行，响应多一个 `queued_local_attempts`，页面提示「已自动排入 N 条本地结果」并重读队列。
+
+**为什么挂在"确认写入"而不是"确认导入"**：确认导入时目标表通常还没确认，`enqueue_attempt_job` 会静默返回 `None`（`outbox.py:123-141`）——接在那里等于假接线。挂在确认写入是可证明安全的：`confirm_target` 在 `schema_errors`/`read_errors` 非空时 409、`target_fingerprint` 在行锁内复核，排队的时刻表头刚验过，造不出 park 行。跨模块 import 必须放在函数内（`outbox` 顶层 import 了 `target_for`，模块级会成环）。
+
+**2. 「本地有结果但没进 Lark」不再是一个说不出口的状态（`4a28ce4`）。** 三处一起改，缺一处症状照旧：
+
+| 位置 | 改前 | 改后 |
+|---|---|---|
+| `StepSync.tsx:19` | `!confirmed && parked === 0` → 整块 `return null` | 本地还有结果时也渲染，并说明"先在第 ③ 步确认写入" |
+| `LarkCheck.tsx:139` `enterable.sync` | `confirmed \|\| syncTrouble` | 加 `\|\| pending_attempts > 0`——不加这行，面板渲染出来也点不开 |
+| `LarkCheck.tsx` `summaries.sync` | 未确认时报「待同步 0 · 已同步 0」 | 报「N 条本地结果在等待确认写入目标」；**队列未读回来时报「同步状态尚未读取」**，不报 0 |
+
+未确认时**不给排队按钮**（`/sync/enqueue` 对未确认目标直接 409，给一个点了必失败的按钮更糟）；已确认但本地没有带结论的结果时写明"没有可排入的本地结果"，不留一个没有解释的灰按钮。
+
+**3. 角色互换守卫（`653ed9e`）。** `provision/fields` 与 `provision/retype` 在写之前先判断"这张表是不是另一个角色的表"：**已有「问题描述」+「进展状态」、却没有「用例」+「结果」→ 拒绝**（文案点名"这张表看起来是缺陷记录表"并要求回第 1 步核对选表）。空表、只缺几列的表、已配好的表全部放行。
+
+### 本地验证（`653ed9e`，即打 tag 的那一点）
+
+| 套件 | 结果 | 在 CI 里吗 |
+|---|---|---|
+| backend `pytest -q` | **547 passed**，34s | **在** |
+| 前端 `vitest run` | **31 files / 348 passed** | **在** |
+| `npm run build` | 通过；产物 **`index-C7j5CmUn.js` / `index-D_Bm_Re5.css`**（CSS 与 v0.1.18 相同，JS 变了） | **在** |
+| e2e `npx playwright test` | **37 passed / 11.0s** | **不在**（发版前手跑） |
+
+- 新守卫那条测试是**先红后绿**：`git stash` 掉 `provision.py` 后 `FAILED test_setting_headers_refuses_the_table_of_the_other_role`，恢复后通过（不是"写完就绿"的锁定现状型断言）。
+- 上一版登记的期望值是 544 / 344：本次 +3 条后端（守卫 2 条 + 确认入队 1 条）、+4 条前端。
+
+### ⚠️ 上线后必须人工做的一件事（Lark API 没有删列接口）
+
+线上 base `QuVTbGb5Iap5Kzsnx0yj8HgppFd` 的 **漏洞跟踪记录**（`tblICPKNOKQbxvHb`）现在有 **15 列**，多出来的 7 列是：**用例 / 结果 / 负责人 / 控制台 / 报告人 / 日期 / 实测过程**（`优先级`、`截图` 与缺陷模板同名，所以是 8+9−2）。这是 v0.1.19 之前那次错位生成留下的：
+
+1. 删除安全：本工具写缺陷行只碰 `问题描述/优先级/进展状态/反馈时间/反馈人/跟进人/备注/截图`（`lark/write.py:136-165`），这 7 列既没被读过也没被写过。
+2. 删完**必须**回「Lark 检查」第 ① 步重新读取并**重新确认写入**——库里存的 `schema_fingerprint` 还记着"缺陷表有这 15 列"，不刷新它和第 ③ 步的校验会继续互相打架。
+
+### 事故记录：执行表的 7 个表头被建进了缺陷表（守卫的由来）
+
+实测证据（只读）：
+
+- 直接读 Lark：`漏洞跟踪记录` 15 列 = 缺陷模板 8 列 + 执行表独有的 7 列；`执行记录` 9 列且干净。
+- 读线上 target：两个 09-19 的组 `execution_table_id`/`bug_table_id` **现在都是对的**，但两边 `schema_fingerprint` 的 bug 半边都已经是那 15 列 → **确认写入时缺陷表就已经被污染**。
+- 两个组的 `source_url`（= 第 ① 步「执行记录表」那个框里粘的链接）都是 `…?table=tblICPKNOKQbxvHb…`，**即缺陷表的链接**；而 `execution_view_id` 是 `None`（`setTable` 会清 view，说明人确实动过那个下拉）。
+
+机制（每一跳都在代码里）：`resolve_link` 取链接里指定的表（`target.py:119`）→「执行记录表」槽位 = 缺陷表；缺陷库链接为空时 `suggestBugTable` 又把「缺陷记录表」槽位填成"另一张"= 真正的执行表（`useLarkDraft.ts:306-317`）→ **两个槽位整体互换，页面上没有一句话说这件事**；首次保存因为 `target === null` 时 `identityChanged()` 直接返回 false（`LarkCheck.tsx:185-188`），连确认弹窗都没有；`provision_fields` 只按 role 取表（`provision.py:393`），于是把执行表 schema 写进了缺陷表。
+
+判定：**操作触发，工具没拦，而且工具会自动制造这个错位。** 守卫是补在这一步上的；`resolve_link` 静默取 `tables[0]`、生成表头弹窗不写真实表名（`ProvisionDialog.tsx:254`）这两条仍未改。
+
+### 已知未做（列出来是为了不自嗨）
+
+1. **`Execution.tsx` 徽标"本地待排入 N 条"没做，而且原方案写错了**：`read_sync` 的 `pending_attempts`（`outbox.py:523`）数的是**全部已提交本地行，完全不看有没有 job**——41 条同步完之后它仍然是 41。照原方案改会把一个假 0 换成假 41。要做先得让服务端给出真正的"没有 job 的本地行数"，而这个字段同时被 `stepsComplete` 的 `queueClean` 和排队按钮的 `disabled` 消费，动它会连带改两处行为。
+2. `read_sync` 的 `detail`（`outbox.py:549/551`）**仍然没有任何消费方**——要么删要么用。
+3. 角色互换守卫是**列名启发式**（"有缺陷模板的列、没有执行表的列"），不是身份校验：一张真的同时具备两侧列的表不会被拦。
+4. `docs/superpowers/plans/2026-09-19-import-auto-enqueue.md` 是本次的改进方案，其中 P0-B/P1 未实施，标注已同步更正。
+
+**回滚**：本次无迁移，回滚只换镜像（同 §5）。守卫本身是纯新增拒绝分支，回滚不涉及数据。
+
