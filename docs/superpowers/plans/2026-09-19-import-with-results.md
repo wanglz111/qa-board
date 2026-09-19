@@ -427,7 +427,7 @@ in the exported report, exactly like a reconcile-adopted row already is."
 
 **Interfaces:**
 - Consumes: `ParsedCase.result/evidence`（Task 1）、`LOCAL_SOURCES`（Task 2）、`app.execution.allocate_attempt(db, group_case, *, label=None) -> Attempt`
-- Produces: `POST /api/import/confirm` 请求体多一个 `import_results: bool = True`，响应多一个 `attempt_count: int`；模块级 `_materialize_attempts(db, group_cases, parsed_cases, source_sha256) -> int`（`source_sha256` 用于生成幂等键）
+- Produces: `POST /api/import/confirm` 请求体多一个 `import_results: bool = True`，响应多一个 `attempt_count: int`；模块级 `_materialize_attempts(db, group_cases, parsed_cases, group_id) -> int`（`group_id` 用于生成**按组作用域**的幂等键；Task 3 实施期裁决修正，原写的是文件哈希）
 
 - [ ] **Step 1: 写失败测试** — 在 `backend/tests/test_groups_api.py` 追加：
 
@@ -571,7 +571,7 @@ IMPORT_RESULTS = ("通过", "不通过", "未执行")
 
 
 def _materialize_attempts(
-    db: Session, group_cases: list[GroupCase], parsed_cases: list[ParsedCase], source_sha256: str
+    db: Session, group_cases: list[GroupCase], parsed_cases: list[ParsedCase], group_id: UUID
 ) -> int:
     """Turn every row that carries a conclusion into a committed attempt.
 
@@ -600,9 +600,11 @@ def _materialize_attempts(
         attempt.console_text = None
         attempt.evidence = evidence
         attempt.source = "import"
-        # Derived from the file itself, so replaying the same upload can never
-        # mint a second batch of attempts.
-        attempt.idempotency_key = f"import:{source_sha256}:{case.code}"
+        # Scoped to this group, so a repeat import becomes a new group instead
+        # of a collision: the preview warns about a repeat and lets the operator
+        # decide, and a file-hash key turned that second confirm into an
+        # unhandled unique violation.
+        attempt.idempotency_key = f"import:{group_id}:{case.code}"
         created += 1
     return created
 ```
@@ -630,7 +632,7 @@ def _materialize_attempts(
     if payload.import_results and parsed_cases:
         try:
             attempt_count = _materialize_attempts(
-                db, group_cases, parsed_cases, ticket.file_sha256
+                db, group_cases, parsed_cases, group_id
             )
         except ImportErrorDetail as error:
             # Nothing is half-written: the ticket stays usable and the operator

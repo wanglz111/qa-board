@@ -114,7 +114,7 @@
 - `attempts.evidence`：`Text NULL`。迁移 `0017_attempt_evidence`，`down_revision = "0016_lark_people"`（写法与命名照 `0016_lark_people.py`）。
 - `Attempt.source` 放开枚举：`ck_attempts_source` 改为 `IN ('execution','reconcile','import')`；新增**单处定义**的常量 `LOCAL_SOURCES = ("execution", "import")`，五个过滤点改用它：`lark/outbox.py:130`（单条入队）、`:187`（批量入队）、`:529`（待同步计数）、`lark/reconcile.py:243`（本地行选择）、`:426`（删除前锁定）。
   - **为什么不用 `execution` 冒充**：本仓库已有 `reconcile` 这个先例（`components/History.tsx:34` 给它打标），导入行必须在执行历史与导出报表里可辨认 —— 「哪 41 行是转译进来的」正是用户要的审计线。单条入队路径仍只从提交流到达（attempt 刚创建），所以放进白名单不会造成重复入队。
-- `idempotency_key = f"import:{group_source_sha256}:{code}"`：唯一约束天然防重复物化，重放同一文件不会长出第二批行。
+- `idempotency_key = f"import:{group_id}:{code}"`（**Task 3 实施期裁决修正**；本文档原先写的是文件哈希）：唯一约束**按组作用域**既防"一次确认里重复插入"，又让同一份文件再次导入合法地建新组 —— 既有契约就是"重复文件只 warning、由人决定"（`test_duplicate_file_warns_but_creates_a_distinct_group`）。文件哈希作键会让第二次确认撞 `attempts_idempotency_key_key` 并抛出未捕获的 500，这在本任务实施时被复现过。
 
 ### 4.4 Lark 执行表
 
