@@ -1529,47 +1529,234 @@ unticking the box keeps the upload cases-only."
 
 ---
 
-## Task 9: 端到端验收与发版记录
+## Task 9: 验收测试落地（两条集成 + 黄金样例回归 + e2e 几何 + 文档一句）
+
+**为什么是这些**：Task 4/5/6/7/8 的评审各留下一条"缺口真实但当时不在授权范围内"的结论，控制者把它们集中到本任务一次落地。
+**注意**：原计划的"起服务 + 打真 Lark"人工步骤**已改为交付说明里的交接步骤**——往真人 Lark 表里写行是本工作区之外的外部副作用，不由本会话执行。
 
 **Files:**
-- Modify: `docs/HANDOFF-RELEASE.md`（新增最后一节，照 §16/§25 的体例）
-- 不改代码
+- Modify: `backend/tests/conftest.py`（抽出 `confirm_group_target` 工厂，`confirmed_group` 改为复用它）
+- Modify: `backend/tests/test_lark_outbox.py`（两条集成测试）
+- Modify: `backend/tests/test_ai_prompts.py`（黄金样例回归 + 函数重命名）
+- Modify: `docs/IMPORT-FORMAT.md`（§2 一句别名规则）
+- Modify: `frontend/e2e/import.spec.ts`（preview mock 补两个计数 + 一条几何断言）
 
 **Interfaces:**
-- Consumes: Task 1-8 的全部产物
-- Produces: 一次可复现的验收证据 + 别人能照着跑的交付记录
+- Consumes: `parse_file` / `confirm_import`（`import_results`）/ `enqueue_group_attempts` / `enqueue_attempt_job` / `process_one_job(fake_lark, attempt)` / `fake_lark.created_records` / `Attempt.evidence` / `execution_fields`
+- Produces: 提交进仓库的四条验收证据（文件→Lark、手跑→Lark、黄金样例、勾选框几何）+ 一句用户手册规则
 
-- [ ] **Step 1: 全量后端套件**
+- [ ] **Step 1: 先抽 conftest 的目标工厂（避免在测试里复制一段夹具）**
 
-Run: `cd backend && TEST_DATABASE_URL='postgresql+psycopg://testdeck:testdeck@127.0.0.1:5433/testdeck_test' .venv/bin/python -m pytest -q`
-Expected: 全绿
+`backend/tests/conftest.py` 现在 `confirmed_group` 里内联构造 `LarkTarget`。抽成工厂，`confirmed_group` 复用它——既有测试就是这次重构的安全网：
 
-- [ ] **Step 2: 全量前端套件与类型检查**
+```python
+@pytest.fixture
+def confirm_group_target(db_session):
+    """Approve a Lark target for any group, the way the Lark page does."""
 
-Run: `cd frontend && npx vitest run && npx tsc -b && npm run build`
-Expected: 全绿、`tsc -b` 无输出、构建成功
+    def factory(group_id: UUID) -> Group:
+        draft = TargetDraft("app-exec", "tbl-runs", None, "app-bug", "tbl-defects")
+        db_session.add(
+            LarkTarget(
+                group_id=group_id,
+                source_url="https://tenant.larksuite.com/wiki/node-1",
+                execution_base_token="app-exec",
+                execution_base_name="执行库",
+                execution_table_id="tbl-runs",
+                execution_table_name="执行记录",
+                bug_base_token="app-bug",
+                bug_base_name="缺陷库",
+                bug_table_id="tbl-defects",
+                bug_table_name="缺陷记录",
+                schema_fingerprint=FIXTURE_SCHEMA_FINGERPRINT,
+                target_fingerprint=draft.fingerprint,
+                confirmed_at=datetime.now(timezone.utc),
+            )
+        )
+        db_session.commit()
+        return db_session.get(Group, group_id)
 
-- [ ] **Step 3: 人工端到端（用 Task 7 的黄金样例）**
+    return factory
 
-1. 起服务，导入 `AI-CASE-RESULT-PROMPT.md` 第三部分的 3 行 CSV；
-2. 预览应显示「3 条，检出 2 条执行结果」；确认导入；
-3. 执行页：B-001 通过、B-003 不通过、B-002 未测（进度 1/1/0/1）；
-4. Lark 检查页：确认目标 → 「同步」→ 目标表出现 **2 行**（不是 3 行），`实测过程` 列有原文、`结果` 列分别是通过/不通过、`截图` 为空；
-5. 缺陷表出现 1 行（B-003 的 不通过）。
-   记录每一步的实际输出（数量、截图路径）作为验收证据。
 
-- [ ] **Step 4: 真机复验顺序（写进交付记录，供 0918 那批使用）**
+@pytest.fixture
+def confirmed_group(db_session, imported_group, confirm_group_target) -> Group:
+    return confirm_group_target(imported_group.id)
 
-1. 先在 Lark 检查页补齐「实测过程」列并重新确认目标；
-2. 再导入 50 条（41 条带结果、9 条 `执行结果` 留空）；
-3. 再点「同步」→ 执行表应出现 **41 行**，9 条待复验的不出现；
-4. 之后每复验一条，在 qa-board 提交结果并传图 → 该行的截图会自动写进 Lark 附件列。
 
-- [ ] **Step 5: 记录发版** — 按 `docs/HANDOFF-RELEASE.md` 的 §4.1/§4.4 流程走一遍（验证 → 打 tag → 服务器 → 验收），并在文末新增一节「这次交付做了什么（v0.1.18）」，写清：新增 12 列导入契约、第三份提示词、`实测过程` 列的补齐顺序要求。
+@pytest.fixture
+def outcomes_book() -> str:
+    """A three-row text file: two conclusions and one blank row.
 
-- [ ] **Step 6: 提交**
+    New tests take it from here instead of pasting their own copy; the older
+    ``test_groups_api.py`` constant predates it and stays as it is.
+    """
+
+    return (
+        "用例编号,执行顺序,用例标题,所属模块,优先级,执行分层,前置条件,测试数据,执行步骤,预期结果,执行结果,实测过程\n"
+        'B-001,1,管理员登录,账户,P0,Smoke,,,"1. 打开登录页","1. 页面: 进入工作台",通过,"1. 实测 1.2s"\n'
+        "B-002,2,未绑定拦截,账户,P0,Smoke,,,"
+        '"1. 直访业务页","1. 页面: 被拦截",,\n'
+        'B-003,3,邀请码校验,账户,P1,Smoke,,,"1. 输入邀请码",'
+        '"1. 页面: 回显推荐人",不通过,"1. 实测回显 8+8，设计稿 6+6"\n'
+    )
+```
+
+Run: `cd backend && TEST_DATABASE_URL='…testdeck_test' .venv/bin/python -m pytest -q`
+Expected: 与改动前同数全绿（这一步不许有任何测试语义变化）
+
+- [ ] **Step 2: 写失败测试——文件 → Lark（含"留空行不出现"）**
+
+`backend/tests/test_lark_outbox.py` 追加（`fake_lark` 用该文件既有夹具，3 行 CSV 用 Step 1 新加的 `outcomes_book`）：
+
+```python
+def test_a_results_file_reaches_lark_and_a_blank_row_does_not(
+    authenticated_client, fake_lark, confirm_group_target, outcomes_book, db_session
+):
+    """The whole chain, once: file → attempts → queue → the run table.
+
+    The blank row is the point of the feature — it must produce no run row at
+    all, not a row whose 结果 cell happens to be empty.
+    """
+
+    preview = authenticated_client.post(
+        "/api/import/preview",
+        files={"file": ("outcomes.csv", outcomes_book.encode("utf-8"), "text/csv")},
+    ).json()
+    confirm = authenticated_client.post(
+        "/api/import/confirm",
+        json={"ticket_id": preview["ticket_id"], "name": "验收"},
+    ).json()
+    assert confirm["attempt_count"] == 2
+
+    group_id = confirm["id"]
+    confirm_group_target(group_id)
+    assert enqueue_group_attempts(db_session, group_id) == 2
+
+    attempts = db_session.scalars(
+        select(Attempt).where(Attempt.group_case_id.in_(
+            select(GroupCase.id).where(GroupCase.group_id == group_id)
+        ))
+    ).all()
+    for attempt in attempts:
+        assert process_one_job(fake_lark, attempt) == "synced"
+
+    written = [record["fields"] for record in fake_lark.created_records]
+    assert len(written) == 2
+    assert sorted(field["用例"] for field in written) == ["B-001 管理员登录", "B-003 邀请码校验"]
+    assert {field["实测过程"] for field in written} == {"1. 实测 1.2s", "1. 实测回显 8+8，设计稿 6+6"}
+    assert all("B-002" not in field["用例"] for field in written)
+```
+
+- [ ] **Step 3: 跑它确认失败**
+
+Run: 目标文件 -k blank_row
+Expected: FAIL — `KeyError: 'confirm_group_target'`（工厂还没被 import）或计数不符
+
+- [ ] **Step 4: 写失败测试——手跑提交 → Lark（Task 6 评审点名的缺口）**
+
+同文件追加：
+
+```python
+def test_a_hand_run_reaches_lark_with_the_evidence_it_collected(
+    authenticated_client, fake_lark, confirmed_group, db_session
+):
+    """The other write path: a person ran it and typed what they saw."""
+
+    created = authenticated_client.post(
+        f"/api/groups/{confirmed_group.id}/cases/B-001/attempts",
+        json={
+            "result": "不通过",
+            "note": "绑定框未拦截",
+            "evidence": "1. 直访业务页未被拦截",
+            "idempotency_key": "hand-run-evidence-1",
+        },
+    )
+    assert created.status_code == 201, created.text
+
+    attempt = db_session.scalar(
+        select(Attempt).where(Attempt.idempotency_key == "hand-run-evidence-1")
+    )
+    assert process_one_job(fake_lark, attempt) == "synced"
+
+    fields = fake_lark.created_records[0]["fields"]
+    assert fields["实测过程"] == "1. 直访业务页未被拦截"
+    assert fields["结果"] == "不通过"
+```
+
+- [ ] **Step 5: 黄金样例回归 + 函数重命名**
+
+`backend/tests/test_ai_prompts.py`：把 `test_prompts_endpoint_serves_both_documents` 重命名为 `..._serves_every_document`，并新增一条——**shipped 提示词里的黄金样例必须永远能过真实解析器**（这是提示词对用户的承诺，此前没有任何测试看住它）：
+
+```python
+def test_the_shipped_prompt_golden_sample_still_parses():
+    from app.importers.schema import parse_file
+
+    for prompt in PROMPTS:
+        if prompt["id"] != "case-results":
+            continue
+        block = re.findall(r"```csv\n(.*?)```", prompt["path"].read_text(encoding="utf-8"), re.DOTALL)
+        assert block, "the prompt must ship a csv fence"
+        cases = parse_file("golden.csv", block[-1].encode("utf-8"))
+        assert [case.code for case in cases] == ["LOGIN-001", "LOGIN-002", "LOGIN-003"]
+        assert [case.result for case in cases] == ["通过", None, "不通过"]
+```
+
+- [ ] **Step 6: `docs/IMPORT-FORMAT.md` §2 补一句（同名字段不可同时给）**
+
+在字段字典表下方加：
+
+```markdown
+同一个字段的多个别名**不要同时出现**（例如 `执行结果` 与 `本轮实测结果` 同时存在）：导入端会判为字段歧义并拒绝整份文件。只保留一列即可。
+```
+
+- [ ] **Step 7: `frontend/e2e/import.spec.ts` 补几何断言**
+
+两处：①该文件顶部的 preview mock 要在 `count` 旁加上 `result_count: 2, evidence_only_count: 1`（否则摘要与勾选框在 e2e 里根本不渲染，新 UI 等于零覆盖）；②在既有的 per-viewport 溢出断言旁加一条：
+
+```ts
+const checkbox = page.getByLabel("一并写入执行结果");
+const box = await checkbox.boundingBox();
+expect(box!.height).toBeLessThanOrEqual(24); // 全局 input 规则会把它撑成 42px 满宽方块
+expect(await page.getByText(/检出 2 条执行结果/).isVisible()).toBe(true);
+```
+
+Run: `cd frontend && npm run e2e -- import.spec.ts`
+Expected: PASS（**注意：CI 不跑 e2e**，这是发版前手跑的门，交付说明里要写明）
+
+- [ ] **Step 8: 跑全部套件并提交**
+
+```bash
+cd backend && TEST_DATABASE_URL='…testdeck_test' .venv/bin/python -m pytest -q    # 基线 540 + 新增
+cd frontend && npx vitest run && npx tsc -b                                        # 基线 343，tsc 零输出
+git add backend/tests/conftest.py backend/tests/test_lark_outbox.py \
+  backend/tests/test_ai_prompts.py docs/IMPORT-FORMAT.md frontend/e2e/import.spec.ts
+git commit -m "test: pin the two paths into Lark, the shipped sample and the checkbox
+Adds the acceptance evidence the per-task reviews left owed: a file with
+results reaching the run table (and a blank row reaching nothing), a hand-run
+row carrying the evidence it collected, the shipped prompt's golden sample
+parsed by the real importer, and the checkbox geometry that jsdom cannot see."
+```
+
+---
+
+## Task 10: 交付与发版记录（只改文档）
+
+**Files:**
+- Modify: `docs/HANDOFF-RELEASE.md`（文末新增一节，照 §16/§25 的体例）
+
+- [ ] **Step 1: 写这一节，必须包含六件事**
+
+1. **新增能力**：12 列导入契约（`执行结果` / `实测过程`）、导入页的「检出 N 条执行结果」与勾选框、结果表单的「实测过程」、执行历史的「来自导入结果」、Lark 执行表新增必填列「实测过程」、第三份提示词 `AI-CASE-RESULT-PROMPT.md`。
+2. **上线顺序（硬要求）**：先在 Lark 检查页补齐「实测过程」列 → 重新确认目标 → 再导入 → 再同步。顺序颠倒会让已入队的行因目标指纹变化全部 park（spec §6）。
+3. **老 target 的影响**：`实测过程` 进 REQUIRED 后，任何未补齐该列的已确认目标都会报"缺列"并拒绝建行，直到 provision 完成。这是有意破窗。
+4. **真实的 0918 使用步骤**：导入 50 条（41 条带结果、9 条留空）→ 同步 → 执行表出现 41 行；之后每复验一条，在 qa-board 提交结果并传图，截图随行写进 Lark 附件列。
+5. **测试保护的真实边界**：backend 套件与前端 vitest 都有覆盖；**e2e 不在 CI 里**（`npm run e2e` 手跑）；几何断言属于 e2e。别把"有测试"说成"自动门"。
+6. **已知未决（本分支不修）**：`ai-cases.md:117` 那句「分层丢失」与它自己 `:41` 矛盾（既有缺陷）；双别名报错是英文；`reconcile.py:427` 删除路径零覆盖；`downgrade()` 全局零覆盖；`match_bugs` 读回问题会因本功能批量产生缺陷行而更容易被撞上（另一个计划的范围）。
+
+- [ ] **Step 2: 提交**
 
 ```bash
 git add docs/HANDOFF-RELEASE.md
-git commit -m "docs(release): record the case+result import and the new prompt"
+git commit -m "docs(release): record the case+result import, its prompt and the column order"
 ```
