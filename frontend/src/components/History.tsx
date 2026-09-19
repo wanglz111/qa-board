@@ -34,11 +34,17 @@ export function History({ attempts, screenshotUrl }: Props) {
                 {attempt.source === "reconcile" ? (
                   <span className="attempt-source">来自表内对账</span>
                 ) : null}
+                {attempt.source === "import" ? (
+                  <span className="attempt-source">来自导入结果</span>
+                ) : null}
                 <time dateTime={attempt.created_at}>
                   {new Date(attempt.created_at).toLocaleString()}
                 </time>
               </div>
               {attempt.note ? <p className="case-text">说明：{attempt.note}</p> : null}
+              {attempt.evidence ? (
+                <p className="case-text">实测过程：{attempt.evidence}</p>
+              ) : null}
               {attempt.console_text ? (
                 <pre className="console-text">{attempt.console_text}</pre>
               ) : null}

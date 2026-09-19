@@ -12,6 +12,7 @@ function attempt(id: string, label: string, source: Attempt["source"]): Attempt 
     result: "通过",
     note: null,
     console_text: null,
+    evidence: null,
     source,
     created_at: "2026-09-16T09:00:00Z",
     screenshots: []
@@ -56,6 +57,20 @@ it("shows the screenshots a run was submitted with", () => {
     "href",
     "/api/screenshots/shot-1"
   );
+});
+
+it("marks an imported row and shows its evidence", () => {
+  render(
+    <History
+      attempts={[
+        { ...attempt("attempt-3", "B-002", "import"), evidence: "1. 实测遮罩 rgba(0,0,0,.65)" }
+      ]}
+    />
+  );
+
+  const row = screen.getByRole("listitem");
+  expect(within(row).getByText("来自导入结果")).toHaveClass("attempt-source");
+  expect(within(row).getByText(/实测遮罩/)).toBeInTheDocument();
 });
 
 it("leaves the picture out when the page has no screenshot route", () => {

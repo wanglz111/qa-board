@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { vi } from "vitest";
 
@@ -67,4 +67,42 @@ it("shows casebook totals for a casebook zip", async () => {
   expect(screen.getByText(/引用 182 处/)).toBeVisible();
   expect(screen.getByText(/原型版本 v2\.0/)).toBeVisible();
   expect(screen.getByText("原型图 2 张")).toBeVisible();
+});
+
+it("shows the detected results and lets the operator skip them", async () => {
+  const previewSpy = vi.fn().mockResolvedValue({
+    ticket_id: "ticket",
+    detected_format: "csv",
+    count: 2,
+    cases: [
+      { code: "B-001", title: "登录", module: "账户", result: "通过", evidence: "1. 实测 1.2s" },
+      { code: "B-002", title: "拦截", module: "账户", result: null, evidence: "留档：本轮未复验" }
+    ],
+    fields: ["用例编号", "执行结果", "实测过程"],
+    errors: [],
+    warnings: [],
+    result_count: 1,
+    evidence_only_count: 1
+  });
+  const confirmSpy = vi.fn().mockResolvedValue({ id: "g1", count: 2, attempt_count: 1 });
+  render(<ImportView preview={previewSpy} confirm={confirmSpy} onImported={vi.fn()} />);
+
+  await userEvent.upload(
+    screen.getByLabelText("选择用例文件"),
+    new File(["用例编号,执行结果\nB-001,通过"], "outcomes.csv", { type: "text/csv" })
+  );
+
+  expect(await screen.findByText(/检出 1 条执行结果/)).toBeTruthy();
+  expect(screen.getByText(/其中 1 条仅有过程、将只留档/)).toBeTruthy();
+
+  // The group name arrives pre-filled with the file stem, so the operator's
+  // own name replaces it instead of being appended to it.
+  await userEvent.clear(screen.getByLabelText("组名"));
+  await userEvent.type(screen.getByLabelText("组名"), "结果导入");
+  await userEvent.click(screen.getByLabelText("一并写入执行结果"));
+  await userEvent.click(screen.getByRole("button", { name: "确认导入" }));
+
+  await waitFor(() =>
+    expect(confirmSpy).toHaveBeenCalledWith("ticket", "结果导入", {}, false)
+  );
 });

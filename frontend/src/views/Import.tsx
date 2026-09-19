@@ -6,7 +6,12 @@ import { AiPromptPanel } from "../components/AiPromptPanel";
 
 type Props = {
   preview: (file: File) => Promise<ImportPreview>;
-  confirm: (ticketId: string, name: string, mapping: Record<string, string>) => Promise<unknown>;
+  confirm: (
+    ticketId: string,
+    name: string,
+    mapping: Record<string, string>,
+    importResults?: boolean
+  ) => Promise<unknown>;
   onImported: () => void;
   loadPrompts?: () => Promise<AiPrompt[]>;
 };
@@ -18,6 +23,9 @@ type UploadItem = {
   state: "previewing" | "ready" | "importing" | "imported" | "error";
   preview?: ImportPreview;
   mapping: Record<string, string>;
+  // Whether confirming this file also writes the rows that carry a conclusion.
+  // Defaults to on for a file that has any, and the operator can turn it off.
+  writeResults: boolean;
   error?: string;
 };
 
@@ -55,7 +63,8 @@ export function ImportView({ preview, confirm, onImported, loadPrompts }: Props)
       file,
       name: file.name.replace(/\.(md|markdown|csv|json|zip)$/i, ""),
       state: "previewing",
-      mapping: {}
+      mapping: {},
+      writeResults: false
     }));
     setItems((current) => [...current, ...additions]);
     await Promise.all(additions.map(loadPreview));
@@ -65,7 +74,11 @@ export function ImportView({ preview, confirm, onImported, loadPrompts }: Props)
   async function loadPreview(item: UploadItem) {
     try {
       const result = await preview(item.file);
-      patch(item.key, { preview: result, state: "ready" });
+      patch(item.key, {
+        preview: result,
+        state: "ready",
+        writeResults: (result.result_count ?? 0) > 0
+      });
     } catch (reason) {
       patch(item.key, { state: "error", error: errorMessage(reason) });
     }
@@ -75,7 +88,7 @@ export function ImportView({ preview, confirm, onImported, loadPrompts }: Props)
     if (!item.preview) return;
     patch(item.key, { state: "importing", error: undefined });
     try {
-      await confirm(item.preview.ticket_id, item.name, item.mapping);
+      await confirm(item.preview.ticket_id, item.name, item.mapping, item.writeResults);
       patch(item.key, { state: "imported" });
       onImported();
     } catch (reason) {
@@ -137,7 +150,37 @@ export function ImportView({ preview, confirm, onImported, loadPrompts }: Props)
                           : ""}
                       </span>
                     ) : null}
+                    {(item.preview.result_count ?? 0) > 0 ? (
+                      <span className="preview-results">
+                        {` · 检出 ${item.preview.result_count} 条执行结果`}
+                        {item.preview.evidence_only_count
+                          ? `（其中 ${item.preview.evidence_only_count} 条仅有过程、将只留档）`
+                          : ""}
+                      </span>
+                    ) : null}
                   </div>
+                  {(item.preview.result_count ?? 0) > 0 ? (
+                    // The page-wide `label { display: grid }` and `input { width:
+                    // 100%; min-height: 42px }` rules would stretch a checkbox
+                    // into a full-width blue block with its text underneath, so
+                    // this row carries the two overrides every other checkbox in
+                    // the app gets from a CSS class. Move them to a
+                    // `.preview-import-results` rule in styles.css when that file
+                    // is next open.
+                    <label
+                      className="preview-import-results"
+                      style={{ display: "flex", alignItems: "center", gap: 9 }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={item.writeResults}
+                        disabled={item.state === "imported"}
+                        style={{ width: "auto", minHeight: "auto" }}
+                        onChange={(e) => patch(item.key, { writeResults: e.target.checked })}
+                      />
+                      一并写入执行结果
+                    </label>
+                  ) : null}
                   {item.preview.warnings.map((warning) => <p className="inline-status warning" key={warning}><AlertCircle size={16} />{warning}</p>)}
                   <label>组名<input value={item.name} disabled={item.state === "imported"} onChange={(e) => patch(item.key, { name: e.target.value })} /></label>
                   <details>

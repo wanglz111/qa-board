@@ -74,9 +74,25 @@ describe("OutcomeForm", () => {
     expect(onSave).toHaveBeenCalledWith({
       result: "不通过",
       note: "绑定未触发",
-      consoleText: null
+      consoleText: null,
+      evidence: null
     });
     expect(ref.current).not.toBeNull();
+  });
+
+  it("saves the 实测过程 text alongside the console output", async () => {
+    const { onSave } = renderForm();
+
+    await userEvent.type(screen.getByLabelText("实测过程"), "1. 实测遮罩 rgba(0,0,0,.65)");
+    await userEvent.click(screen.getByRole("button", { name: "通过" }));
+    await userEvent.click(screen.getByRole("button", { name: "保存结果" }));
+
+    expect(onSave).toHaveBeenCalledWith({
+      result: "通过",
+      note: null,
+      consoleText: null,
+      evidence: "1. 实测遮罩 rgba(0,0,0,.65)"
+    });
   });
 
   it("collects a pasted screenshot into the pending image list", () => {
@@ -153,19 +169,21 @@ describe("OutcomeForm", () => {
     expect(onImagesChange).not.toHaveBeenCalled();
   });
 
-  it("resets the result, the note, the console and the validation, leaving the form pristine", async () => {
+  it("resets the result, the note, the console, the evidence and the validation, leaving the form pristine", async () => {
     const user = userEvent.setup();
     const { ref } = renderForm();
 
     await user.click(screen.getByRole("button", { name: "不通过" }));
     await user.type(screen.getByLabelText("失败说明"), "绑定未触发");
     await user.type(screen.getByLabelText("控制台输出"), "wallet.bind timeout");
+    await user.type(screen.getByLabelText("实测过程"), "1. 实测遮罩 rgba(0,0,0,.65)");
 
     act(() => ref.current?.reset());
 
     expect(screen.getByRole("button", { name: "不通过" })).toHaveAttribute("aria-pressed", "false");
     expect(screen.getByLabelText("失败说明")).toHaveValue("");
     expect(screen.getByLabelText("控制台输出")).toHaveValue("");
+    expect(screen.getByLabelText("实测过程")).toHaveValue("");
 
     // Behavioural proof of "pristine": with no result selected, submitting again
     // must re-raise the validation instead of saving something the user cleared.

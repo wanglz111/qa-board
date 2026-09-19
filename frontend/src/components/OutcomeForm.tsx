@@ -8,6 +8,10 @@ export type SaveInput = {
   result: AttemptResult;
   note: string | null;
   consoleText: string | null;
+  // 实测过程: the observation itself, which Lark keeps in a column of its own.
+  // Optional only because a quick save has nothing to observe — never because
+  // it may be smuggled into consoleText.
+  evidence?: string | null;
 };
 
 export type SaveStatus = {
@@ -18,7 +22,8 @@ export type SaveStatus = {
 export type OutcomeFormHandle = {
   setResult: (result: AttemptResult) => void;
   focusNote: () => void;
-  // Clears the four fields this form owns (result / note / console / validation).
+  // Clears the five fields this form owns (result / note / console / evidence /
+  // validation).
   // Attachments and the save status belong to the caller: they survive a reset on
   // purpose, so a failed screenshot upload can still be retried. Only a submit
   // whose *request* rejected must skip the reset — a save that landed with a
@@ -102,6 +107,7 @@ export const OutcomeForm = forwardRef<OutcomeFormHandle, Props>(function Outcome
   const [result, setResult] = useState<AttemptResult | null>(null);
   const [note, setNote] = useState("");
   const [consoleText, setConsoleText] = useState("");
+  const [evidence, setEvidence] = useState("");
   const [validation, setValidation] = useState("");
   const imageInput = useRef<HTMLInputElement>(null);
   const noteInput = useRef<HTMLTextAreaElement>(null);
@@ -116,6 +122,7 @@ export const OutcomeForm = forwardRef<OutcomeFormHandle, Props>(function Outcome
       setResult(null);
       setNote("");
       setConsoleText("");
+      setEvidence("");
       setValidation("");
     }
   }));
@@ -138,7 +145,8 @@ export const OutcomeForm = forwardRef<OutcomeFormHandle, Props>(function Outcome
     onSave({
       result,
       note: note.trim() === "" ? null : note.trim(),
-      consoleText: consoleText.trim() === "" ? null : consoleText
+      consoleText: consoleText.trim() === "" ? null : consoleText,
+      evidence: evidence.trim() === "" ? null : evidence
     });
   }
 
@@ -188,6 +196,18 @@ export const OutcomeForm = forwardRef<OutcomeFormHandle, Props>(function Outcome
           value={consoleText}
           disabled={submitting}
           onChange={(event) => setConsoleText(event.target.value)}
+        />
+      </label>
+
+      <label>
+        实测过程
+        <textarea
+          name="evidence"
+          rows={3}
+          value={evidence}
+          placeholder="观测原文：选择器、实测值、报错原文"
+          disabled={submitting}
+          onChange={(event) => setEvidence(event.target.value)}
         />
       </label>
 

@@ -14,6 +14,11 @@ export type PreviewCase = {
   title: string;
   module: string | null;
   priority: string | null;
+  // The two outcome columns of a case-and-result file. They belong to the
+  // attempt the import will materialise, not to the case row, so they are
+  // optional here: a casebook zip and a plain case file carry neither.
+  result?: string | null;
+  evidence?: string | null;
   expect_absent?: string[];
   visual_check?: string;
   reference_asset_count?: number;
@@ -27,6 +32,9 @@ export type ImportPreview = {
   fields: string[];
   errors: string[];
   warnings: string[];
+  // 结果列不是"随便一列留档"：这两条数字决定导入页要不要给出勾选框。
+  result_count?: number;
+  evidence_only_count?: number;
   title?: string | null;
   reference_asset_count?: number;
   reference_link_count?: number;
@@ -101,7 +109,10 @@ export type Attempt = {
   result: AttemptResult | null;
   note: string | null;
   console_text: string | null;
-  source: "execution" | "reconcile";
+  // 实测过程: what the operator observed, in Lark's own column. note stays the
+  // failure explanation and console_text the machine output — three cells.
+  evidence?: string | null;
+  source: "execution" | "reconcile" | "import";
   created_at: string;
   // The evidence submitted with the row. Empty for a row adopted from the table
   // or for a run nobody attached a picture to.
@@ -112,6 +123,7 @@ export type SubmitPayload = {
   result: AttemptResult;
   note: string | null;
   console_text: string | null;
+  evidence?: string | null;
   idempotency_key: string;
 };
 
@@ -481,11 +493,24 @@ export const api = {
     body.append("file", file);
     return mutation<ImportPreview>("/api/import/preview", { method: "POST", body });
   },
-  confirm: (ticketId: string, name: string, mapping: Record<string, string>) =>
-    mutation<{ id: string; count: number }>("/api/import/confirm", {
+  // ``importResults`` is the one irreversible choice of an import: a file that
+  // carries conclusions becomes execution records unless the operator unticks
+  // it. 默认 true，旧调用点行为不变。
+  confirm: (
+    ticketId: string,
+    name: string,
+    mapping: Record<string, string>,
+    importResults = true
+  ) =>
+    mutation<{ id: string; count: number; attempt_count: number }>("/api/import/confirm", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ticket_id: ticketId, name, mapping })
+      body: JSON.stringify({
+        ticket_id: ticketId,
+        name,
+        mapping,
+        import_results: importResults
+      })
     }),
   groups: (includeArchived = false) =>
     request<Group[]>(`/api/groups${includeArchived ? "?include_archived=true" : ""}`),
