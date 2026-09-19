@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.auth import require_admin
 from app.case_assets import link_payload, new_storage_key, reference_path
 from app.db import get_db
+from app.execution import allocate_attempt
 from app.importers.casebook import (
     BundleFocus,
     CasebookDocument,
@@ -42,6 +43,10 @@ class ConfirmImport(BaseModel):
         str, StringConstraints(strip_whitespace=True, min_length=1, max_length=255)
     ]
     mapping: dict[str, str] = Field(default_factory=dict)
+    # Materialise the outcome columns as attempts. The flag exists so the same
+    # file can still be imported as cases only, and so a file whose results are
+    # wrong can be pulled in without hand-editing it.
+    import_results: bool = True
 
 
 @router.post("/import/preview")
@@ -105,6 +110,49 @@ async def preview_import(
     }
 
 
+# What the attempt layer accepts. 「阻塞」 is a legal option in the Lark table's
+# select column but not a state this tool records, so it is refused loudly
+# instead of being mapped onto something it is not.
+IMPORT_RESULTS = ("通过", "不通过", "未执行")
+
+
+def _materialize_attempts(
+    db: Session, group_cases: list[GroupCase], parsed_cases: list[ParsedCase], source_sha256: str
+) -> int:
+    """Turn every row that carries a conclusion into a committed attempt.
+
+    A row without one stays 未测: no attempt means no execution record, so the
+    board shows it blank and Lark never sees it — that is the whole mechanism
+    behind "失败用例留空，等我亲自校验".
+    """
+
+    created = 0
+    for group_case, case in zip(group_cases, parsed_cases, strict=True):
+        result = (case.result or "").strip()
+        evidence = (case.evidence or "").strip() or None
+        if not result:
+            continue
+        if result not in IMPORT_RESULTS:
+            raise ImportErrorDetail(
+                f"Case {case.code} has invalid result: {result}"
+                "（只接受 通过/不通过/未执行）"
+            )
+        if result == "不通过" and not evidence:
+            raise ImportErrorDetail(f"Case {case.code} is a failure without 实测过程")
+        attempt = allocate_attempt(db, group_case)
+        attempt.state = "committed"
+        attempt.result = result
+        attempt.note = evidence if result == "不通过" else None
+        attempt.console_text = None
+        attempt.evidence = evidence
+        attempt.source = "import"
+        # Derived from the file itself, so replaying the same upload can never
+        # mint a second batch of attempts.
+        attempt.idempotency_key = f"import:{source_sha256}:{case.code}"
+        created += 1
+    return created
+
+
 @router.post("/import/confirm", status_code=status.HTTP_201_CREATED)
 def confirm_import(
     payload: ConfirmImport,
@@ -132,12 +180,11 @@ def confirm_import(
     if ticket.parsed.get("casebook"):
         document = _parse_casebook_or_422(ticket.original_file)
         group_cases, written = _casebook_group_cases(document, group_id)
+        parsed_cases: list[ParsedCase] = []
         asset_count = len(document.assets)
         link_count = sum(len(case.references) for case in document.cases)
     else:
-        parsed_cases = _parse_or_422(
-            source_name, ticket.original_file, payload.mapping or None
-        )
+        parsed_cases = _parse_or_422(source_name, ticket.original_file, payload.mapping or None)
         group_cases = [_group_case(case) for case in parsed_cases]
         asset_count = 0
         link_count = 0
@@ -152,9 +199,23 @@ def confirm_import(
         source_version=ticket.file_sha256[:12],
         cases=group_cases,
     )
+    attempt_count = 0
+    # The group is in the session first, so the materialiser flushes a complete
+    # aggregate even though it is the attempt that triggers the flush.
+    db.add(group)
+    if payload.import_results and parsed_cases:
+        try:
+            attempt_count = _materialize_attempts(
+                db, group_cases, parsed_cases, ticket.file_sha256
+            )
+        except ImportErrorDetail as error:
+            # Nothing is half-written: the ticket stays usable and the operator
+            # fixes the file instead of hunting a group that imported by halves.
+            db.rollback()
+            raise HTTPException(status_code=422, detail=str(error)) from None
+
     ticket.consumed_at = now
     ticket.original_file = b""
-    db.add(group)
     try:
         db.commit()
     except Exception:
@@ -168,6 +229,7 @@ def confirm_import(
         "count": len(group_cases),
         "reference_asset_count": asset_count,
         "reference_link_count": link_count,
+        "attempt_count": attempt_count,
     }
 
 

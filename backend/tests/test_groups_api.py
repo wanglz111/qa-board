@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 
-from app.models import Group, ImportTicket
+from app.models import Attempt, Group, GroupCase, ImportTicket
 
 # The same verdict-to-tally mapping execution.group_progress uses, so a case's
 # latest_result can be folded into the counts the page shows next to it.
@@ -309,3 +309,196 @@ def test_confirm_still_builds_the_group_when_the_file_carries_results(
     # 预览的两个数字决定页面要不要给"一并写入执行结果"：这里一条有结论、一条只有过程。
     assert preview.json()["result_count"] == 1
     assert preview.json()["evidence_only_count"] == 1
+
+
+THREE_OUTCOMES = (
+    "用例编号,执行顺序,用例标题,所属模块,优先级,执行分层,前置条件,测试数据,执行步骤,预期结果,执行结果,实测过程\n"
+    'B-001,1,管理员登录,账户,P0,Smoke,,,"1. 打开登录页","1. 页面: 进入工作台",通过,"1. 实测 1.2s"\n'
+    "B-002,2,未绑定拦截,账户,P0,Smoke,,,"
+    '"1. 直访业务页","1. 页面: 被拦截",,\n'
+    'B-003,3,邀请码校验,账户,P1,Smoke,,,"1. 输入邀请码",'
+    '"1. 页面: 回显推荐人",不通过,"1. 实测回显 8+8，设计稿 6+6"\n'
+)
+
+
+def import_with_results(client, name="结果导入"):
+    preview = client.post(
+        "/api/import/preview",
+        files={"file": ("outcomes.csv", THREE_OUTCOMES.encode("utf-8"), "text/csv")},
+    )
+    assert preview.status_code == 200
+    return preview, client.post(
+        "/api/import/confirm",
+        json={"ticket_id": preview.json()["ticket_id"], "name": name},
+    )
+
+
+def test_confirm_materialises_only_the_rows_that_carry_a_result(
+    authenticated_client, db_session
+):
+    preview, confirm = import_with_results(authenticated_client)
+
+    assert confirm.status_code == 201, confirm.text
+    assert confirm.json()["attempt_count"] == 2  # B-002 留空 → 不建 attempt
+
+    attempts = db_session.scalars(select(Attempt).order_by(Attempt.label)).all()
+    assert [attempt.label for attempt in attempts] == ["B-001", "B-003"]
+    assert [attempt.result for attempt in attempts] == ["通过", "不通过"]
+    assert attempts[0].source == "import"
+    assert attempts[0].evidence == "1. 实测 1.2s"
+    assert attempts[0].console_text is None
+    # 不通过必须带 note（execution.AttemptCreate 的既有规则），导入用实测过程兜。
+    assert attempts[1].note == "1. 实测回显 8+8，设计稿 6+6"
+    assert attempts[0].idempotency_key.startswith("import:")
+
+
+def test_confirm_rejects_a_result_outside_the_enum(authenticated_client, db_session):
+    body = THREE_OUTCOMES.replace(",不通过,", ",阻塞,")
+    preview = authenticated_client.post(
+        "/api/import/preview",
+        files={"file": ("outcomes.csv", body.encode("utf-8"), "text/csv")},
+    )
+    confirm = authenticated_client.post(
+        "/api/import/confirm",
+        json={"ticket_id": preview.json()["ticket_id"], "name": "非法结果"},
+    )
+
+    assert confirm.status_code == 422
+    assert "B-003" in confirm.json()["detail"]
+    assert "只接受" in confirm.json()["detail"]
+    # 拒绝是整体回滚：组与 attempt 都不许留下。
+    assert db_session.scalars(select(Group)).all() == []
+
+
+def test_confirm_rejects_a_failure_without_evidence(authenticated_client, db_session):
+    body = THREE_OUTCOMES.replace(',不通过,"1. 实测回显 8+8，设计稿 6+6"', ",不通过,")
+    preview = authenticated_client.post(
+        "/api/import/preview",
+        files={"file": ("outcomes.csv", body.encode("utf-8"), "text/csv")},
+    )
+    confirm = authenticated_client.post(
+        "/api/import/confirm",
+        json={"ticket_id": preview.json()["ticket_id"], "name": "缺过程"},
+    )
+
+    assert confirm.status_code == 422
+    assert confirm.json()["detail"] == "Case B-003 is a failure without 实测过程"
+    assert db_session.scalars(select(Group)).all() == []
+
+
+def test_import_results_false_ignores_the_outcome_columns(authenticated_client, db_session):
+    body = THREE_OUTCOMES.replace(",不通过,", ",阻塞,")
+    preview = authenticated_client.post(
+        "/api/import/preview",
+        files={"file": ("outcomes.csv", body.encode("utf-8"), "text/csv")},
+    )
+    confirm = authenticated_client.post(
+        "/api/import/confirm",
+        json={
+            "ticket_id": preview.json()["ticket_id"],
+            "name": "只要用例",
+            "import_results": False,
+        },
+    )
+
+    assert confirm.status_code == 201, confirm.text
+    assert confirm.json()["attempt_count"] == 0
+    assert db_session.scalars(select(Attempt)).all() == []
+
+
+def test_a_skipped_row_still_becomes_an_attempt(authenticated_client, db_session):
+    """「未执行」是结论，不是留白：进度必须记 skipped，而不是 untested。"""
+
+    body = THREE_OUTCOMES.replace(",不通过,", ",未执行,")
+    preview = authenticated_client.post(
+        "/api/import/preview",
+        files={"file": ("skipped.csv", body.encode("utf-8"), "text/csv")},
+    )
+    confirm = authenticated_client.post(
+        "/api/import/confirm",
+        json={"ticket_id": preview.json()["ticket_id"], "name": "含未执行"},
+    )
+
+    assert confirm.status_code == 201, confirm.text
+    assert confirm.json()["attempt_count"] == 2
+    attempts = db_session.scalars(select(Attempt).order_by(Attempt.label)).all()
+    assert [attempt.result for attempt in attempts] == ["通过", "未执行"]
+
+    progress = authenticated_client.get(
+        f"/api/groups/{confirm.json()['id']}/progress"
+    ).json()
+    assert progress == {"passed": 1, "failed": 0, "skipped": 1, "untested": 1}
+
+
+# 「只有过程、没有结论」是任务契约的另一半：这一行不建 attempt，那两列的原文
+# 就只能靠 GroupCase.raw 活下来——物化时先 continue 再谈别的，正是为此。
+EVIDENCE_ONLY_BOOK = (
+    "用例编号,执行顺序,用例标题,所属模块,优先级,执行分层,前置条件,测试数据,执行步骤,预期结果,执行结果,实测过程\n"
+    'B-001,1,管理员登录,账户,P0,Smoke,,,"1. 打开登录页","1. 页面: 进入工作台",通过,"1. 实测 1.2s"\n'
+    'B-002,2,未绑定拦截,账户,P0,Smoke,,,"1. 直访业务页","1. 页面: 被拦截",,留档：本轮未复验\n'
+)
+
+
+def test_a_row_left_blank_keeps_both_columns_in_raw(authenticated_client, db_session):
+    preview = authenticated_client.post(
+        "/api/import/preview",
+        files={
+            "file": ("evidence-only.csv", EVIDENCE_ONLY_BOOK.encode("utf-8"), "text/csv")
+        },
+    )
+    confirm = authenticated_client.post(
+        "/api/import/confirm",
+        json={"ticket_id": preview.json()["ticket_id"], "name": "留白留档"},
+    )
+
+    assert confirm.status_code == 201, confirm.text
+    assert confirm.json()["attempt_count"] == 1
+    assert [
+        attempt.label
+        for attempt in db_session.scalars(select(Attempt).order_by(Attempt.label)).all()
+    ] == ["B-001"]
+
+    blank = db_session.scalar(
+        select(GroupCase).where(
+            GroupCase.group_id == confirm.json()["id"], GroupCase.code == "B-002"
+        )
+    )
+    # 留空的那行没有 attempt 可挂结果，原始两列必须原样留在 raw 里。
+    assert blank.raw["执行结果"] == ""
+    assert blank.raw["实测过程"] == "留档：本轮未复验"
+
+
+def test_a_rejected_result_rolls_back_whole_and_leaves_the_ticket_usable(
+    authenticated_client, db_session
+):
+    body = THREE_OUTCOMES.replace(",不通过,", ",阻塞,")
+    preview = authenticated_client.post(
+        "/api/import/preview",
+        files={"file": ("outcomes.csv", body.encode("utf-8"), "text/csv")},
+    )
+    ticket_id = preview.json()["ticket_id"]
+
+    confirm = authenticated_client.post(
+        "/api/import/confirm",
+        json={"ticket_id": ticket_id, "name": "非法结果回滚"},
+    )
+
+    assert confirm.status_code == 422
+    # 半个 group、半个 attempt 都不许留下，ticket 也不许被消费。
+    assert db_session.scalars(select(Group)).all() == []
+    assert db_session.scalars(select(Attempt)).all() == []
+    ticket = db_session.get(ImportTicket, ticket_id)
+    assert ticket.consumed_at is None
+    assert ticket.original_file
+
+    # 同一张 ticket 还能用：改掉结果值不必重新上传预览。
+    retry = authenticated_client.post(
+        "/api/import/confirm",
+        json={
+            "ticket_id": ticket_id,
+            "name": "修好结果列",
+            "import_results": False,
+        },
+    )
+    assert retry.status_code == 201, retry.text
+    assert retry.json()["count"] == 3
