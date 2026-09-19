@@ -313,6 +313,20 @@ it("requires an explicit consent toggle before confirming", async () => {
   expect(await screen.findByText(/已确认：本组新记录只会新增/)).toBeVisible();
 });
 
+it("says how many local results the approval just queued, and reloads the queue", async () => {
+  const confirmTarget = vi.fn().mockResolvedValue({ ...confirmedTarget(), queued_local_attempts: 3 });
+  const { container, loadSync } = renderCheck({ confirmTarget });
+
+  await readExecutionLink(container);
+  await ensureStepOpen(3);
+  await userEvent.click(screen.getByLabelText("允许向上述旧表新增本组记录"));
+  await userEvent.click(screen.getByRole("button", { name: /确认本组写入目标/ }));
+
+  expect(await screen.findByText(/已自动排入 3 条本地结果/)).toBeVisible();
+  // 批准刚把队列填满，面板必须重读：不重读，第 ④ 步还挂着批准前的 0 条。
+  await waitFor(() => expect(loadSync).toHaveBeenCalledTimes(2));
+});
+
 it("blocks confirmation and explains when the live table reports schema errors", async () => {
   const { container } = renderCheck({
     loadTarget: async () => stateWith(TARGET, { schema_errors: ["缺少必填字段「截图」"], read_errors: [] })

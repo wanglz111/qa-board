@@ -11,7 +11,7 @@ from app.lark.fields import (
     REQUIRED_RUN_FIELD_TYPES,
     schema_fingerprint,
 )
-from app.models import LarkTarget, LarkTargetRevision
+from app.models import Attempt, GroupCase, LarkTarget, LarkTargetRevision, SyncJob
 
 
 def test_resolve_returns_base_tables_and_the_linked_table(
@@ -679,8 +679,11 @@ def test_confirming_a_saved_target_marks_it_approved(
 
     assert response.status_code == 200, response.text
     body = response.json()
-    # The frontend consumes the bare target, not a wrapper.
-    assert set(body) == TARGET_PAYLOAD_KEYS
+    # The frontend consumes the bare target, not a wrapper; the count of rows
+    # this approval just made writable rides beside it, because approving is the
+    # moment the queue fills.
+    assert set(body) == TARGET_PAYLOAD_KEYS | {"queued_local_attempts"}
+    assert body["queued_local_attempts"] == 0
     assert body["confirmed"] is True
     assert body["confirmed_at"] is not None
     assert body["target_fingerprint"] == fingerprint
@@ -689,6 +692,71 @@ def test_confirming_a_saved_target_marks_it_approved(
         f"||{schema_fingerprint(lark_fake.bug_fields)}"
     )
     assert body["schema_fingerprint"] != saved["target"]["schema_fingerprint"]
+
+
+def _committed_import_attempt(db_session, group_id, *, code: str):
+    """One local row of the kind an import materialises before any target exists."""
+
+    group_case = db_session.scalar(
+        select(GroupCase).where(GroupCase.group_id == group_id, GroupCase.code == code)
+    )
+    attempt = Attempt(
+        group_case=group_case,
+        label=code,
+        sequence=1,
+        state="committed",
+        result="通过",
+        evidence="1. 实测 1.2s",
+        source="import",
+        idempotency_key=f"import:{group_id}:{code}",
+    )
+    db_session.add(attempt)
+    db_session.commit()
+    return attempt
+
+
+def test_approving_a_target_queues_the_local_results_it_made_writable(
+    lark_fake, authenticated_client, imported_group, db_session
+):
+    """Approval is the moment rows saved earlier become writable, so it queues them.
+
+    Without this the queue only ever filled from step ④'s button, and a group
+    whose results were imported *before* its target was approved stayed local
+    forever unless somebody found that button — which is exactly the report this
+    test was written from.
+    """
+
+    _committed_import_attempt(db_session, imported_group.id, code="B-001")
+    saved = _save(authenticated_client, imported_group.id, table_id="tbl-runs")
+    # Saving is not approving: nothing may be queued before the confirmation.
+    assert db_session.scalars(select(SyncJob)).all() == []
+
+    response = authenticated_client.post(
+        f"/api/groups/{imported_group.id}/lark/target/confirm",
+        json={
+            "allow_writes": True,
+            "target_fingerprint": saved["target"]["target_fingerprint"],
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["queued_local_attempts"] == 1
+    job = db_session.scalar(select(SyncJob))
+    assert job is not None
+    assert job.state == "pending"
+
+    # Pressing confirm twice is what an unsure operator does; the second press
+    # must report 0 rather than append a second job for the same row.
+    again = authenticated_client.post(
+        f"/api/groups/{imported_group.id}/lark/target/confirm",
+        json={
+            "allow_writes": True,
+            "target_fingerprint": saved["target"]["target_fingerprint"],
+        },
+    )
+    assert again.status_code == 200, again.text
+    assert again.json()["queued_local_attempts"] == 0
+    assert len(db_session.scalars(select(SyncJob)).all()) == 1
 
 
 def test_a_target_moved_during_the_live_read_cannot_be_approved(

@@ -648,9 +648,20 @@ def confirm_target(
     locked.schema_fingerprint = state["schema_fingerprint"]
     locked.confirmed_at = datetime.now(timezone.utc)
     db.commit()
+    # Approving is the moment the rows saved before it become writable, and the
+    # live read above just proved this table's headers are complete — so queue
+    # them here. Otherwise the queue only ever fills from step ④'s button, and a
+    # group whose results were imported before its target was approved stays
+    # local until somebody happens to find that button.
+    #
+    # Imported at call time: app.lark.outbox imports this module for target_for,
+    # so a module-level import would be a cycle.
+    from app.lark.outbox import enqueue_group_attempts
+
+    queued_local_attempts = enqueue_group_attempts(db, group_id)
     # Confirming changes no row in the table, so this is harmless rather than
     # necessary — it keeps every write path telling the snapshot the same story,
     # and the panel re-reads the tables right after it.
     lark_cache.invalidate_group(db, group_id)
     db.refresh(locked)
-    return serialize_target(locked)
+    return {**serialize_target(locked), "queued_local_attempts": queued_local_attempts}

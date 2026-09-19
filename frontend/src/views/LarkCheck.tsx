@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import {
   ApiError, type CreateTablePayload, type CreateTableResult, type Group, type LarkResolved, type LarkTarget,
+  type LarkTargetApproval,
   type LarkTargetChangeDetail, type LarkTargetPayload, type LarkTargetState, type ProvisionFieldsPayload,
   type ProvisionFieldsResult, type ProvisionPlan, type RebuildTablePayload, type RebuildTableResult,
   type RetypeFieldsPayload, type RetypeFieldsResult, type SyncEnqueueResult, type SyncStatus,
@@ -22,7 +23,7 @@ type Props = {
   resolve: (url: string) => Promise<LarkResolved>;
   loadTarget: (groupId: string) => Promise<LarkTargetState>;
   saveTarget: (groupId: string, payload: LarkTargetPayload) => Promise<{ target: LarkTarget; live: LarkTargetState["live"]; confirmation_cleared: boolean }>;
-  confirmTarget: (groupId: string, targetFingerprint: string) => Promise<LarkTarget>;
+  confirmTarget: (groupId: string, targetFingerprint: string) => Promise<LarkTargetApproval>;
   loadSync?: (groupId: string) => Promise<SyncStatus>;
   enqueueSync?: (groupId: string) => Promise<SyncEnqueueResult>;
   retrySync?: (groupId: string, releaseUncertain?: boolean) => Promise<{ requeued: number; released: number; repointed?: number }>;
@@ -224,9 +225,19 @@ export function LarkCheckView({
     if (!target || !allowWrites) return;
     setBusy(true); setError(""); setNotice("");
     try {
-      const updated = await confirmTarget(groupId, target.target_fingerprint);
+      const { queued_local_attempts: queued = 0, ...updated } = await confirmTarget(groupId, target.target_fingerprint);
       setState((current) => (current ? { ...current, target: updated } : current));
-      setNotice("已确认：本组新记录只会新增，旧记录与旧缺陷不会被修改");
+      // 批准是本地结果变得可写的那一刻：服务端已经把它们排进队列，这句话必须说出来，
+      // 否则用户看到的仍是第 ④ 步那个批准前的 0。
+      setNotice(
+        queued > 0
+          ? `已确认：本组新记录只会新增，旧记录与旧缺陷不会被修改；已自动排入 ${queued} 条本地结果`
+          : "已确认：本组新记录只会新增，旧记录与旧缺陷不会被修改"
+      );
+      if (queued > 0) {
+        const refreshed = await loadSync?.(groupId);
+        if (refreshed) { setSync(refreshed); setSyncRead(true); }
+      }
     } catch (reason) { setError(messageOf(reason, "确认失败")); } finally { setBusy(false); }
   }
 

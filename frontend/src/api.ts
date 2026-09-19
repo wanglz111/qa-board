@@ -173,6 +173,9 @@ export type LarkTarget = {
   confirmed: boolean;
 };
 
+// 确认写入的响应：目标本身，加上这一下顺手排进队列的本地结果条数。
+export type LarkTargetApproval = LarkTarget & { queued_local_attempts: number };
+
 export type LarkTargetState = {
   target: LarkTarget | null;
   live: { schema_errors: string[]; read_errors: string[] } | null;
@@ -583,7 +586,9 @@ export const api = {
       }
     ),
   confirmLarkTarget: (groupId: string, targetFingerprint: string) =>
-    mutation<LarkTarget>(`/api/groups/${groupId}/lark/target/confirm`, {
+    // 确认写入的那一刻本地结果才变得可写，服务端顺手把它们排进队列并回报条数：
+    // 只回 target 会让「已确认」和第 ④ 步的 0 条并排，看着像同步完了。
+    mutation<LarkTargetApproval>(`/api/groups/${groupId}/lark/target/confirm`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ allow_writes: true, target_fingerprint: targetFingerprint })
