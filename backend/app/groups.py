@@ -67,6 +67,12 @@ async def preview_import(
             "count": len(text_cases),
             "cases": [_case_payload(case) for case in text_cases[:10]],
             "fields": sorted({str(key) for case in text_cases for key in case.raw}),
+            # 结果列不是普通留档列：这两条数字决定导入页要不要给出"一并写入执行
+            # 结果"，以及有没有"只有过程、没有结论"的行会被静默留档。
+            "result_count": sum(1 for case in text_cases if case.result),
+            "evidence_only_count": sum(
+                1 for case in text_cases if case.evidence and not case.result
+            ),
         }
 
     now = datetime.now(timezone.utc)
@@ -497,8 +503,14 @@ def _case_payload(case: ParsedCase) -> dict[str, Any]:
 
 
 def _group_case(case: ParsedCase) -> GroupCase:
+    # The outcome columns belong to the attempt, not the case row: spreading
+    # them here is a TypeError, and dropping 未测 rows later is the whole
+    # point of keeping them apart.
+    fields = asdict(case)
+    fields.pop("result")
+    fields.pop("evidence")
     return GroupCase(
-        **asdict(case),
+        **fields,
         expect_absent=[],
         visual_check="text_and_visual",
     )

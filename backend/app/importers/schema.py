@@ -28,6 +28,11 @@ class ParsedCase:
     steps: str | None
     expected: str | None
     prototype_note: str | None
+    # The outcome columns. A case is a spec; 通过/不通过/未执行 belong to an
+    # execution, so these two travel to the attempt materialiser instead of
+    # into the case row (see groups._group_case).
+    result: str | None
+    evidence: str | None
     raw: dict[str, Any]
 
 
@@ -43,6 +48,8 @@ FIELDS = (
     "steps",
     "expected",
     "prototype_note",
+    "result",
+    "evidence",
 )
 
 ALIASES: dict[str, tuple[str, ...]] = {
@@ -57,6 +64,8 @@ ALIASES: dict[str, tuple[str, ...]] = {
     "steps": ("steps", "执行步骤", "步骤"),
     "expected": ("expected", "checkpoints", "预期结果", "预期"),
     "prototype_note": ("prototype_note", "protoNote", "原型备注", "核图提示"),
+    "result": ("result", "执行结果", "实测结果", "本轮实测结果"),
+    "evidence": ("evidence", "实测过程", "过程记录", "实测说明"),
 }
 
 
@@ -152,6 +161,8 @@ def normalize_record(
         steps=values["steps"],
         expected=values["expected"],
         prototype_note=values["prototype_note"],
+        result=values["result"],
+        evidence=values["evidence"],
         raw=dict(record),
     )
 

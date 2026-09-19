@@ -235,3 +235,30 @@ def test_markdown_document_heading_with_field_table_is_not_a_case():
 
     with pytest.raises(ImportErrorDetail, match="case boundaries"):
         parse_file("guide.md", markdown.encode())
+
+
+RESULT_CSV = (
+    "用例编号,执行顺序,用例标题,所属模块,优先级,执行分层,前置条件,测试数据,执行步骤,预期结果,执行结果,实测过程\n"
+    'LOGIN-001,1,账号密码登录,登录,P0,Smoke,存在已注册账号,user=qa01,"1. 打开登录页\n2. 点击登录",'
+    '"1. 页面: 跳转到工作台",通过,"1. 实测跳转耗时 1.2s\n2. token 已写入"\n'
+    "LOGIN-002,2,密码错误登录,登录,P1,Smoke,,,"
+    '"1. 打开登录页\n2. 输入错误密码",'
+    '"1. 提示: 账号或密码错误",,留档：本轮未复验\n'
+)
+
+
+def test_csv_reads_the_two_outcome_columns():
+    cases = parse_file("result.csv", RESULT_CSV.encode("utf-8"))
+
+    assert [case.result for case in cases] == ["通过", None]
+    assert cases[0].evidence == "1. 实测跳转耗时 1.2s\n2. token 已写入"
+    # 结果为空的行仍然带着留档文本：它只是没有结论，不是没有过程记录。
+    assert cases[1].evidence == "留档：本轮未复验"
+    assert cases[0].raw["执行结果"] == "通过"
+
+
+def test_outcome_columns_are_optional():
+    cases = parse_file("plain.csv", fixture_bytes("group14.csv"))
+
+    assert cases[0].result is None
+    assert cases[0].evidence is None

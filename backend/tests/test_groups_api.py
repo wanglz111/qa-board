@@ -276,3 +276,36 @@ def test_cases_and_progress_tally_the_same_results(authenticated_client, csv_boo
     assert len(cases) == 14
     assert tallies == {"passed": 2, "failed": 0, "skipped": 1, "untested": 11}
     assert tallies == progress
+
+
+RESULT_BOOK = (
+    "用例编号,执行顺序,用例标题,所属模块,优先级,执行分层,前置条件,测试数据,执行步骤,预期结果,执行结果,实测过程\n"
+    'B-001,1,管理员登录,账户,P0,Smoke,,,"1. 打开登录页","1. 页面: 进入工作台",通过,"1. 实测 1.2s"\n'
+    "B-002,2,密码错误登录,账户,P1,Smoke,,,"
+    '"1. 输入错误密码","1. 提示: 密码错误",,留档：本轮未复验\n'
+)
+
+
+def test_confirm_still_builds_the_group_when_the_file_carries_results(
+    authenticated_client, db_session
+):
+    preview = authenticated_client.post(
+        "/api/import/preview",
+        files={"file": ("result.csv", RESULT_BOOK.encode("utf-8"), "text/csv")},
+    )
+    assert preview.status_code == 200
+    assert preview.json()["count"] == 2
+
+    confirm = authenticated_client.post(
+        "/api/import/confirm",
+        json={"ticket_id": preview.json()["ticket_id"], "name": "结果列回归"},
+    )
+
+    assert confirm.status_code == 201, confirm.text
+    assert confirm.json()["count"] == 2
+    # 预览把两列带给页面（Task 8 用它算摘要），值来自新字段而不是 raw。
+    assert preview.json()["cases"][0]["result"] == "通过"
+    assert preview.json()["cases"][0]["evidence"] == "1. 实测 1.2s"
+    # 预览的两个数字决定页面要不要给"一并写入执行结果"：这里一条有结论、一条只有过程。
+    assert preview.json()["result_count"] == 1
+    assert preview.json()["evidence_only_count"] == 1
