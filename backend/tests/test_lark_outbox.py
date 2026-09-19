@@ -1666,3 +1666,64 @@ def test_enqueue_group_attempts_includes_imported_rows(
     # 面板的"待同步"计数读的是同一个白名单，漏改这里就会出现"队列 0 条、
     # 却显示还有 1 条待同步"。
     assert read_sync(confirmed_group.id, db_session)["pending_attempts"] == 1
+
+
+def test_the_run_row_carries_the_evidence_column(db_session, local_attempt):
+    local_attempt.evidence = "1. 实测遮罩 rgba(0,0,0,.65)"
+    local_attempt.console_text = "console dump"
+    db_session.commit()
+
+    fields = execution_fields(
+        local_attempt,
+        local_attempt.group_case,
+        owner="待指派",
+        reporter="qa",
+    )
+
+    assert fields["实测过程"] == "1. 实测遮罩 rgba(0,0,0,.65)"
+    # 两列互不顶替：控制台仍然是控制台。
+    assert fields["控制台"] == "console dump"
+
+
+def test_the_run_row_writes_an_empty_evidence_cell(db_session, local_attempt):
+    fields = execution_fields(
+        local_attempt, local_attempt.group_case, owner="待指派", reporter="qa"
+    )
+
+    assert fields["实测过程"] == ""
+
+
+def test_an_imported_row_reaches_lark_with_its_evidence(
+    fake_lark, confirmed_group, db_session, add_case
+):
+    """The end of the import chain: what was measured travels to the run table.
+
+    The attempt enters through the same door an import uses — ``source="import"``
+    onto a confirmed group's queue — and leaves through the writer, so this is
+    the one test that proves the column is filled on the real path rather than
+    in ``execution_fields`` alone.
+    """
+
+    case = add_case(confirmed_group.id, code="B-002", title="导入的实测过程")
+    attempt = Attempt(
+        group_case=case,
+        label="B-002",
+        sequence=1,
+        state="committed",
+        result="通过",
+        evidence="1. 实测遮罩 rgba(0,0,0,.65)",
+        source="import",
+        idempotency_key="import:evidence:B-002",
+    )
+    db_session.add(attempt)
+    db_session.commit()
+
+    assert enqueue_attempt_job(db_session, attempt) is not None
+    db_session.commit()
+
+    assert process_one_job(fake_lark, attempt) == "synced"
+
+    fields = fake_lark.created_records[0]["fields"]
+    assert fields["实测过程"] == "1. 实测遮罩 rgba(0,0,0,.65)"
+    assert fields["结果"] == "通过"
+    assert fields["用例"] == "B-002 导入的实测过程"

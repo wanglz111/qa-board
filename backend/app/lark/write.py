@@ -124,6 +124,9 @@ def execution_fields(
         # is attachment-typed in every table this tool builds.
         "截图": _attachment_value(attachments or []),
         "控制台": attempt.console_text or "",
+        # An empty string, not a missing key: the column is required in every
+        # table this tool builds, and a run without evidence still owns the cell.
+        "实测过程": attempt.evidence or "",
     }
     # An omitted key, not a null one, is how a column the writer cannot fill
     # stays out of the request.

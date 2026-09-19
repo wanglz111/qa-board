@@ -104,7 +104,7 @@ def test_plan_lists_only_the_missing_required_fields():
     assert "自定义列" not in names
     # The plan follows the reference table's column order, not the alphabet.
     assert names == [name for name in RUN_SCHEMA if name in set(names)]
-    assert set(names) == {"结果", "优先级", "负责人", "报告人", "日期", "截图", "控制台"}
+    assert set(names) == {"结果", "优先级", "负责人", "报告人", "日期", "截图", "控制台", "实测过程"}
 
 
 def test_plan_is_empty_when_every_header_exists():
@@ -278,7 +278,9 @@ def test_a_created_table_keeps_the_reference_column_order(
     """
 
     expected = {
-        "execution": ["用例", "结果", "优先级", "负责人", "截图", "控制台", "报告人", "日期"],
+        "execution": [
+            "用例", "结果", "优先级", "负责人", "截图", "控制台", "报告人", "日期", "实测过程",
+        ],
         "bug": ["问题描述", "优先级", "进展状态", "反馈时间", "反馈人", "跟进人", "备注", "截图"],
     }
     for role, names in expected.items():
@@ -816,6 +818,7 @@ def test_the_retype_plan_is_empty_for_the_reference_schema(lark_fake, authentica
                 "日期": 5,
                 "截图": 17,
                 "控制台": 1,
+                "实测过程": 1,
             }.items()
         )
     ]
@@ -1047,6 +1050,7 @@ def test_rebuilding_a_table_replaces_it_in_the_reference_layout(
         "控制台",
         "报告人",
         "日期",
+        "实测过程",
     ]
     assert body["table"] == {"table_id": "tbl-new", "name": rebuilt_table_name("执行记录")}
     assert body["replaced"] == {"table_id": "tbl-runs", "name": "执行记录"}
@@ -1574,3 +1578,12 @@ def test_the_retype_plan_offers_to_convert_a_text_owner_into_a_person_column():
     assert plan["负责人"]["current_type"] == 1
     assert plan["负责人"]["properties"] == {"multiple": True}
     assert plan["报告人"]["type"] == 11
+
+
+def test_the_manual_evidence_column_is_required_and_last():
+    from app.lark.fields import REQUIRED_RUN_FIELD_TYPES
+    from app.lark.provision import RUN_SCHEMA, schema_order
+
+    assert REQUIRED_RUN_FIELD_TYPES["实测过程"] == (1,)
+    assert schema_order("execution")[-1] == "实测过程"
+    assert RUN_SCHEMA["实测过程"].type_id == 1

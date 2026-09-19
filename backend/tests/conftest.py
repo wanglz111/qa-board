@@ -773,7 +773,7 @@ def history_ref(db_session, imported_group) -> LarkHistoryRef:
 # team fills by hand, and the writer has to treat it as one. The entry order
 # carries no meaning to the reader — ``schema_fingerprint`` sorts by name.
 FIXTURE_SCHEMA_FINGERPRINT = (
-    "优先级:3|报告人:1|日期:5|结果:3|用例:1|截图:17|控制台:1|负责人:1"
+    "优先级:3|实测过程:1|截图:17|报告人:1|控制台:1|日期:5|用例:1|结果:3|负责人:1"
     "||"
     "优先级:3|反馈人:11|反馈时间:5|备注:1|截图:17|跟进人:11|进展状态:3|问题描述:1"
 )

@@ -56,6 +56,8 @@ REQUIRED_RUN_FIELD_TYPES: dict[str, tuple[int, ...]] = {
     "日期": (5, 1001, 1002),
     "截图": (17,),
     "控制台": (1,),
+    # 人工写的实测过程：导入时来自文件的 `实测过程` 列，手工执行时来自结果表单。
+    "实测过程": (1,),
 }
 
 REQUIRED_BUG_FIELD_TYPES: dict[str, tuple[int, ...]] = {

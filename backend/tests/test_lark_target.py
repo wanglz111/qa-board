@@ -152,6 +152,7 @@ def test_table_schema_judges_one_table_by_the_role_that_asked(
         "报告人": "text",
         "日期": "date",
         "控制台": "text",
+        "实测过程": "text",
     }
     assert bug.json()["fields"] == execution.json()["fields"]
     assert execution.json()["required"] == sorted(REQUIRED_RUN_FIELD_TYPES)

@@ -116,6 +116,9 @@ RUN_SCHEMA: dict[str, FieldSpec] = {
     "控制台": FieldSpec(1),
     "报告人": FieldSpec(11, PERSON_PROPERTY),
     "日期": FieldSpec(5, DATE_PROPERTY),
+    # Appended, never inserted: the first eight names are the reference table's
+    # columns in its own order, and a new column must not shift them.
+    "实测过程": FieldSpec(1),
 }
 
 BUG_SCHEMA: dict[str, FieldSpec] = {
@@ -802,7 +805,8 @@ def _rebuild_counts(db: Session, group_id: UUID) -> dict[str, int]:
     result — a guard rather than a fact, since no application path mints a job
     for an attempt that is still ``started``. The two paths that do mint jobs,
     ``enqueue_attempt_job`` and ``enqueue_group_attempts``, already require
-    ``source="execution"``, so that filter would say nothing a job does not.
+    ``source in LOCAL_SOURCES`` (``execution`` and ``import``), so that filter
+    would say nothing a job does not.
     """
 
     queued = (
