@@ -33,6 +33,9 @@ class AttemptCreate(BaseModel):
     result: Literal["通过", "不通过", "未执行"]
     note: str | None = None
     console_text: str | None = None
+    # 实测过程：与 note（失败原因）分开，两者都要有，因为 Lark 里它们落在
+    # 不同的列；导入的行把它们一起填。
+    evidence: str | None = None
     idempotency_key: str
 
     @model_validator(mode="after")
@@ -63,6 +66,7 @@ def _attempt_payload(attempt: Attempt) -> dict[str, Any]:
         "result": attempt.result,
         "note": attempt.note,
         "console_text": attempt.console_text,
+        "evidence": attempt.evidence,
         "source": attempt.source,
         "created_at": attempt.created_at,
         # The screenshots belong to the result: the page shows what the executor
@@ -92,6 +96,7 @@ def _matching_attempt(
         or existing.result != payload.result
         or existing.note != payload.note
         or existing.console_text != payload.console_text
+        or existing.evidence != payload.evidence
     ):
         raise HTTPException(status_code=409, detail="Idempotency key conflict")
     return existing
@@ -150,6 +155,7 @@ def _commit_attempt(attempt: Attempt, payload: AttemptCreate) -> None:
     attempt.result = payload.result
     attempt.note = payload.note
     attempt.console_text = payload.console_text
+    attempt.evidence = payload.evidence
     attempt.idempotency_key = payload.idempotency_key
 
 

@@ -173,3 +173,35 @@ def test_committed_attempts_have_no_update_or_delete_route(
     attempt_url = f"/api/attempts/{created.json()['id']}"
     assert authenticated_client.patch(attempt_url, json={"result": "不通过"}).status_code == 404
     assert authenticated_client.delete(attempt_url).status_code == 404
+
+
+def test_submitting_an_attempt_stores_and_returns_the_evidence(
+    authenticated_client, imported_group
+):
+    response = authenticated_client.post(
+        f"/api/groups/{imported_group.id}/cases/B-001/attempts",
+        json={
+            "result": "不通过",
+            "note": "绑定框未拦截",
+            "evidence": "1. 直访业务页未被拦截\n2. .ody-bind 不存在",
+            "idempotency_key": "evidence-1",
+        },
+    )
+
+    assert response.status_code == 201, response.text
+    assert response.json()["evidence"] == "1. 直访业务页未被拦截\n2. .ody-bind 不存在"
+
+
+def test_the_same_idempotency_key_with_different_evidence_is_a_conflict(
+    authenticated_client, imported_group
+):
+    url = f"/api/groups/{imported_group.id}/cases/B-001/attempts"
+    payload = {
+        "result": "通过",
+        "evidence": "1. 实测 1.2s",
+        "idempotency_key": "evidence-2",
+    }
+    assert authenticated_client.post(url, json=payload).status_code == 201
+
+    changed = dict(payload, evidence="1. 实测 1.5s")
+    assert authenticated_client.post(url, json=changed).status_code == 409
