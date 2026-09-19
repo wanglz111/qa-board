@@ -346,12 +346,18 @@ export function ExecutionView({
       input.result,
       input.note,
       input.consoleText,
+      // 「实测过程」 belongs to the signature too: correcting only that text is a
+      // different submission, and a key that ignores it would replay the first
+      // one and answer 409 instead of storing the correction.
+      input.evidence ?? null,
       reserved?.id ?? null
     ]);
     const payload: SubmitPayload = {
       result: input.result,
       note: input.note,
       console_text: input.consoleText,
+      // null, never "": the server compares the raw value.
+      evidence: input.evidence ?? null,
       idempotency_key: keyFor(signature)
     };
     beginRequest();

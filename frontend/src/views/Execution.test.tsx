@@ -282,6 +282,54 @@ it("retries an offline failure with the same idempotency key", async () => {
   expect(submit.mock.calls[1][2].idempotency_key).toBe(submit.mock.calls[0][2].idempotency_key);
 });
 
+it("sends the 实测过程 the form collected on the submit payload", async () => {
+  const { submit } = renderExecution({ initialGroupId: "0918-id" });
+
+  await userEvent.click(await screen.findByRole("button", { name: "通过" }));
+  await userEvent.type(screen.getByLabelText("实测过程"), "1. 实测遮罩 rgba(0,0,0,.65)");
+  await userEvent.click(screen.getByRole("button", { name: /保存结果/ }));
+  await waitFor(() => expect(submit).toHaveBeenCalledTimes(1));
+
+  expect(submit.mock.calls[0][2]).toMatchObject({
+    result: "通过",
+    note: null,
+    console_text: null,
+    evidence: "1. 实测遮罩 rgba(0,0,0,.65)"
+  });
+});
+
+it("sends null, never an empty string, when the 实测过程 was left blank", async () => {
+  const { submit } = renderExecution({ initialGroupId: "0918-id" });
+
+  await userEvent.click(await screen.findByRole("button", { name: "通过" }));
+  await userEvent.click(screen.getByRole("button", { name: /保存结果/ }));
+  await waitFor(() => expect(submit).toHaveBeenCalledTimes(1));
+
+  // The server compares the raw value: "" and None are two different submissions.
+  expect(submit.mock.calls[0][2].evidence).toBeNull();
+});
+
+it("mints a new idempotency key when only the 实测过程 changed", async () => {
+  const { submit } = renderExecution({ initialGroupId: "0918-id" });
+
+  await userEvent.click(await screen.findByRole("button", { name: "通过" }));
+  await userEvent.type(screen.getByLabelText("实测过程"), "第一版观测");
+  await userEvent.click(screen.getByRole("button", { name: /保存结果/ }));
+  await waitFor(() => expect(submit).toHaveBeenCalledTimes(1));
+
+  await userEvent.click(screen.getByRole("button", { name: "通过" }));
+  await userEvent.type(screen.getByLabelText("实测过程"), "第二版观测");
+  await userEvent.click(screen.getByRole("button", { name: /保存结果/ }));
+  await waitFor(() => expect(submit).toHaveBeenCalledTimes(2));
+
+  // The signature has to carry the evidence: otherwise correcting the text and
+  // saving again reuses the key and the server answers 409 instead of storing it.
+  expect(submit.mock.calls[1][2].evidence).toBe("第二版观测");
+  expect(submit.mock.calls[1][2].idempotency_key).not.toBe(
+    submit.mock.calls[0][2].idempotency_key
+  );
+});
+
 it("reserves a retest label before committing it", async () => {
   const reserved: Attempt = {
     id: "attempt-retest",

@@ -160,22 +160,13 @@ export function ImportView({ preview, confirm, onImported, loadPrompts }: Props)
                     ) : null}
                   </div>
                   {(item.preview.result_count ?? 0) > 0 ? (
-                    // The page-wide `label { display: grid }` and `input { width:
-                    // 100%; min-height: 42px }` rules would stretch a checkbox
-                    // into a full-width blue block with its text underneath, so
-                    // this row carries the two overrides every other checkbox in
-                    // the app gets from a CSS class. Move them to a
-                    // `.preview-import-results` rule in styles.css when that file
-                    // is next open.
-                    <label
-                      className="preview-import-results"
-                      style={{ display: "flex", alignItems: "center", gap: 9 }}
-                    >
+                    // The row's own layout lives in styles.css
+                    // (`.preview-import-results`), beside the other field rules.
+                    <label className="preview-import-results">
                       <input
                         type="checkbox"
                         checked={item.writeResults}
                         disabled={item.state === "imported"}
-                        style={{ width: "auto", minHeight: "auto" }}
                         onChange={(e) => patch(item.key, { writeResults: e.target.checked })}
                       />
                       一并写入执行结果

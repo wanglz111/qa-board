@@ -38,6 +38,7 @@ input, select { width: 100%; min-height: 42px; padding: 9px 11px; color: #20242a
 .upload-card > header { min-height: 60px; display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 11px; padding: 12px 14px; border-bottom: 1px solid #eceeef; }
 .upload-card header div { min-width: 0; display: grid; gap: 3px; }.upload-card header strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .9rem; }.upload-card header span { color: #858d92; font-size: .73rem; }
 .preview-body { padding: 14px; }.preview-summary { display: flex; align-items: baseline; gap: 7px; margin-bottom: 15px; color: #687178; font-size: .76rem; }.preview-summary strong { color: #20242a; font-size: 1.25rem; }
+.preview-import-results { display: flex; align-items: center; gap: 9px; }.preview-import-results input { width: auto; min-height: auto; }
 .inline-status { display: flex; align-items: center; gap: 7px; margin: 14px; color: #687178; font-size: .82rem; }.preview-body .inline-status { margin: 0 0 12px; }.inline-status.warning { color: #8b620e; }
 details { margin: 0 0 14px; border-top: 1px solid #eceeef; border-bottom: 1px solid #eceeef; } summary { padding: 10px 0; color: #535c62; cursor: pointer; font-size: .82rem; font-weight: 700; }
 .mapping-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }.mapping-grid label { margin-bottom: 10px; font-size: .72rem; }.mapping-grid select { min-height: 36px; font-size: .78rem; }
