@@ -19,7 +19,7 @@
 - 不新增 update/回写能力；Lark 只收有结论的行。
 - `RUN_SCHEMA` 的列顺序是承重约定：新列**追加在末尾**，保证与参考表的 8 列前缀逐列一致。
 - `backend/app/prompts/ai-case-results.md` 与 `docs/AI-CASE-RESULT-PROMPT.md` 必须**逐字节相同**（`test_shipped_prompts_match_the_docs` 强制）。
-- Lark 活表的「实测过程」列必须先补、再同步；顺序颠倒会让已入队 job 因 `target_fingerprint`（含 schema 指纹）变化全部 park。见 spec §1.4/§6。
+- Lark 活表的「实测过程」列必须先补、再同步；顺序颠倒会让 provision 清掉写批准（`confirmed_at`），已入队 job 全部 park。见 spec §1.4/§6。（**实施期更正**：原因不是"指纹含 schema"——`target_fingerprint` 只是四个身份 token 的拼接。）
 - 后端测试（**先确认本地测试库起了**）：
   ```bash
   docker start testdeck-task2-postgres   # 已运行会报 already running，无害；起好约 3 秒
@@ -672,7 +672,7 @@ Expected: PASS
 `执行结果` 非空的行，在「确认导入」时生成一条**执行记录**（结果 + 实测过程），随后走既有的「同步」把它写进 Lark 执行表。
 `执行结果` 留空的行**只建用例**：界面里它是未测，Lark 里不会出现这一行——这正是「先导通过的、失败的留白等人亲自复验」的用法。
 
-顺序要求：如果 Lark 执行表还没有「实测过程」列，**先在 Lark 检查页补齐并重新确认目标，再导入、再同步**。反过来（先同步后加列）会让已入队的行因目标指纹变化全部挂起，需要人工重新指向。
+顺序要求：如果 Lark 执行表还没有「实测过程」列，**先在 Lark 检查页补齐并重新确认目标，再导入、再同步**。反过来（先同步后加列）会让 provision 清掉写批准、已入队的行全部挂起，需要人工重新确认目标。
 ```
 
 - [ ] **Step 6: 跑整个后端套件**
@@ -1766,7 +1766,7 @@ parsed by the real importer, and the checkbox geometry that jsdom cannot see."
 - [ ] **Step 1: 写这一节，必须包含六件事**
 
 1. **新增能力**：12 列导入契约（`执行结果` / `实测过程`）、导入页的「检出 N 条执行结果」与勾选框、结果表单的「实测过程」、执行历史的「来自导入结果」、Lark 执行表新增必填列「实测过程」、第三份提示词 `AI-CASE-RESULT-PROMPT.md`。
-2. **上线顺序（硬要求）**：先在 Lark 检查页补齐「实测过程」列 → 重新确认目标 → 再导入 → 再同步。顺序颠倒会让已入队的行因目标指纹变化全部 park（spec §6）。
+2. **上线顺序（硬要求）**：先在 Lark 检查页补齐「实测过程」列 → 重新确认目标 → 再导入 → 再同步。顺序颠倒会让 provision 清掉写批准、已入队的行全部 park（spec §6/§1.4）。
 3. **老 target 的影响**：`实测过程` 进 REQUIRED 后，任何未补齐该列的已确认目标都会报"缺列"并拒绝建行，直到 provision 完成。这是有意破窗。
 4. **真实的 0918 使用步骤**：导入 50 条（41 条带结果、9 条留空）→ 同步 → 执行表出现 41 行；之后每复验一条，在 qa-board 提交结果并传图，截图随行写进 Lark 附件列。
 5. **测试保护的真实边界**：backend 套件与前端 vitest 都有覆盖；**e2e 不在 CI 里**（`npm run e2e` 手跑）；几何断言属于 e2e。别把"有测试"说成"自动门"。

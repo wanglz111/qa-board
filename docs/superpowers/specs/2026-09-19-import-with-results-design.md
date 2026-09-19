@@ -46,7 +46,8 @@
 
 ### 1.4 两个顺序陷阱（本方案必须守住，否则线上会卡住）
 
-1. **`target_fingerprint` 包含 schema 指纹**：`lark/target.py:185-188` 把它算成 `schema_fingerprint(execution) || schema_fingerprint(bug)`；`run_job` 用 `job.target_fingerprint != target.target_fingerprint` 判定「目标被换过」并 park（`outbox.py:352-361`）。**给执行表加「实测过程」列会改变指纹** → 先入队再加列 = 41 个 job 全被 park，要人工 re-point。
+1. **provision 补齐列会清掉目标的写批准**：`lark/provision.py:474-477` 在"刚刚创建过字段"时把 `confirmed_at` 置空（注释原文：结构变化作废先前的写批准），而写行只在 `confirmed_at is not None` 时才发生，否则 park（`outbox.py:352-361`）。**给执行表加「实测过程」列 = 清掉写批准** → 先入队再加列 = 41 个 job 全被 park，要人工重新确认目标。
+   （**实施期更正**：本文档初稿把原因写成"`target_fingerprint` 含 schema 指纹"，**那是错的**。`TargetDraft.fingerprint` 只是四个身份 token 的拼接 —— `lark/target.py:44-49` 的 `execution_base_token|execution_table_id|bug_base_token|bug_table_id`，**不含 schema**；schema 存在另一个字段 `LarkTarget.schema_fingerprint`（`models.py:368`），由 `target.py:581` 单独赋值。处方没变，错的是原因与引用。）
    → 唯一正确顺序见 §6：**先 provision 加列 → 重读并重确认 target → 再导入 → 再同步**。
 2. **`_group_case` 用 `GroupCase(**asdict(case))` 直通**（`groups.py:499-505`，另有 `:64`、`:494` 两处 `asdict`）。给 `ParsedCase` 加字段会**直接炸在建组这一步**，必须显式排除。
 
@@ -152,11 +153,11 @@
 ## 6. 线上操作顺序（关键，必须写进 Lark 检查页文案与提示词用法段）
 
 1. 在 Lark 检查页为执行表补齐「实测过程」列（走既有 `修正表头` / `provision`）
-2. 重新读取并确认 target（指纹随 schema 更新）
+2. 重新读取并确认 target（写批准已被上面的结构变更清空，必须重新确认）
 3. 导入 12 列文件（勾选「写入执行结果」）
 4. 点「同步」把 41 个 job 入队
 
-> 顺序颠倒（先同步、后加列）→ 全部 job 因指纹变化被 park，需人工 re-point。见 §1.4。
+> 顺序颠倒（先同步、后加列）→ provision 会清掉写批准，已入队的 job 全部被 park，需人工重新确认目标。见 §1.4。
 
 ---
 
