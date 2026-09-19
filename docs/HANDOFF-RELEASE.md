@@ -80,11 +80,11 @@ cd /home/lucascool/qa-board
 # 1) 和 CI 一致的验证（后端需要一个本地 PostgreSQL 测试库）
 cd backend
 TEST_DATABASE_URL=postgresql+psycopg://testdeck:testdeck@127.0.0.1:5433/testdeck_test \
-  .venv/bin/python -m pytest -q          # 期望 544 passed（v0.1.18；v0.1.17 是 518）
+  .venv/bin/python -m pytest -q          # 期望 547 passed（v0.1.19；v0.1.18 是 544，v0.1.17 是 518）
 cd ../frontend
-npx vitest run                            # 期望 344 passed（31 文件；v0.1.17 是 337）；CI 的 verify 会跑它，见 §26 的抖动修复
-npm run build                             # tsc -b + vite build；产物 index-CTEWkm6u.js / index-D_Bm_Re5.css（v0.1.18），部署后拿来比对
-npx playwright test                       # 期望 37 passed（v0.1.18 实测 37 passed / 11.0s）
+npx vitest run                            # 期望 348 passed（31 文件；v0.1.18 是 344，v0.1.17 是 337）；CI 的 verify 会跑它，见 §26 的抖动修复
+npm run build                             # tsc -b + vite build；产物 index-C7j5CmUn.js / index-D_Bm_Re5.css（v0.1.19），部署后拿来比对
+npx playwright test                       # 期望 37 passed（v0.1.19 实测 37 passed / 11.0s）
 cd ..
 
 # 2) 推送 main 和版本 tag（推送 tag 才会触发镜像发布）
@@ -978,7 +978,7 @@ ALTER TABLE import_tickets SET (
 
 **回滚**：迁移只向前（同 §5）。`0017` 的 `downgrade()` 按代码顺序会先把 `ck_attempts_source` 收紧回 `('execution','reconcile')`，而 Postgres 重建 CHECK 时会校验既有行——**这是读代码得出的推理、本次没有实跑**（见未决项 4：这条回退路径在仓库里零覆盖）：库里只要已有 `import` 行，这一步就会失败；就算它能成功，紧接着的 `drop_column` 也会丢掉导入的实测过程原文。**所以回滚只回镜像、别 downgrade 数据库**：DB 停在 `0017` 对 v0.1.17 的代码是安全的（旧代码不写 `import`，放宽后的 CHECK 仍接受 `execution`/`reconcile`，多出来的列被忽略——同 §5 里 `0011` 那种"只新增列"的情形）。
 
-## 28. v0.1.19：确认写入即自动排入同步、本地结果的不可见状态被消除、一个角色互换守卫（tag `v0.1.19` · 2026-09-19）
+## 28. v0.1.19：确认写入即自动排入同步、本地结果的不可见状态被消除、一个角色互换守卫（**已上线** · tag `v0.1.19` · 2026-09-19）
 
 范围：`git log --oneline v0.1.18..HEAD` 共 **4 条**（其中 `f4a13c3` 是 v0.1.18 自己的收尾文档）；`git diff --shortstat v0.1.18..HEAD` = **11 个文件 / +394 −19**，只看代码是 **9 个文件 / +280 −14**。**本次没有迁移**：`alembic_version` 停在 `0017_attempt_evidence`（v0.1.18 已上），`migrate` 应当是一次空跑。
 
@@ -1032,6 +1032,26 @@ ALTER TABLE import_tickets SET (
 机制（每一跳都在代码里）：`resolve_link` 取链接里指定的表（`target.py:119`）→「执行记录表」槽位 = 缺陷表；缺陷库链接为空时 `suggestBugTable` 又把「缺陷记录表」槽位填成"另一张"= 真正的执行表（`useLarkDraft.ts:306-317`）→ **两个槽位整体互换，页面上没有一句话说这件事**；首次保存因为 `target === null` 时 `identityChanged()` 直接返回 false（`LarkCheck.tsx:185-188`），连确认弹窗都没有；`provision_fields` 只按 role 取表（`provision.py:393`），于是把执行表 schema 写进了缺陷表。
 
 判定：**操作触发，工具没拦，而且工具会自动制造这个错位。** 守卫是补在这一步上的；`resolve_link` 静默取 `tables[0]`、生成表头弹窗不写真实表名（`ProvisionDialog.tsx:254`）这两条仍未改。
+
+### 上线记录（2026-09-19）
+
+- `main` 从 `f4a13c3` 快进到 **`83f42ac`**（4 个提交），tag **`v0.1.19`**；远端 `main` 与 tag 均已推送（`origin` 仍是 https 且无凭据，照例用 SSH 地址推）。
+- CI run [#35425046902](https://github.com/wanglz111/qa-board/actions/runs/35425046902) **success**（`head_sha` = `83f42ace9e81d5cc5842dd2b07c03d048101ea1b`，05:51:06 → 05:53:57）：`verify` 119s success、`publish (api)` success、`publish (web)` success。
+- 镜像 `ghcr.io/wanglz111/qa-board-{api,web}` 的 **`v0.1.19`** 与 **`sha-83f42ace9e81d5cc5842dd2b07c03d048101ea1b`** 都已存在（匿名 `docker manifest inspect` 确认；注意 sha tag 是 **40 位全长**，用短 sha 查会查不到）。
+- 服务器：部署前数据库备份 `backups/backup-2026-09-19-135523.sql.gz`（555056 字节，`gzip -t` 通过），`.env` 由 `deploy.sh` 自动留档；`./deploy.sh v0.1.19`，`migrate` 退出码 **0**（**本次没有新迁移**）。
+
+升级后的实测结果：
+
+| 检查 | 结果 |
+| --- | --- |
+| `docker compose ps` | api（healthy）、worker、web 全部 `ghcr.io/wanglz111/qa-board-*:v0.1.19`，db healthy |
+| `GET /health/ready` | 200 `{"ok":true}`（容器刚起来的瞬间 502，`deploy.sh` 的重试循环随后通过） |
+| 未登录 `GET /api/groups` | **401** |
+| 前端产物 | 线上返回的 bundle = 本地构建的 **`index-C7j5CmUn.js` / `index-D_Bm_Re5.css`**（逐字一致） |
+| 一次性 `migrate` | 退出码 0；`alembic_version` = `0017_attempt_evidence`（与 v0.1.18 相同，本次没有迁移） |
+| 数据完好 | 部署前后一致：`groups` 16、`group_cases` 717、`attempts` 114、`screenshots` 8 |
+
+**仍然待办**：上面那 7 列还没删（Lark 没有删列接口，只能人工），删完记得重新读取并重新确认写入。
 
 ### 已知未做（列出来是为了不自嗨）
 
