@@ -887,9 +887,9 @@ ALTER TABLE import_tickets SET (
 
 ## 27. v0.1.18：一次导入用例 + 实测结果、第三份提示词、执行表新增必填列「实测过程」（**待发布**）
 
-计划与规格：`docs/superpowers/plans/2026-09-19-import-with-results.md`、`docs/superpowers/specs/2026-09-19-import-with-results-design.md`。分支 `feat/import-with-results`，20 个提交 / 39 个文件（`git diff --shortstat main...HEAD` = **+1716 / −87**）——其中 18 个提交是代码与规格；第 19 条 `f2c0ee8` 是本节正文（`git show --numstat` = **85 / 0**，纯追加）；第 20 条（本节之上最后一条）只把「回滚」一段的措辞从"读起来像实测"改成"写明是推理"，并同步了本行的提交计数。
+计划与规格：`docs/superpowers/plans/2026-09-19-import-with-results.md`、`docs/superpowers/specs/2026-09-19-import-with-results-design.md`。**本节写于 `05e3ee6`，当时实测 `git diff --shortstat main...HEAD` = 20 个提交 / 39 个文件 / +1716 −87**（18 条代码与规格 + 2 条本节文档：`f2c0ee8` 新增本节 85 / 0，`05e3ee6` 修正 2 / 2）。**这组快照数字只对 `05e3ee6` 成立**——它之后任何一条提交（包括上游为本次修正补的 spec commit、以及把本节再改一版的那条）都会让它过期，别拿它去核别的点。
 
-> **本节交付时，`feat/import-with-results` 尚未合并、尚未打 tag、尚未构建镜像、尚未部署**：最后一个代码提交是 `5343dad`，本节的文档提交落在它之后、就是分支尖端。发版动作照 §4.1（本地：验证 → 打 tag）、§4.2（Actions：镜像发布）、§4.3 / §4.4 的既有流程走，本节不代跑；也**没有"上线记录"表**（没发生的事不写）。下面那条**四步上线顺序**是功能层面的硬要求，与发版流程是两件事，别混。
+> **本节交付时，`feat/import-with-results` 尚未合并、尚未打 tag、尚未构建镜像、尚未部署**：最后一个**代码**提交是 `5d2c2bf`（`5343dad` 与它之后的几条都只动文档）。发版动作照 §4.1（本地：验证 → 打 tag）、§4.2（Actions：镜像发布）、§4.3 / §4.4 的既有流程走，本节不代跑；也**没有"上线记录"表**（没发生的事不写）。下面那条**四步上线顺序**是功能层面的硬要求，与发版流程是两件事，别混。
 
 ### 这次改了什么
 
@@ -908,11 +908,13 @@ ALTER TABLE import_tickets SET (
    | `执行结果` | attempt | 执行表 |
    |---|---|---|
    | `通过` | 建，`source='import'` | 1 行，结果=通过 |
-   | `不通过` | 建；`note` = 实测过程（**空则拒绝该行**） | 1 行 + 缺陷表 1 行（既有逻辑，`outbox.py:421-440`） |
+   | `不通过` | 建；`note` = 实测过程（**空则整份文件拒绝**） | 1 行 + 缺陷表 1 行（既有逻辑，`outbox.py:421-440`） |
    | `未执行` | 建 | 1 行，结果=未执行 |
    | 空 | **不建** | 不出现，只在 `GroupCase.raw` 留档 |
 
-   `阻塞` 不在导入枚举里 → **明文拒绝**（不静默映射成别的值）。
+   `阻塞` 不在导入枚举里 → **整份文件拒绝**（不静默映射成别的值）。
+
+   **上面这两处拒绝都是"整份文件级"，不是"跳过坏的那一行"**：`groups.py:136`（结果不在枚举）与 `:141`（`不通过` 没带 `实测过程`）都在物化循环里抛 `ImportErrorDetail`，调用方 `db.rollback()` 后回 **422**（`groups.py:214-218`，注释原文 *"Nothing is half-written: the ticket stays usable"*）——组不会建、ticket 不消费、上传的文件还在，改完可以原样重导。**换来的代价必须写清：41 条结果里只要有一条坏（比如某条 `不通过` 漏了 `实测过程` 列），41 行一行都进不去。**
 2. **导入页预览**：检出结果时显示「**检出 N 条执行结果**（其中 M 条仅有过程、将只留档）」+ 勾选框「**一并写入执行结果**」；取消勾选 → 请求体 `import_results=false`，只建用例、不建任何执行记录。
 3. **结果表单**新增「**实测过程**」文本域（`components/OutcomeForm.tsx`，占位文案「观测原文：选择器、实测值、报错原文」），与「控制台输出」**并列两个框、不复用同一个**——过程文本不塞 `控制台`。
 4. **执行历史**：`source='import'` 的行打「**来自导入结果**」徽标（`components/History.tsx:38`）并显示 `evidence`；"哪几行是转译进来的"这条审计线靠 `source` 辨认。
@@ -923,15 +925,21 @@ ALTER TABLE import_tickets SET (
 ### ⚠️ 功能上线顺序（硬要求，四步，照着做）
 
 1. **在「Lark 检查」页为执行表补齐「实测过程」列**（走既有「修正表头」/ provision）。
-2. **重新读取并确认目标**（指纹随 schema 更新）。
+2. **重新读取并确认目标**（上一步的结构变更清空了写批准，必须重新确认）。
 3. **导入 12 列文件**（勾着「一并写入执行结果」）。
 4. **点「同步」**，把 job 入队。
 
-**为什么不能颠倒**：`target_fingerprint` 里含 schema 指纹（`lark/target.py:185-188`），`run_job` 拿 `job.target_fingerprint != target.target_fingerprint` 判定"目标被换过"并 park（`outbox.py:352-361`）。**先入队、后加列 = 已入队的 job 全部 park，要人工重新指向。** 这个顺序也写进了「Lark 检查」页文案与新提示词的用法段。
+**为什么不能颠倒**：provision 补齐列时会**清掉目标的写批准**——创建过字段即把 `confirmed_at` 置空（`lark/provision.py:475-477`，注释原文 *"A structure change invalidates the earlier write approval."*）；而写行只在 `confirmed_at is not None` 时才发生，否则 park（`outbox.py:353-356`）。**先入队、后加列 = 已入队的 job 全部 park（目标未确认），要人工重新确认目标。** 这个顺序也写进了「Lark 检查」页文案与新提示词的用法段。
+
+顺带纠正一个容易记错的地方（spec §1.4 初稿就是这么写错的，上游已用 `c44a00d docs(spec): correct why provisioning parks the queued jobs` 修正）：**`target_fingerprint` 只是目标身份，不含 schema** —— 它由 `lark/target.py:57-59` 把 `execution_base_token | execution_table_id | bug_base_token | bug_table_id` 四个 token 拼起来（token 清单在 `:41-46`）；schema 存在**另一个**字段 `LarkTarget.schema_fingerprint`（`models.py:368`，由 `target.py:581` 单独赋值）。所以本次 park 的原因不是"指纹变了"，而是"批准被清了"；park 判定里那第三项（指纹不等）管的是**换表**，不是加列。
 
 ### 老 target 的影响（有意破窗，不是 bug）
 
-「实测过程」进了 `REQUIRED_RUN_FIELD_TYPES` 之后，**任何没补齐该列的已确认目标都会报「缺少必填字段「实测过程」」并拒绝建行**，直到 provision 完成。这是**故意的**：不设成必填，写端就会往一张没有该列的表里写这个键，create 直接失败——那时报错发生在同步时、离原因更远。**升级后看到这条红字，按上面第 1、2 步补齐再同步，不要去关校验。**
+「实测过程」进了 `REQUIRED_RUN_FIELD_TYPES` 之后，**「Lark 检查」页在重读 / 重新确认目标时会报「缺少必填字段「实测过程」」并回 409**（文案在 `lark/fields.py:112`，抛出点是 `lark/target.py:636-640`）。
+
+**但"拒绝建行"这一步不会发生——建行根本不看 schema。** 入队只要求 `confirmed_at` 非空（`lark/outbox.py:122-146`），`实测过程` 是真正写行时才进请求的（`lark/write.py:126-129`，**永远是空串、不是缺键**）。所以**一个仍处于已确认状态的旧目标照样会入队**：行会在写 Lark 那一步失败（请求里带了一张没有的列），重试超过 `MAX_RETRIES = 5`（`outbox.py:44`、`:250-251`）后 job 变 `failed`。**结论：补齐列之前不要同步**——这不是"点了会红"，是"点下去这一组行会一路失败到底"。
+
+这也是把它设成必填的理由：不设，检查页不会出现这条红字，同样的失败只会以 `create_execution_failed`（外加 `last_error` 里的 Lark 原文）的形式出现在同步队列里，离原因更远。**升级后看到这条红字，按上面第 1、2 步补齐再同步，不要去关校验。**
 
 ### 真实的 0918 那批怎么用（50 / 41 / 9）
 
@@ -946,7 +954,7 @@ ALTER TABLE import_tickets SET (
 
 ### 测试保护的真实边界（别把"有测试"说成"自动门"）
 
-在分支尖端 `5343dad` 自己复跑（不是转述兄弟任务的数字）：
+在 `5d2c2bf`（本节之上最后一个**代码**提交）的代码上自己复跑（不是转述兄弟任务的数字）：
 
 | 套件 | 结果 | 在 CI 里吗 |
 |---|---|---|
