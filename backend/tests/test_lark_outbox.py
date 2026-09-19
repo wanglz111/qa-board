@@ -14,7 +14,9 @@ from app.lark.outbox import (
     EVIDENCE_SETTLE_SECONDS,
     claim_next_job,
     enqueue_attempt_job,
+    enqueue_group_attempts,
     hold_job_for_evidence,
+    read_sync,
     retry_failed_jobs,
     run_job,
 )
@@ -1640,3 +1642,27 @@ def test_a_screenshot_after_the_row_is_written_is_left_alone(
     db_session.expire_all()
     job = _job(db_session, failed_attempt)
     assert (job.state, job.next_retry_at) == (synced_state, synced_due)
+
+
+def test_enqueue_group_attempts_includes_imported_rows(
+    db_session, confirmed_group, add_case
+):
+    case = add_case(confirmed_group.id, code="B-002", title="导入的通过")
+    db_session.add(
+        Attempt(
+            group_case=case,
+            label="B-002",
+            sequence=1,
+            state="committed",
+            result="通过",
+            evidence="1. 实测 1.2s",
+            source="import",
+            idempotency_key="import:deadbeef:B-002",
+        )
+    )
+    db_session.commit()
+
+    assert enqueue_group_attempts(db_session, confirmed_group.id) == 1
+    # 面板的"待同步"计数读的是同一个白名单，漏改这里就会出现"队列 0 条、
+    # 却显示还有 1 条待同步"。
+    assert read_sync(confirmed_group.id, db_session)["pending_attempts"] == 1

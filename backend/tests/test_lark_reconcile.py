@@ -7,7 +7,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.lark.reconcile import reconcile_rows
-from app.models import Attempt, ReconcileMark, SyncJob
+from app.models import Attempt, GroupCase, ReconcileMark, SyncJob
 
 
 def _local(
@@ -233,6 +233,31 @@ def test_the_diff_ignores_attempts_that_came_from_the_table(
     # The adopted copy mirrors the table, so it must not become a "local" row
     # that then looks like it is missing from Lark.
     assert [row["key"] for row in body["rows"]] == ["B-001"]
+    assert body["rows"][0]["status"] == "local_only"
+
+
+def test_the_diff_counts_imported_attempts_as_local(
+    lark_fake, authenticated_client, confirmed_group, db_session
+):
+    from app.execution import allocate_attempt
+
+    case = authenticated_client.get(f"/api/groups/{confirmed_group.id}/cases").json()[0]
+    group_case = db_session.scalar(select(GroupCase).where(GroupCase.code == case["code"]))
+    attempt = allocate_attempt(db_session, group_case)
+    attempt.state = "committed"
+    attempt.result = "通过"
+    attempt.source = "import"
+    attempt.idempotency_key = f"import:deadbeef:{group_case.code}"
+    db_session.commit()
+    lark_fake.records = []
+
+    body = authenticated_client.get(
+        f"/api/groups/{confirmed_group.id}/reconcile?source=live"
+    ).json()
+
+    # 导入的行是本工具的产物，不是从表里借来的：它必须出现在本地侧，
+    # 否则"Lark 里少了这一行"这类真实差异会被静默吃掉。
+    assert [row["key"] for row in body["rows"]] == [group_case.code]
     assert body["rows"][0]["status"] == "local_only"
 
 

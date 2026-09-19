@@ -19,6 +19,7 @@ from app.lark.client import LarkClient, LarkError, get_lark_client
 from app.lark.history import parse_case_reference, record_case_text, record_fields
 from app.lark.target import LarkTarget, target_for
 from app.models import (
+    LOCAL_SOURCES,
     Attempt,
     Group,
     GroupCase,
@@ -240,7 +241,7 @@ def _attempts(db: Session, group_id: UUID) -> list[Attempt]:
         db.scalars(
             select(Attempt)
             .join(GroupCase, Attempt.group_case_id == GroupCase.id)
-            .where(GroupCase.group_id == group_id, Attempt.source == "execution")
+            .where(GroupCase.group_id == group_id, Attempt.source.in_(LOCAL_SOURCES))
             .order_by(Attempt.created_at, Attempt.sequence)
         ).all()
     )
@@ -423,7 +424,7 @@ def _delete_local(
 
     locked = db.scalar(
         select(Attempt.id)
-        .where(Attempt.id == attempt_id, Attempt.source == "execution")
+        .where(Attempt.id == attempt_id, Attempt.source.in_(LOCAL_SOURCES))
         .with_for_update()
     )
     if locked is None:

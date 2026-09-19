@@ -25,6 +25,7 @@ from app.lark.write import (
     execution_fields,
 )
 from app.models import (
+    LOCAL_SOURCES,
     Attempt,
     Group,
     GroupCase,
@@ -127,7 +128,7 @@ def enqueue_attempt_job(db: Session, attempt: Attempt) -> SyncJob | None:
     # A row adopted from the table already exists there, so it is never queued.
     if (
         attempt.state != "committed"
-        or attempt.source != "execution"
+        or attempt.source not in LOCAL_SOURCES
         or target is None
         or target.confirmed_at is None
     ):
@@ -184,7 +185,7 @@ def enqueue_group_attempts(db: Session, group_id: UUID) -> int:
         .where(
             GroupCase.group_id == group_id,
             Attempt.state == "committed",
-            Attempt.source == "execution",
+            Attempt.source.in_(LOCAL_SOURCES),
         )
     ).all()
     if not attempt_ids:
@@ -526,7 +527,7 @@ def read_sync(group_id: UUID, db: Annotated[Session, Depends(get_db)]) -> dict[s
         .where(
             GroupCase.group_id == group_id,
             Attempt.state == "committed",
-            Attempt.source == "execution",
+            Attempt.source.in_(LOCAL_SOURCES),
         )
     )
     counts = sync_counts(db, group_id)
