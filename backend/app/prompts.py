@@ -27,6 +27,13 @@ PROMPTS: tuple[dict[str, Any], ...] = (
         "filename": "AI-CASEBOOK-PROMPT.md",
         "path": PROMPT_DIR / "ai-casebook.md",
     },
+    {
+        "id": "case-results",
+        "title": "已有用例 + 实测结果 → 可导入格式",
+        "summary": "把已经跑过一轮的用例连同结果与实测过程一起转译成可导入文件，通过的带结果入库，没结论的留空。",
+        "filename": "AI-CASE-RESULT-PROMPT.md",
+        "path": PROMPT_DIR / "ai-case-results.md",
+    },
 )
 
 router = APIRouter(prefix="/api", dependencies=[Depends(require_admin)])

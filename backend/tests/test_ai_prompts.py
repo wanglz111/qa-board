@@ -21,7 +21,7 @@ def test_prompts_endpoint_serves_both_documents(authenticated_client):
 
     assert response.status_code == 200
     prompts = response.json()
-    assert [prompt["id"] for prompt in prompts] == ["cases", "casebook"]
+    assert [prompt["id"] for prompt in prompts] == ["cases", "casebook", "case-results"]
     for prompt in prompts:
         assert prompt["title"]
         assert prompt["summary"]
