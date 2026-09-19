@@ -75,14 +75,23 @@ def test_format_doc_embeds_the_same_schema():
     )
 
 
-def test_the_shipped_prompt_golden_sample_still_parses():
+FENCE = re.compile(r"```(?:csv)?\n(?P<body>.*?)```", re.DOTALL)
+
+
+def test_every_shipped_sample_in_the_prompt_still_parses():
     from app.importers.schema import parse_file
 
-    for prompt in PROMPTS:
-        if prompt["id"] != "case-results":
-            continue
-        block = re.findall(r"```csv\n(.*?)```", prompt["path"].read_text(encoding="utf-8"), re.DOTALL)
-        assert block, "the prompt must ship a csv fence"
-        cases = parse_file("golden.csv", block[-1].encode("utf-8"))
+    prompt = next(entry for entry in PROMPTS if entry["id"] == "case-results")
+    blocks = [
+        match.group("body")
+        for match in FENCE.finditer(prompt["path"].read_text(encoding="utf-8"))
+        # 只认带数据行的围栏：第 32 行那个只有表头的围栏是「第一行必须是这个表头」
+        # 的片段，不是样例文件（它解析出来 0 条，会报 "No test case boundaries"）。
+        if match.group("body").lstrip().startswith("用例编号,")
+        and len(match.group("body").strip().splitlines()) > 1
+    ]
+    assert len(blocks) == 2, "提示词里有两份样例，两份都要能被解析"
+    for index, block in enumerate(blocks, start=1):
+        cases = parse_file(f"sample-{index}.csv", block.encode("utf-8"))
         assert [case.code for case in cases] == ["LOGIN-001", "LOGIN-002", "LOGIN-003"]
         assert [case.result for case in cases] == ["通过", None, "不通过"]
