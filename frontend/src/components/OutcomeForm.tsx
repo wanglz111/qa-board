@@ -22,6 +22,10 @@ export type SaveStatus = {
 export type OutcomeFormHandle = {
   setResult: (result: AttemptResult) => void;
   focusNote: () => void;
+  // The 实测过程 as it stands right now, for a caller that saves without going
+  // through this form's own submit — the keyboard quick save. Same shape as
+  // `setResult`/`focusNote`: the form owns the field, the caller only asks.
+  evidence: () => string;
   // Clears the five fields this form owns (result / note / console / evidence /
   // validation).
   // Attachments and the save status belong to the caller: they survive a reset on
@@ -118,6 +122,7 @@ export const OutcomeForm = forwardRef<OutcomeFormHandle, Props>(function Outcome
       setValidation("");
     },
     focusNote: () => noteInput.current?.focus(),
+    evidence: () => evidence,
     reset: () => {
       setResult(null);
       setNote("");

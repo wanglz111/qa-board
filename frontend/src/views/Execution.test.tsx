@@ -309,6 +309,28 @@ it("sends null, never an empty string, when the 实测过程 was left blank", as
   expect(submit.mock.calls[0][2].evidence).toBeNull();
 });
 
+it("ships the 实测过程 typed into the form when the Enter shortcut saves", async () => {
+  const { submit } = renderExecution({ initialGroupId: "0918-id" });
+
+  await screen.findByRole("button", { name: "通过" });
+  await userEvent.type(screen.getByLabelText("实测过程"), "1. 实测遮罩 rgba(0,0,0,.65)");
+  // The shortcut is deliberately inert while a field owns focus, so the real
+  // gesture is: type the observation, leave the field, press Enter.
+  screen.getByLabelText("实测过程").blur();
+  await userEvent.keyboard("{Enter}");
+  await waitFor(() => expect(submit).toHaveBeenCalledTimes(1));
+
+  // The keyboard save used to hand-build `{ result, note: null, consoleText:
+  // null }` without reading the form, so this text never left the browser while
+  // the desk still reported 「已保存」.
+  expect(submit.mock.calls[0][2]).toMatchObject({
+    result: "通过",
+    note: null,
+    console_text: null,
+    evidence: "1. 实测遮罩 rgba(0,0,0,.65)"
+  });
+});
+
 it("mints a new idempotency key when only the 实测过程 changed", async () => {
   const { submit } = renderExecution({ initialGroupId: "0918-id" });
 

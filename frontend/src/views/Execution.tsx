@@ -559,7 +559,18 @@ export function ExecutionView({
   function quickSave(result: AttemptResult) {
     if (submitting || !cases[caseIndex]) return;
     formRef.current?.setResult(result);
-    void save({ result, note: null, consoleText: null });
+    // 实测过程 is read back from the form: the operator typed it, so a quick save
+    // that shipped `undefined` dropped it silently while the desk still said
+    // 「已保存」. `note` and `consoleText` stay null on this path on purpose —
+    // the failure shortcut opens the note field instead of submitting, and the
+    // console dump belongs to the explicit save.
+    const evidence = formRef.current?.evidence() ?? "";
+    void save({
+      result,
+      note: null,
+      consoleText: null,
+      evidence: evidence.trim() === "" ? null : evidence
+    });
   }
 
   function revealFailure() {

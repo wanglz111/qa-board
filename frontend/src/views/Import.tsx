@@ -153,7 +153,7 @@ export function ImportView({ preview, confirm, onImported, loadPrompts }: Props)
                     {(item.preview.result_count ?? 0) > 0 ? (
                       <span className="preview-results">
                         {` · 检出 ${item.preview.result_count} 条执行结果`}
-                        {item.preview.evidence_only_count
+                        {(item.preview.evidence_only_count ?? 0) > 0
                           ? `（其中 ${item.preview.evidence_only_count} 条仅有过程、将只留档）`
                           : ""}
                       </span>

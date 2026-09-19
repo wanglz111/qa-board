@@ -231,10 +231,12 @@ def reconcile_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
 
 
 def _attempts(db: Session, group_id: UUID) -> list[Attempt]:
-    """Only executed attempts take part in the diff.
+    """Only the rows this tool owns take part in the diff.
 
-    A row adopted from the table mirrors the table, so comparing it with the
-    table would always agree and would drown out the real differences.
+    That is exactly ``LOCAL_SOURCES`` — ``execution`` plus ``import``. A row
+    whose source is ``reconcile`` was adopted from the table and mirrors it, so
+    comparing it with the table would always agree and would drown out the real
+    differences.
     """
 
     return list(

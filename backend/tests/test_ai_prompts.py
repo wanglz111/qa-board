@@ -95,3 +95,57 @@ def test_every_shipped_sample_in_the_prompt_still_parses():
         cases = parse_file(f"sample-{index}.csv", block.encode("utf-8"))
         assert [case.code for case in cases] == ["LOGIN-001", "LOGIN-002", "LOGIN-003"]
         assert [case.result for case in cases] == ["通过", None, "不通过"]
+
+
+# The prompt states the alias lists as hard constraints ("give two columns for the
+# same field and the whole file is rejected"), but they are hand-maintained prose:
+# `ALIASES` is the only authority. They have drifted once already (a doc listing
+# three aliases while the importer accepted four), so the two lists are now
+# cross-checked instead of eyeballed.
+ALIAS_LIST = re.compile(
+    r"`(?P<label>[^`]+)` 的(?P<count>[一二两三四五六七八九十])个别名"
+    r"（(?P<aliases>[^）]*)）"
+)
+NUMERALS = {
+    "一": 1,
+    "二": 2,
+    "两": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+    "十": 10,
+}
+
+
+def test_the_prompt_alias_lists_match_the_importer():
+    from app.importers.schema import ALIASES
+
+    prompt = next(entry for entry in PROMPTS if entry["id"] == "case-results")
+    text = prompt["path"].read_text(encoding="utf-8")
+
+    documented = {
+        match.group("label").strip(): (
+            NUMERALS[match.group("count")],
+            set(re.findall(r"`([^`]+)`", match.group("aliases"))),
+        )
+        for match in ALIAS_LIST.finditer(text)
+    }
+
+    assert set(documented) == {"执行结果", "实测过程"}, (
+        "the prompt no longer states the two alias lists in the expected shape — "
+        f"rewording them means rewording this test, matched: {sorted(documented)}"
+    )
+    for label, canonical in (("执行结果", "result"), ("实测过程", "evidence")):
+        stated_count, listed = documented[label]
+        assert listed == set(ALIASES[canonical]), (
+            f"the prompt's {label} aliases {sorted(listed)} disagree with "
+            f"ALIASES[{canonical!r}] {sorted(ALIASES[canonical])}"
+        )
+        # "四个别名" must be true as well: the list can grow, the sentence cannot
+        # silently keep claiming a count it no longer has.
+        assert stated_count == len(listed)
+
