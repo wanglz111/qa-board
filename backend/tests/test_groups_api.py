@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from uuid import UUID
 
 from sqlalchemy import select
 
@@ -502,3 +503,47 @@ def test_a_rejected_result_rolls_back_whole_and_leaves_the_ticket_usable(
     )
     assert retry.status_code == 201, retry.text
     assert retry.json()["count"] == 3
+
+
+def test_the_same_file_with_results_can_be_imported_again(
+    authenticated_client, db_session
+):
+    """同一份文件再导一次是既有契约：预览只警告，两个组各管自己的执行记录。
+
+    执行记录的幂等键若只由文件哈希决定，两个组就会撞同一把键——第二次确认
+    直接变成未捕获的唯一约束冲突，而不是这里断言的第二次 201。
+    """
+
+    _, first = import_with_results(authenticated_client, name="第一次")
+
+    second_preview = authenticated_client.post(
+        "/api/import/preview",
+        files={"file": ("outcomes.csv", THREE_OUTCOMES.encode("utf-8"), "text/csv")},
+    )
+    assert second_preview.json()["warnings"] == ["This file was imported before"]
+    second = authenticated_client.post(
+        "/api/import/confirm",
+        json={"ticket_id": second_preview.json()["ticket_id"], "name": "第二次"},
+    )
+
+    assert first.status_code == 201, first.text
+    assert second.status_code == 201, second.text
+    assert first.json()["id"] != second.json()["id"]
+    assert first.json()["attempt_count"] == 2
+    assert second.json()["attempt_count"] == 2
+
+    per_group: dict[str, list[tuple[str, str]]] = {}
+    for group in (first.json(), second.json()):
+        rows = db_session.execute(
+            select(Attempt.label, Attempt.idempotency_key)
+            .join(GroupCase, Attempt.group_case_id == GroupCase.id)
+            .where(GroupCase.group_id == UUID(group["id"]))
+            .order_by(Attempt.label)
+        ).all()
+        assert [label for label, _ in rows] == ["B-001", "B-003"]
+        per_group[group["id"]] = rows
+
+    # 每组自己那份键，两个组之间一把都不共享。
+    first_keys = {key for _, key in per_group[first.json()["id"]]}
+    second_keys = {key for _, key in per_group[second.json()["id"]]}
+    assert first_keys.isdisjoint(second_keys)

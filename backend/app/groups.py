@@ -117,7 +117,7 @@ IMPORT_RESULTS = ("通过", "不通过", "未执行")
 
 
 def _materialize_attempts(
-    db: Session, group_cases: list[GroupCase], parsed_cases: list[ParsedCase], source_sha256: str
+    db: Session, group_cases: list[GroupCase], parsed_cases: list[ParsedCase], group_id: UUID
 ) -> int:
     """Turn every row that carries a conclusion into a committed attempt.
 
@@ -146,9 +146,12 @@ def _materialize_attempts(
         attempt.console_text = None
         attempt.evidence = evidence
         attempt.source = "import"
-        # Derived from the file itself, so replaying the same upload can never
-        # mint a second batch of attempts.
-        attempt.idempotency_key = f"import:{source_sha256}:{case.code}"
+        # Scoped to the group, never to the file: a repeat import is only a
+        # warning the operator may accept, and it makes a second group with its
+        # own records. Keying on the file hash instead would make both groups
+        # mint the same key, so the second confirm would die on the unique
+        # constraint instead of creating the group that contract promises.
+        attempt.idempotency_key = f"import:{group_id}:{case.code}"
         created += 1
     return created
 
@@ -206,7 +209,7 @@ def confirm_import(
     if payload.import_results and parsed_cases:
         try:
             attempt_count = _materialize_attempts(
-                db, group_cases, parsed_cases, ticket.file_sha256
+                db, group_cases, parsed_cases, group_id
             )
         except ImportErrorDetail as error:
             # Nothing is half-written: the ticket stays usable and the operator
