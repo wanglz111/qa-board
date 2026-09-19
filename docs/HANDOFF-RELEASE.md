@@ -80,11 +80,11 @@ cd /home/lucascool/qa-board
 # 1) 和 CI 一致的验证（后端需要一个本地 PostgreSQL 测试库）
 cd backend
 TEST_DATABASE_URL=postgresql+psycopg://testdeck:testdeck@127.0.0.1:5433/testdeck_test \
-  .venv/bin/python -m pytest -q          # 期望 518 passed（v0.1.17）
+  .venv/bin/python -m pytest -q          # 期望 544 passed（v0.1.18；v0.1.17 是 518）
 cd ../frontend
-npx vitest run                            # 期望 337 passed（31 文件）；CI 的 verify 会跑它，见 §26 的抖动修复
-npm run build                             # tsc -b + vite build；产物 index-BpPhBQGX.js / index-DnO6G41C.css，部署后拿来比对
-npx playwright test                       # 期望 37 passed
+npx vitest run                            # 期望 344 passed（31 文件；v0.1.17 是 337）；CI 的 verify 会跑它，见 §26 的抖动修复
+npm run build                             # tsc -b + vite build；产物 index-CTEWkm6u.js / index-D_Bm_Re5.css（v0.1.18），部署后拿来比对
+npx playwright test                       # 期望 37 passed（v0.1.18 实测 37 passed / 11.0s）
 cd ..
 
 # 2) 推送 main 和版本 tag（推送 tag 才会触发镜像发布）
@@ -885,7 +885,7 @@ ALTER TABLE import_tickets SET (
 
 **这个 checkout 里 Playwright 报的是「编译后」的行号，不是源文件行号。** `--list` 会说 `e2e/lark-check.spec.ts:592`，而源码里这个用例在第 `428` 行（对着 `/tmp/playwright-transform-cache-*/` 的产物核过）。所以：**不要拿 Playwright 输出里的行号去 grep 源码**。我在开工前的基线核对里踩到过一次，Task 7 的实现者独立复现了同一现象。
 
-## 27. v0.1.18：一次导入用例 + 实测结果、第三份提示词、执行表新增必填列「实测过程」（**待发布**）
+## 27. v0.1.18：一次导入用例 + 实测结果、第三份提示词、执行表新增必填列「实测过程」（**已发布** · tag `v0.1.18` · 2026-09-19）
 
 计划与规格：`docs/superpowers/plans/2026-09-19-import-with-results.md`、`docs/superpowers/specs/2026-09-19-import-with-results-design.md`。**本节写于 `05e3ee6`，当时实测 `git diff --shortstat main...HEAD` = 20 个提交 / 39 个文件 / +1716 −87**（18 条代码与规格 + 2 条本节文档：`f2c0ee8` 新增本节 85 / 0，`05e3ee6` 修正 2 / 2）。**这组数字是「测到它的那个提交」`05e3ee6` 的快照，不是分支尖端的**：此后又追加了若干文档提交（把本节再改一版的、上游补 spec 更正的那条、整支终审的修复波），**需要精确计数时以 `git log --oneline 8c22f0c..HEAD`（要行数就用 `git diff --shortstat 8c22f0c..HEAD`）为准**，别拿这组数去核别的点。
 
