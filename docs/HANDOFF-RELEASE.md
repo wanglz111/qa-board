@@ -887,7 +887,7 @@ ALTER TABLE import_tickets SET (
 
 ## 27. v0.1.18：一次导入用例 + 实测结果、第三份提示词、执行表新增必填列「实测过程」（**待发布**）
 
-计划与规格：`docs/superpowers/plans/2026-09-19-import-with-results.md`、`docs/superpowers/specs/2026-09-19-import-with-results-design.md`。**本节写于 `05e3ee6`，当时实测 `git diff --shortstat main...HEAD` = 20 个提交 / 39 个文件 / +1716 −87**（18 条代码与规格 + 2 条本节文档：`f2c0ee8` 新增本节 85 / 0，`05e3ee6` 修正 2 / 2）。**这组快照数字只对 `05e3ee6` 成立**——它之后任何一条提交（包括上游为本次修正补的 spec commit、以及把本节再改一版的那条）都会让它过期，别拿它去核别的点。
+计划与规格：`docs/superpowers/plans/2026-09-19-import-with-results.md`、`docs/superpowers/specs/2026-09-19-import-with-results-design.md`。**本节写于 `05e3ee6`，当时实测 `git diff --shortstat main...HEAD` = 20 个提交 / 39 个文件 / +1716 −87**（18 条代码与规格 + 2 条本节文档：`f2c0ee8` 新增本节 85 / 0，`05e3ee6` 修正 2 / 2）。**这组数字是「测到它的那个提交」`05e3ee6` 的快照，不是分支尖端的**：此后又追加了若干文档提交（把本节再改一版的、上游补 spec 更正的那条、整支终审的修复波），**需要精确计数时以 `git log --oneline 8c22f0c..HEAD`（要行数就用 `git diff --shortstat 8c22f0c..HEAD`）为准**，别拿这组数去核别的点。
 
 > **本节交付时，`feat/import-with-results` 尚未合并、尚未打 tag、尚未构建镜像、尚未部署**：最后一个**代码**提交是 `5d2c2bf`（`5343dad` 与它之后的几条都只动文档）。发版动作照 §4.1（本地：验证 → 打 tag）、§4.2（Actions：镜像发布）、§4.3 / §4.4 的既有流程走，本节不代跑；也**没有"上线记录"表**（没发生的事不写）。下面那条**四步上线顺序**是功能层面的硬要求，与发版流程是两件事，别混。
 
@@ -929,13 +929,13 @@ ALTER TABLE import_tickets SET (
 3. **导入 12 列文件**（勾着「一并写入执行结果」）。
 4. **点「同步」**，把 job 入队。
 
-**为什么不能颠倒**：provision 补齐列时会**清掉目标的写批准**——创建过字段即把 `confirmed_at` 置空（`lark/provision.py:475-477`，注释原文 *"A structure change invalidates the earlier write approval."*）；而写行只在 `confirmed_at is not None` 时才发生，否则 park（`outbox.py:353-356`）。**先入队、后加列 = 已入队的 job 全部 park（目标未确认），要人工重新确认目标。** 这个顺序也写进了「Lark 检查」页文案与新提示词的用法段。
+**为什么不能颠倒**：provision 补齐列时会**清掉目标的写批准**——创建过字段即把 `confirmed_at` 置空（`lark/provision.py:472-474`，注释原文 *"A structure change invalidates the earlier write approval."*）；而写行只在 `confirmed_at is not None` 时才发生，否则 park（`outbox.py:352-359`）。**先入队、后加列 = 已入队的 job 全部 park（目标未确认），要人工重新确认目标。** 这个顺序也写进了「Lark 检查」页文案与新提示词的用法段。
 
 顺带纠正一个容易记错的地方（spec §1.4 初稿就是这么写错的，上游已用 `c44a00d docs(spec): correct why provisioning parks the queued jobs` 修正）：**`target_fingerprint` 只是目标身份，不含 schema** —— 它由 `lark/target.py:57-59` 把 `execution_base_token | execution_table_id | bug_base_token | bug_table_id` 四个 token 拼起来（token 清单在 `:41-46`）；schema 存在**另一个**字段 `LarkTarget.schema_fingerprint`（`models.py:368`，由 `target.py:581` 单独赋值）。所以本次 park 的原因不是"指纹变了"，而是"批准被清了"；park 判定里那第三项（指纹不等）管的是**换表**，不是加列。
 
 ### 老 target 的影响（有意破窗，不是 bug）
 
-「实测过程」进了 `REQUIRED_RUN_FIELD_TYPES` 之后，**「Lark 检查」页在重读 / 重新确认目标时会报「缺少必填字段「实测过程」」并回 409**（文案在 `lark/fields.py:112`，抛出点是 `lark/target.py:636-640`）。
+「实测过程」进了 `REQUIRED_RUN_FIELD_TYPES` 之后，**「Lark 检查」页重读目标时就会在响应体里给出「缺少必填字段「实测过程」」**——`POST /lark/table-schema` 本身**回 200**，缺列消息放在响应体的 `schema_errors` 里（`lark/target.py:296-311`）；**只有重新确认目标时才被整条拒绝、回 409**（抛出点 `lark/target.py:636-640`，文案在 `lark/fields.py:112`）。
 
 **但"拒绝建行"这一步不会发生——建行根本不看 schema。** 入队只要求 `confirmed_at` 非空（`lark/outbox.py:122-146`），`实测过程` 是真正写行时才进请求的（`lark/write.py:126-129`，**永远是空串、不是缺键**）。所以**一个仍处于已确认状态的旧目标照样会入队**：行会在写 Lark 那一步失败（请求里带了一张没有的列），重试超过 `MAX_RETRIES = 5`（`outbox.py:44`、`:250-251`）后 job 变 `failed`。**结论：补齐列之前不要同步**——这不是"点了会红"，是"点下去这一组行会一路失败到底"。
 

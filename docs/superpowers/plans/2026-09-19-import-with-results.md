@@ -154,7 +154,7 @@ FIELDS = (
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `cd backend && TEST_DATABASE_URL='postgresql+psycopg://testdeck:testdeck@127.0.0.1:5433/testdeck_test' .venv/bin/python -m pytest -q tests/test_importers.py`
-Expected: PASS（含既有 20 个用例）
+Expected: PASS（含既有 22 个用例）
 
 - [ ] **Step 5: 写回归测试确认建组会炸** — 在 `backend/tests/test_groups_api.py` 追加：
 
@@ -763,8 +763,11 @@ def test_the_diff_counts_imported_attempts_as_local(
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `cd backend && TEST_DATABASE_URL='postgresql+psycopg://testdeck:testdeck@127.0.0.1:5433/testdeck_test' .venv/bin/python -m pytest -q tests/test_lark_outbox.py -k imported_rows tests/test_lark_reconcile.py -k imported_attempts`
-Expected: FAIL — 计数为 0 / `body["rows"] == []`
+Run: `cd backend && TEST_DATABASE_URL='postgresql+psycopg://testdeck:testdeck@127.0.0.1:5433/testdeck_test' .venv/bin/python -m pytest -q tests/test_lark_outbox.py -k imported_rows`
+Run: `cd backend && TEST_DATABASE_URL='postgresql+psycopg://testdeck:testdeck@127.0.0.1:5433/testdeck_test' .venv/bin/python -m pytest -q tests/test_lark_reconcile.py -k imported_attempts`
+Expected: FAIL — **两条命令都要红**（计数为 0 / `body["rows"] == []`）
+
+> **实施期修正（整支终审 C2）**：原文把两个 `-k` 塞进同一条 pytest 命令（`… tests/test_lark_outbox.py -k imported_rows tests/test_lark_reconcile.py -k imported_attempts`）。**pytest 只取最后一个 `-k`**，前一个被静默丢掉——实测这条命令是 `1/111 collected (110 deselected)`，`test_enqueue_group_attempts_includes_imported_rows` **从来没有被收集**；而 `tests/test_lark_reconcile.py -k imported_attempts` 单独命中的那一条本来就是红的，于是这条空转的命令照样满足 "Expected: FAIL"。两个 `-k` 必须拆成两条命令，且两条都要亲眼看到红。
 
 - [ ] **Step 3: 实现** — 五处过滤改用常量
 
@@ -893,7 +896,7 @@ Expected: FAIL — `KeyError: '实测过程'`
         "实测过程": attempt.evidence or "",
 ```
 
-- [ ] **Step 4: 修它拉动的四处断言**
+- [ ] **Step 4: 修它拉动的六处断言**（实施期修正：原文写"四处"，实际 6 处——多出下面第 5、6 条）
 
 `backend/tests/conftest.py:775-779`：
 
@@ -927,6 +930,12 @@ FIXTURE_SCHEMA_FINGERPRINT = (
             "用例", "结果", "优先级", "负责人", "截图", "控制台", "报告人", "日期", "实测过程",
         ],
 ```
+
+**第 5 处** —— `backend/tests/test_lark_provision.py:808` `test_the_retype_plan_is_empty_for_the_reference_schema` 的**参考表夹具**：假表的字段字典里要补 `"实测过程": 1`（现在落在 `:821`），否则"参考表已经齐了、retype 计划应为空"的断言不再成立。
+
+**第 6 处** —— 同文件 rebuild 的**列序断言** `assert [field["field_name"] for field in created["fields"]] == [...]`（`:1044-1054`）：`创建表` 的字段名列表里要补 `"实测过程"`（现在落在 `:1053`，排在 `日期` 之后，与 `fields.py` 的 `RUN_SCHEMA` 次序一致）。
+
+> **实施期修正（整支终审 C3）**：原文写"四处"，实际 6 处。多出的这两处不叫"断言"也会红——它们靠**夹具与列序**间接读 `REQUIRED`：漏掉第 5 处，retype 计划会把新列算成待补列；漏掉第 6 处，重建出的表列序与 `RUN_SCHEMA` 对不上。当时的派活只点了四处，这两处是执行者自己扫出来的，派活文本同样要补齐，否则照这份计划重跑还会漏。**引法以函数名/断言原文为准**：评审快照里的行号（`:814`/`:818`、`:1050`）在 Task 5 改过该文件后已经位移。
 
 - [ ] **Step 5: 跑测试确认通过**
 
@@ -1231,7 +1240,7 @@ LOGIN-003,3,账号为空登录,登录,P2,Core,,user= 留空,"1. 打开登录页
 | `实测过程` 写「验证通过」「功能正常」 | 判断词不是观测，复验时没有任何可核对的信息 |
 | `不通过` 的行 `实测过程` 留空 | 导入端拒绝；失败必须带观测原文 |
 | 把实测插注留在「预期结果」里 | 预期结果是设计稿口径、`实测过程` 是实测口径，混在一起后两列都不可信 |
-| `优先级` / `执行分层` 整列留空或写中文分层 | 落成默认值或丢失；必须逐行、英文枚举 |
+| `优先级` / `执行分层` 整列留空或写中文（如 `高`、`冒烟层`） | 都不会报错：`优先级` 会落成默认 `P2`；`执行分层` 写中文会**原样进库**（导入端不校验枚举），和 casebook 包里的英文枚举变成两种写法——不是「丢失」；所以两列必须逐行、英文枚举 |
 | 过程文本里塞图片、base64、图片链接 | 导入文件不认图片；图片在「执行结果」里单独上传 |
 | 按结果重排用例顺序 | `执行顺序` 必须跟原文一致，重排后与原始交付物无法逐条对账 |
 ````

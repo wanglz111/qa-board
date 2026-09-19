@@ -179,4 +179,4 @@ odyssey-casebook.zip
 `执行结果` 非空的行，在「确认导入」时生成一条**执行记录**（结果 + 实测过程），随后走既有的「同步」把它写进 Lark 执行表。
 `执行结果` 留空的行**只建用例**：界面里它是未测，Lark 里不会出现这一行——这正是「先导通过的、失败的留白等人亲自复验」的用法。
 
-顺序要求：如果 Lark 执行表还没有「实测过程」列，**先在 Lark 检查页补齐并重新确认目标，再导入、再同步**。反过来（先同步后加列）会让已入队的行因目标指纹变化全部挂起，需要人工重新指向。
+顺序要求：如果 Lark 执行表还没有「实测过程」列，**先在 Lark 检查页补齐并重新确认目标，再导入、再同步**。反过来（先同步后加列）会让已入队的行**全部挂起**：provision 补列时创建过字段就会**清掉目标的写批准**（`lark/provision.py:472-474`，创建过字段即 `confirmed_at = None`，注释原文 *"A structure change invalidates the earlier write approval."*），而写行只在目标已确认时才发生，否则 park（`lark/outbox.py:352-359`），所以必须人工重新确认目标。**挂起的原因是「写批准被清了」，不是「目标指纹变了」**：`target_fingerprint` 只是目标身份（`execution_base_token|execution_table_id|bug_base_token|bug_table_id` 四个 token 的拼接，`lark/target.py:57-59`），**不含 schema**；schema 存在另一个字段 `LarkTarget.schema_fingerprint`（`models.py:368`）里。

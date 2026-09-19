@@ -47,7 +47,7 @@
 ### 1.4 两个顺序陷阱（本方案必须守住，否则线上会卡住）
 
 1. **provision 补齐列会清掉目标的写批准**：`lark/provision.py:474-477` 在"刚刚创建过字段"时把 `confirmed_at` 置空（注释原文：结构变化作废先前的写批准），而写行只在 `confirmed_at is not None` 时才发生，否则 park（`outbox.py:352-361`）。**给执行表加「实测过程」列 = 清掉写批准** → 先入队再加列 = 41 个 job 全被 park，要人工重新确认目标。
-   （**实施期更正**：本文档初稿把原因写成"`target_fingerprint` 含 schema 指纹"，**那是错的**。`TargetDraft.fingerprint` 只是四个身份 token 的拼接 —— `lark/target.py:44-49` 的 `execution_base_token|execution_table_id|bug_base_token|bug_table_id`，**不含 schema**；schema 存在另一个字段 `LarkTarget.schema_fingerprint`（`models.py:368`），由 `target.py:581` 单独赋值。处方没变，错的是原因与引用。）
+   （**实施期更正**：本文档初稿把原因写成"`target_fingerprint` 含 schema 指纹"，**那是错的**。`TargetDraft.fingerprint` 只是四个身份 token 的拼接 —— `lark/target.py:41-46` 的 `IDENTITY_KEYS` 元组、由 `:57-59` 的 `"|".join(...)` 拼出来（`execution_base_token|execution_table_id|bug_base_token|bug_table_id`），**不含 schema**；schema 存在另一个字段 `LarkTarget.schema_fingerprint`（`models.py:368`），由 `target.py:581` 单独赋值。处方没变，错的是原因与引用。**整支终审的修复波补记**：这里先前把 `IDENTITY_KEYS`/拼接引成 `target.py:44-49`——那一段是 `TargetDraft` 的字段区，不是元组、也不是拼接；已按实现者给出的正确一对改成 `:41-46` + `:57-59`。）
    → 唯一正确顺序见 §6：**先 provision 加列 → 重读并重确认 target → 再导入 → 再同步**。
 2. **`_group_case` 用 `GroupCase(**asdict(case))` 直通**（`groups.py:499-505`，另有 `:64`、`:494` 两处 `asdict`）。给 `ParsedCase` 加字段会**直接炸在建组这一步**，必须显式排除。
 
