@@ -885,3 +885,88 @@ ALTER TABLE import_tickets SET (
 
 **这个 checkout 里 Playwright 报的是「编译后」的行号，不是源文件行号。** `--list` 会说 `e2e/lark-check.spec.ts:592`，而源码里这个用例在第 `428` 行（对着 `/tmp/playwright-transform-cache-*/` 的产物核过）。所以：**不要拿 Playwright 输出里的行号去 grep 源码**。我在开工前的基线核对里踩到过一次，Task 7 的实现者独立复现了同一现象。
 
+## 27. v0.1.18：一次导入用例 + 实测结果、第三份提示词、执行表新增必填列「实测过程」（**待发布**）
+
+计划与规格：`docs/superpowers/plans/2026-09-19-import-with-results.md`、`docs/superpowers/specs/2026-09-19-import-with-results-design.md`。分支 `feat/import-with-results`，19 个提交 / 39 个文件（`git diff --shortstat main...HEAD` = **+1716 / −87**）——其中 18 个提交是代码与规格，最后一条就是本节（`git show --numstat` = **85 / 0**，纯追加）。
+
+> **本节交付时，`feat/import-with-results` 尚未合并、尚未打 tag、尚未构建镜像、尚未部署**：最后一个代码提交是 `5343dad`，本节的文档提交落在它之后、就是分支尖端。发版动作照 §4.1（本地：验证 → 打 tag）、§4.2（Actions：镜像发布）、§4.3 / §4.4 的既有流程走，本节不代跑；也**没有"上线记录"表**（没发生的事不写）。下面那条**四步上线顺序**是功能层面的硬要求，与发版流程是两件事，别混。
+
+### 这次改了什么
+
+**把「导入」从只写用例，扩成「用例 + 可选执行结果」。**
+
+1. **12 列导入契约**（前 10 列一个字未动，结果列追加在末尾）：
+   `用例编号,执行顺序,用例标题,所属模块,优先级,执行分层,前置条件,测试数据,执行步骤,预期结果,执行结果,实测过程`
+
+   | 新列 | 别名（进 `ALIASES`） | 取值 |
+   |---|---|---|
+   | `执行结果` | `实测结果` / `本轮实测结果` / `result` | `通过` / `不通过` / `未执行` / 空 |
+   | `实测过程` | `过程记录` / `实测说明` / `evidence` | 自由文本；多行用双引号包格换行 |
+
+   **物化判决只有一处**（spec §4.2，与建组同一个事务）：
+
+   | `执行结果` | attempt | 执行表 |
+   |---|---|---|
+   | `通过` | 建，`source='import'` | 1 行，结果=通过 |
+   | `不通过` | 建；`note` = 实测过程（**空则拒绝该行**） | 1 行 + 缺陷表 1 行（既有逻辑，`outbox.py:421-440`） |
+   | `未执行` | 建 | 1 行，结果=未执行 |
+   | 空 | **不建** | 不出现，只在 `GroupCase.raw` 留档 |
+
+   `阻塞` 不在导入枚举里 → **明文拒绝**（不静默映射成别的值）。
+2. **导入页预览**：检出结果时显示「**检出 N 条执行结果**（其中 M 条仅有过程、将只留档）」+ 勾选框「**一并写入执行结果**」；取消勾选 → 请求体 `import_results=false`，只建用例、不建任何执行记录。
+3. **结果表单**新增「**实测过程**」文本域（`components/OutcomeForm.tsx`，占位文案「观测原文：选择器、实测值、报错原文」），与「控制台输出」**并列两个框、不复用同一个**——过程文本不塞 `控制台`。
+4. **执行历史**：`source='import'` 的行打「**来自导入结果**」徽标（`components/History.tsx:38`）并显示 `evidence`；"哪几行是转译进来的"这条审计线靠 `source` 辨认。
+5. **Lark 执行表**：`RUN_SCHEMA` **末尾追加**文本列「**实测过程**」（前 8 列与参考表逐列一致），同时进 `REQUIRED_RUN_FIELD_TYPES`（`lark/fields.py:60`）；写入侧 `execution_fields` 写 `attempt.evidence or ""`，`控制台` 仍只写 `console_text`，两者不互相顶替。
+6. **第三份提示词**：`docs/AI-CASE-RESULT-PROMPT.md` ≡ `backend/app/prompts/ai-case-results.md`（**逐字节相同**，`cmp` → IDENTICAL，由 `test_shipped_prompts_match_the_docs` 守）；`PROMPTS` 第三条 `id="case-results"`、标题「已有用例 + 实测结果 → 可导入格式」。定位是**转译型**（兄弟 `cases` 是生成型）：照抄不重写、编号/标题/步骤/预期逐字保留、不合并不拆分、不删掉没通过的用例；用法段写明「留空 = 不建执行记录」与字面值 `未执行`（会物化成一条记录）的区别。
+7. **数据与迁移**：迁移 **`0017_attempt_evidence`**（`attempts.evidence` Text NULL，`down_revision="0016_lark_people"`）；`ck_attempts_source` 放开 `import`，单处定义 `LOCAL_SOURCES = ("execution", "import")`（`models.py:181`），五个过滤点改用它（`outbox.py:131/188/530`、`reconcile.py:244/427`）；幂等键 `import:{group_id}:{code}`——**按组作用域**，同一份文件再导一次是合法的新组，与既有"重复文件只 warning、由人决定"的契约一致（用文件哈希作键会撞唯一约束并抛 500，实施期复现过）。
+
+### ⚠️ 功能上线顺序（硬要求，四步，照着做）
+
+1. **在「Lark 检查」页为执行表补齐「实测过程」列**（走既有「修正表头」/ provision）。
+2. **重新读取并确认目标**（指纹随 schema 更新）。
+3. **导入 12 列文件**（勾着「一并写入执行结果」）。
+4. **点「同步」**，把 job 入队。
+
+**为什么不能颠倒**：`target_fingerprint` 里含 schema 指纹（`lark/target.py:185-188`），`run_job` 拿 `job.target_fingerprint != target.target_fingerprint` 判定"目标被换过"并 park（`outbox.py:352-361`）。**先入队、后加列 = 已入队的 job 全部 park，要人工重新指向。** 这个顺序也写进了「Lark 检查」页文案与新提示词的用法段。
+
+### 老 target 的影响（有意破窗，不是 bug）
+
+「实测过程」进了 `REQUIRED_RUN_FIELD_TYPES` 之后，**任何没补齐该列的已确认目标都会报「缺少必填字段「实测过程」」并拒绝建行**，直到 provision 完成。这是**故意的**：不设成必填，写端就会往一张没有该列的表里写这个键，create 直接失败——那时报错发生在同步时、离原因更远。**升级后看到这条红字，按上面第 1、2 步补齐再同步，不要去关校验。**
+
+### 真实的 0918 那批怎么用（50 / 41 / 9）
+
+用法是用户亲口定的，不是设计推的：
+
+1. 导入 **50 条**（**41 条带 `执行结果`、9 条留空**）。
+2. 点「同步」。
+3. Lark 执行表应出现 **41 行**。**那 9 条待复验的完全不出现**——不是"结果为空的行"，是**根本没有行**（`SyncJob.attempt_id` 是 `NOT NULL + UNIQUE`，与 attempt 无关的 Lark 行在这个模型里不可能存在）。
+4. 之后每复验一条，在 qa-board 提交结果并传图，**截图随行写进 Lark 的附件列**（走既有 截图→附件 通道）。
+
+两个既定口径，别当成故障：`日期` = **导入时刻**（不是 0918 的真实执行时间；要真实日期得加第 13 列 `实测时间`，本分支不做）；那 9 条留白在 **Lark 里完全不可见**，只有在 qa-board 网页端能看到 50 条（其中 9 条没结果）。
+
+### 测试保护的真实边界（别把"有测试"说成"自动门"）
+
+在分支尖端 `5343dad` 自己复跑（不是转述兄弟任务的数字）：
+
+| 套件 | 结果 | 在 CI 里吗 |
+|---|---|---|
+| backend `pytest -q` | **543 passed**，2 warnings，35.53s | **在**（`publish.yml` 的 `verify`） |
+| 前端 `vitest run` | **31 files / 343 passed** | **在**（同上，`verify`） |
+| `npm run build`（`tsc -b && vite build`） | 通过 | **在**（同上，`verify`） |
+| e2e `cd frontend && npm run e2e`（`playwright test`） | `import.spec.ts` **2 passed**（desktop / mobile，**手跑**） | **不在** |
+| 勾选框几何断言（≤24px、预览不溢出） | 只活在 `frontend/e2e/import.spec.ts` | **不在** |
+
+- 全仓 `.github/workflows/` 只有 `publish.yml`，**里面搜不到 playwright / e2e** —— e2e 是**发版前手跑**的网，不是自动门。几何断言尤其如此：jsdom 没有布局引擎（`getBoundingClientRect` 全 0），它只能住在 e2e 里，vitest 永远看不到它。
+- 本分支有几条"锁定现状"型验收测试（黄金样例回归、几何断言），天生先绿；实现时各做过一次**临时变异**（改坏样例 / 临时删 `styles.css` 的两条规则）证明它会红，再 `git checkout --` 还原。
+- 顺带一个会骗人的观测（本轮复跑也撞上了）：`playwright test` 对 for 循环里生成的用例报的是**编译后行号**——输出 `import.spec.ts:52:3`，源码里这条用例在**第 30 行**。**别拿 Playwright 输出里的行号去 grep 源码。**
+
+### 已知未决（本分支不修，列出来是为了不自嗨）
+
+1. **`docs/AI-CASE-PROMPT.md:117`（≡ `ai-cases.md`）自相矛盾**：它写「`执行分层` 写中文 → 分层丢失」，而同一份文件 `:41` 写「中文会原样进库」——后者才是真话。**既有缺陷，非本分支引入**；spec §11 与 Task 7 的边界都明令不碰前两份提示词，改了等于把范围扩进无关文档。用户用的是**新的第三份**。
+2. **双别名时报错是英文**：`执行结果` 与 `实测结果`（或 `result`）同时出现 → 整份拒绝，用户看到 `Ambiguous source fields for canonical field result`（`importers/schema.py:199`）。与既有 `ImportErrorDetail` 的英文文案一致；**是否本地化未定**。
+3. **`lark/reconcile.py:427` 的删除路径零覆盖**（`DELETE_REFUSED_MISSING` 这个分支本就零覆盖，非本次引入）。它恰好是被 `LOCAL_SOURCES` 改到的五个点之一。
+4. **`downgrade()` 全局零覆盖**（`backend/tests/` 里 grep `downgrade` 零命中）——包括本次新增的 `0017`：`test_migrations.py` 只验证"空库升级到 head（两次）"与"从 `0004` 升到 head"，**没有一条回退用例**。属仓库既有全局缺口。
+5. **`match_bugs` 的读回问题会被本功能撞得更频繁**（`lark/history.py:276`，**另一个计划的范围**）：本功能给每一条"不通过"按既有逻辑在缺陷表开一行，**但缺陷行归到哪个用例名下，靠的是 `match_bugs` 的启发式**——依次是：显式关联字段（`关联用例` / `用例编号`）→ 备注首行是不是本工具写的 `用例：{code}` 标签 → **描述里"长得像编号"的 token**（`_description_match`）→ 备注里任意位置的标签。第三档是概率游戏：缺陷表里散文行越多，"把某行挂到别的用例下"的机会越大。本功能会**批量**往那张表里加行（一批 41 行进表、失败行各开一条缺陷行），等于把撞上这个既有读回的次数放大。**这不是"与本功能无关"**：本分支按 spec §11 只把本地行白名单从 1 个值扩到 2 个，读回语义一个字没动，修它要单开一次改动。
+
+**回滚**：`0017` 的 `downgrade()` 会先把 `ck_attempts_source` 收紧回 `('execution','reconcile')`——库里只要已有 `import` 行，这一步在 Postgres 上就会因既有行不满足约束而失败；就算成功，紧接着的 `drop_column` 会把所有导入的实测过程原文丢掉。**所以回滚只回镜像、别 downgrade 数据库**：DB 停在 `0017` 对 v0.1.17 的代码是安全的（旧代码不写 `import`，放宽后的 CHECK 仍接受 `execution`/`reconcile`，多出来的列被忽略）。
+
