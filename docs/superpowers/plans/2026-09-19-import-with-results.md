@@ -1532,6 +1532,7 @@ unticking the box keeps the upload cases-only."
 ## Task 9: 验收测试落地（两条集成 + 黄金样例回归 + e2e 几何 + 文档一句）
 
 **为什么是这些**：Task 4/5/6/7/8 的评审各留下一条"缺口真实但当时不在授权范围内"的结论，控制者把它们集中到本任务一次落地。
+**实施期已修正的两处（本文件里的代码片段已同步）**：①`fake_lark.created_records` 混装执行行与缺陷行，计数须按表分类；②提示词里以 12 列表头开头的围栏有三个，第三个是单行片段，筛选须要求"带数据行"。
 **注意**：原计划的"起服务 + 打真 Lark"人工步骤**已改为交付说明里的交接步骤**——往真人 Lark 表里写行是本工作区之外的外部副作用，不由本会话执行。
 
 **Files:**
@@ -1642,10 +1643,14 @@ def test_a_results_file_reaches_lark_and_a_blank_row_does_not(
         assert process_one_job(fake_lark, attempt) == "synced"
 
     written = [record["fields"] for record in fake_lark.created_records]
-    assert len(written) == 2
-    assert sorted(field["用例"] for field in written) == ["B-001 管理员登录", "B-003 邀请码校验"]
-    assert {field["实测过程"] for field in written} == {"1. 实测 1.2s", "1. 实测回显 8+8，设计稿 6+6"}
-    assert all("B-002" not in field["用例"] for field in written)
+    # ``created_records`` 混装执行行与缺陷行：不通过的 B-003 在 run_job 里还会
+    # 另开一条缺陷行，所以这里按表分类计数，而不是假设容器里只有执行行。
+    runs = [field for field in written if "用例" in field]
+    assert len(runs) == 2
+    assert len(written) == 3
+    assert sorted(field["用例"] for field in runs) == ["B-001 管理员登录", "B-003 邀请码校验"]
+    assert {field["实测过程"] for field in runs} == {"1. 实测 1.2s", "1. 实测回显 8+8，设计稿 6+6"}
+    assert all("B-002" not in field["用例"] for field in runs)
 ```
 
 - [ ] **Step 3: 跑它确认失败**
@@ -1689,15 +1694,28 @@ def test_a_hand_run_reaches_lark_with_the_evidence_it_collected(
 `backend/tests/test_ai_prompts.py`：把 `test_prompts_endpoint_serves_both_documents` 重命名为 `..._serves_every_document`，并新增一条——**shipped 提示词里的黄金样例必须永远能过真实解析器**（这是提示词对用户的承诺，此前没有任何测试看住它）：
 
 ```python
-def test_the_shipped_prompt_golden_sample_still_parses():
+FENCE = re.compile(r"```(?:csv)?\n(?P<body>.*?)```", re.DOTALL)
+
+
+def test_every_shipped_sample_in_the_prompt_still_parses():
+    """提示词里同一份样例出现两次（「输出示例」与「黄金样例」），两份都要能被解析。
+
+    注意：以 12 列表头开头的围栏有三个——第三个是「第一行必须是这个表头」的
+    单行片段，不是样例，所以按"必须带数据行"筛掉它。将来再拆出样例会变 3 而报红。
+    """
+
     from app.importers.schema import parse_file
 
-    for prompt in PROMPTS:
-        if prompt["id"] != "case-results":
-            continue
-        block = re.findall(r"```csv\n(.*?)```", prompt["path"].read_text(encoding="utf-8"), re.DOTALL)
-        assert block, "the prompt must ship a csv fence"
-        cases = parse_file("golden.csv", block[-1].encode("utf-8"))
+    prompt = next(entry for entry in PROMPTS if entry["id"] == "case-results")
+    blocks = [
+        match.group("body")
+        for match in FENCE.finditer(prompt["path"].read_text(encoding="utf-8"))
+        if match.group("body").lstrip().startswith("用例编号,")
+        and len(match.group("body").strip().splitlines()) > 1
+    ]
+    assert len(blocks) == 2, "提示词里有两份样例，两份都要能被解析"
+    for index, block in enumerate(blocks, start=1):
+        cases = parse_file(f"sample-{index}.csv", block.encode("utf-8"))
         assert [case.code for case in cases] == ["LOGIN-001", "LOGIN-002", "LOGIN-003"]
         assert [case.result for case in cases] == ["通过", None, "不通过"]
 ```
