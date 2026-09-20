@@ -84,7 +84,7 @@ TEST_DATABASE_URL=postgresql+psycopg://testdeck:testdeck@127.0.0.1:5433/testdeck
 cd ../frontend
 npx vitest run                            # 期望 348 passed（31 文件；v0.1.18 是 344，v0.1.17 是 337）；CI 的 verify 会跑它，见 §26 的抖动修复
 npm run build                             # tsc -b + vite build；产物 index-C7j5CmUn.js / index-D_Bm_Re5.css（v0.1.19），部署后拿来比对
-npx playwright test                       # 期望 37 passed（v0.1.19 实测 37 passed / 11.0s）
+npx playwright test                       # 期望 44 passed（+7 条导入页 AI 卡片布局，见 #1；v0.1.19 实测 37 passed / 11.0s）
 cd ..
 
 # 2) 推送 main 和版本 tag（推送 tag 才会触发镜像发布）
