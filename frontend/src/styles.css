@@ -264,7 +264,12 @@ table { width: 100%; border-collapse: collapse; font-size: .8rem; } th { color: 
 .ai-prompt-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); gap: 12px; margin-top: 14px; }
 .ai-prompt-card { display: flex; flex-direction: column; justify-content: space-between; gap: 12px; padding: 14px; background: #fff; border: 1px solid #e9eced; border-radius: 7px; }
 .ai-prompt-card p { margin: 6px 0 0; color: #687178; font-size: .78rem; }
-.ai-prompt-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+/* Stacked on purpose: the filenames differ in length (AI-CASE-PROMPT.md vs
+   AI-CASEBOOK-PROMPT.md), and the cards get *wider* as the viewport narrows, so
+   a wrapping row made the three cards disagree and then flip as the window was
+   resized. `align-items: flex-start` keeps both buttons at their natural width
+   instead of stretching them over the whole card. */
+.ai-prompt-actions { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
 .reference-gallery { margin-top: 16px; padding: 12px; background: #fbfcfc; border: 1px solid #dde1e3; border-radius: 8px; }
 .reference-gallery-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .reference-gallery-main { display: block; width: 100%; padding: 0; background: none; border: 0; cursor: zoom-in; }
